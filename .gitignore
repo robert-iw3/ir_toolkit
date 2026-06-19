@@ -1,0 +1,40 @@
+# -- Testing artifacts ---------------------------------------------------------
+
+# Python / pytest
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.tox/
+.nox/
+.mypy_cache/
+.ruff_cache/
+
+# Virtualenvs (tests run in /tmp/venv; ignore any local ones too)
+venv/
+.venv/
+env/
+ENV/
+
+# Pester / PowerShell testing
+testResults.xml
+TestResults.xml
+TestResults/
+*.TestResults.xml
+Pester*.xml
+pester*.xml
+coverage.json
+PesterCoverage.xml
+*.coverage.xml
+
+# -- Editor / OS noise ---------------------------------------------------------
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
