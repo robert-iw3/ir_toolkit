@@ -1,0 +1,42 @@
+# Build context for the ephemeral CLOUD-IR image only. Keep it minimal and free of
+# host/Windows material, staged binaries, and any collected evidence.
+
+# VCS / scratch
+.git
+.gitignore
+**/__pycache__
+**/*.pyc
+
+# Collected evidence — never bake a collection into the image
+reports/
+live_test/
+**/Evidence/
+
+# Staged native tool binaries (Windows/host; large; not used by the cloud workflow)
+tools/
+
+# Windows + Linux-HOST workflows (cloud image needs neither)
+playbooks/windows/
+playbooks/linux/
+Invoke-IRCollection.ps1
+Invoke-Eradication.ps1
+Invoke-PrepareDefender.ps1
+Invoke-SignToolkit.ps1
+Build-OfflineToolkit.ps1
+Build-OfflineToolkit-Linux.sh
+Invoke-IRCollection-Linux.sh
+Invoke-Eradication-Linux.sh
+*.ps1
+
+# Tests, planning, and host-specific docs (not needed at runtime)
+test/
+planning/
+errors.txt
+WORK_TODO*.md
+WORKFLOW-WINDOWS.md
+WORKFLOW-LINUX.md
+
+# What the cloud image DOES need is implicitly kept:
+#   Invoke-IRCollection-Cloud.sh, Invoke-Eradication-Cloud.sh,
+#   playbooks/cloud/, playbooks/reporting/, playbooks/lib/,
+#   terraform/, docker/, readme.md, WORKFLOW-CLOUD.md

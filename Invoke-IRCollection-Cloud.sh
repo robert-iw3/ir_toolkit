@@ -26,7 +26,9 @@ CLOUD_DIR="${SCRIPT_DIR}/playbooks/cloud"
 REPORT_PY="${SCRIPT_DIR}/playbooks/reporting/generate_reports.py"
 
 PROVIDER="aws"; TARGET=""; INCIDENT_ID=""; C2_IPS=""; C2_DOMAINS=""
-MGMT_IPS="10.0.0.0/8"; REGION="us-east-1"; CONTAIN=0; SKIP_REPORTS=0
+MGMT_IPS="10.0.0.0/8"; REGION="us-east-1"; CONTAIN=0; SKIP_REPORTS=0; SNAPSHOT_DISKS=0
+EVIDENCE_BUCKET=""; PROVISION_EVIDENCE=0; EVIDENCE_RETENTION_DAYS=365; EVIDENCE_CONTAINER="ir-evidence"
+LLM_REVIEW=0
 OUTPUT_ROOT="${SCRIPT_DIR}"
 
 while [[ $# -gt 0 ]]; do
@@ -39,6 +41,12 @@ while [[ $# -gt 0 ]]; do
         --mgmt-ips)     MGMT_IPS="$2"; shift 2 ;;
         --region)       REGION="$2"; shift 2 ;;
         --contain)      CONTAIN=1; shift ;;
+        --snapshot-disks) SNAPSHOT_DISKS=1; shift ;;               # acquire disk snapshots before eradication (billable)
+        --evidence-bucket) EVIDENCE_BUCKET="$2"; shift 2 ;;        # upload collection to this S3/GCS bucket or Azure storage account
+        --provision-evidence) PROVISION_EVIDENCE=1; shift ;;       # terraform-apply the locked-down storage first
+        --evidence-retention-days) EVIDENCE_RETENTION_DAYS="$2"; shift 2 ;;
+        --evidence-container) EVIDENCE_CONTAINER="$2"; shift 2 ;;  # Azure container name
+        --llm-review)   LLM_REVIEW=1; shift ;;                     # AI incident review via the provider's native LLM
         --skip-reports) SKIP_REPORTS=1; shift ;;
         --output-root)  OUTPUT_ROOT="$2"; shift 2 ;;
         -h|--help)      grep '^#' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
@@ -65,6 +73,7 @@ export IR_INCIDENT_ID="$INCIDENT_ID" IR_CLOUD_PROVIDER="$PROVIDER" IR_TARGET="$T
 export IR_C2_IPS="$C2_IPS" IR_C2_DOMAINS="$C2_DOMAINS" IR_MGMT_IPS="$MGMT_IPS"
 export IR_AWS_REGION="$REGION" IR_AZURE_SUBSCRIPTION="${IR_AZURE_SUBSCRIPTION:-}"
 export IR_AZURE_RESOURCE_GROUP="${IR_AZURE_RESOURCE_GROUP:-}" IR_GCP_PROJECT="${IR_GCP_PROJECT:-}"
+export IR_SNAPSHOT_DISKS="$SNAPSHOT_DISKS"
 
 run_phase() {  # name, command...
     local name="$1"; shift
@@ -78,6 +87,10 @@ log "==================================================="
 log " CLOUD IR COLLECTION | provider=${PROVIDER} | target=${TARGET}"
 log " incident=${INCIDENT_ID} | output -> ${OUT_DIR}"
 log "==================================================="
+
+# Capture clock/timezone context (cloud telemetry is UTC; this records the responder basis).
+CLOCK_PY="${SCRIPT_DIR}/playbooks/reporting/clock_context.py"
+[[ -f "$CLOCK_PY" ]] && "$PY" "$CLOCK_PY" --host-folder "$OUT_DIR" --incident-id "$INCIDENT_ID" --quiet >>"$RUN_LOG" 2>&1 || true
 
 # --- Phase 0: containment (optional; mutates cloud infra) ---------------------
 if [[ $CONTAIN -eq 1 ]]; then
@@ -115,6 +128,22 @@ if [[ $SKIP_REPORTS -eq 0 && -f "$REPORT_PY" ]]; then
     log "  Reports -> Incident_Report.md, Attack_Graph.md, Retrospective.md, IOCs.json"
 fi
 
+# --- AI incident review via the provider's NATIVE LLM (optional) --------------
+# aws -> Bedrock (Claude), azure -> Azure OpenAI, gcp -> Vertex (Gemini). Advisory only.
+if [[ $LLM_REVIEW -eq 1 ]]; then
+    LLM_PY="${SCRIPT_DIR}/playbooks/reporting/llm_incident_review.py"
+    case "$PROVIDER" in
+        aws)   LLM_ARGS=(--provider bedrock --region "$REGION") ;;
+        gcp)   LLM_ARGS=(--provider vertex --gcp-project "${IR_GCP_PROJECT:-}") ;;
+        azure) LLM_ARGS=(--provider azure-openai) ;;   # set IR_LLM_BASE_URL + IR_LLM_MODEL (deployment)
+        *)     LLM_ARGS=(--provider anthropic) ;;
+    esac
+    if [[ -f "$LLM_PY" ]]; then
+        run_phase "LLM_Review" "$PY" "$LLM_PY" --host-folder "$OUT_DIR" "${LLM_ARGS[@]}" --quiet
+        log "  AI review -> LLM_Incident_Review.md (advisory, source=LLM)"
+    fi
+fi
+
 # --- Manifest -----------------------------------------------------------------
 "$PY" - "$OUT_DIR" "$RUN_LOG" "$INCIDENT_ID" "$HOST_LABEL" "$RUN_STAMP" <<'PYMAN' >>"$RUN_LOG" 2>&1 || true
 import json, os, hashlib, sys, datetime
@@ -141,12 +170,67 @@ with open(os.path.join(out_dir, f"_manifest_{stamp}.json"), "w") as fh:
 print(f"manifest: {len(arts)} artifact(s)")
 PYMAN
 
+# --- Chain of custody: seal + sign the manifest (tamper-evident) ---------------
+CUSTODY_PY="${SCRIPT_DIR}/playbooks/reporting/evidence_custody.py"
+if [[ -f "$CUSTODY_PY" ]]; then
+    "$PY" "$CUSTODY_PY" --host-folder "$OUT_DIR" --incident-id "$INCIDENT_ID" \
+        --platform cloud --quiet >>"$RUN_LOG" 2>&1 \
+        && log "  Custody sealed -> _custody_*.json" || true
+fi
+
 # --- Status contract ----------------------------------------------------------
 TP_COUNT=0
 if [[ -f "$COMBINED" ]]; then
     TP_COUNT="$("$PY" -c "import json,sys;d=json.load(open(sys.argv[1],encoding='utf-8-sig'));print(sum(1 for f in d if f.get('Verdict') in ('True Positive','Likely True Positive')))" "$COMBINED" 2>/dev/null || echo 0)"
 fi
 OVERALL="$(ir_status_write "${OUT_DIR}/_status.json" "$INCIDENT_ID" "$HOST_LABEL" "cloud" "$TP_COUNT")"
+
+# --- Phase 6: ship the full collection to locked-down evidence storage ---------
+# Collections can be large; this pushes the per-host folder into the WORM/encrypted
+# bucket provisioned by terraform/<provider>/ (see terraform/README.md).
+if [[ -n "${EVIDENCE_BUCKET}" ]]; then
+    if [[ "${PROVISION_EVIDENCE}" -eq 1 ]]; then
+        TF_DIR="${SCRIPT_DIR}/terraform/${PROVIDER}"
+        if command -v terraform >/dev/null 2>&1 && [[ -d "$TF_DIR" ]]; then
+            log "==== PHASE: Provision evidence storage (terraform/${PROVIDER}) ===="
+            terraform -chdir="$TF_DIR" init -input=false >>"$RUN_LOG" 2>&1 || true
+            case "$PROVIDER" in
+                aws)   terraform -chdir="$TF_DIR" apply -auto-approve -input=false \
+                           -var "bucket_name=${EVIDENCE_BUCKET}" -var "region=${REGION}" \
+                           -var "retention_days=${EVIDENCE_RETENTION_DAYS}" >>"$RUN_LOG" 2>&1 \
+                           || log "  terraform apply failed (see runtime log)" ;;
+                gcp)   terraform -chdir="$TF_DIR" apply -auto-approve -input=false \
+                           -var "bucket_name=${EVIDENCE_BUCKET}" -var "project_id=${IR_GCP_PROJECT}" \
+                           -var "retention_days=${EVIDENCE_RETENTION_DAYS}" >>"$RUN_LOG" 2>&1 \
+                           || log "  terraform apply failed (see runtime log)" ;;
+                azure) terraform -chdir="$TF_DIR" apply -auto-approve -input=false \
+                           -var "storage_account_name=${EVIDENCE_BUCKET}" \
+                           -var "container_name=${EVIDENCE_CONTAINER}" \
+                           -var "retention_days=${EVIDENCE_RETENTION_DAYS}" >>"$RUN_LOG" 2>&1 \
+                           || log "  terraform apply failed (see runtime log)" ;;
+            esac
+        else
+            log "--provision-evidence set but terraform or terraform/${PROVIDER}/ not available; using existing bucket."
+        fi
+    fi
+
+    log "==== PHASE: Evidence upload -> locked-down ${PROVIDER} storage ===="
+    case "$PROVIDER" in
+        aws)   if aws s3 cp --recursive "${OUT_DIR}" "s3://${EVIDENCE_BUCKET}/${HOST_LABEL}/" \
+                   --region "${REGION}" >>"$RUN_LOG" 2>&1; then
+                   log "  Uploaded -> s3://${EVIDENCE_BUCKET}/${HOST_LABEL}/"
+               else log "  Evidence upload failed (see runtime log)"; fi ;;
+        gcp)   if gcloud storage cp -r "${OUT_DIR}" "gs://${EVIDENCE_BUCKET}/${HOST_LABEL}/" \
+                   >>"$RUN_LOG" 2>&1; then
+                   log "  Uploaded -> gs://${EVIDENCE_BUCKET}/${HOST_LABEL}/"
+               else log "  Evidence upload failed (see runtime log)"; fi ;;
+        azure) if az storage blob upload-batch --destination "${EVIDENCE_CONTAINER}" \
+                   --source "${OUT_DIR}" --account-name "${EVIDENCE_BUCKET}" \
+                   --auth-mode login >>"$RUN_LOG" 2>&1; then
+                   log "  Uploaded -> ${EVIDENCE_BUCKET}/${EVIDENCE_CONTAINER}/"
+               else log "  Evidence upload failed (see runtime log)"; fi ;;
+    esac
+fi
 
 ART_COUNT="$(find "$OUT_DIR" -type f | wc -l)"
 log "==================================================="

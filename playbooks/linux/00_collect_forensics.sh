@@ -106,6 +106,10 @@ find /usr /opt /var -perm -o+w -type f 2>/dev/null \
 # -- Authentication and logs ---------------------------------------------------
 tail -500 /var/log/auth.log                  > "${WORK_DIR}/auth_log.txt"            2>/dev/null || \
     journalctl -u sshd -n 500 --no-pager     >> "${WORK_DIR}/auth_log.txt"           2>/dev/null || true
+# Structured journal export (consumed by journal_analysis.py for offline re-analysis).
+# Bounded by time + line cap so a multi-GB journal can't stall collection.
+journalctl -o json --no-pager --since "14 days ago" -n 300000 \
+                                             > "${WORK_DIR}/journal.json"            2>/dev/null || true
 last -500 -F                                 > "${WORK_DIR}/last_logins.txt"         2>/dev/null || true
 lastb -100                                   > "${WORK_DIR}/failed_logins.txt"       2>/dev/null || true
 who                                          > "${WORK_DIR}/current_sessions.txt"    2>/dev/null || true

@@ -27,7 +27,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HUNT_DIR="${SCRIPT_DIR}/playbooks/linux/threat_hunting"
 FORENSICS_SCRIPT="${SCRIPT_DIR}/playbooks/linux/00_collect_forensics.sh"
 
-OUTPUT_ROOT="${SCRIPT_DIR}"      # artifact collection lives in the project root
+OUTPUT_ROOT="${SCRIPT_DIR}/reports"   # findings land in reports/<hostname>/ (parity with Windows)
 INCIDENT_ID=""
 SKIP_FORENSICS=0
 SKIP_HUNT=0
@@ -81,6 +81,10 @@ log " output -> ${OUT_DIR}"
 [[ "$(id -u)" -ne 0 ]] && log " NOTE: not root — some artifacts will be limited."
 log "==================================================="
 
+# Capture host clock/timezone context up front (for timeline normalization + skew).
+CLOCK_PY="${SCRIPT_DIR}/playbooks/reporting/clock_context.py"
+[[ -f "$CLOCK_PY" ]] && "$PY" "$CLOCK_PY" --host-folder "$OUT_DIR" --incident-id "$INCIDENT_ID" --quiet >>"$RUN_LOG" 2>&1 || true
+
 # --- Phase 1: forensics snapshot (read-only system state) ---------------------
 if [[ $SKIP_FORENSICS -eq 0 ]]; then
     log "==== PHASE: Forensics ===="
@@ -131,12 +135,20 @@ fi
 if [[ $SKIP_HUNT -eq 0 ]]; then
     run_phase "EDR_Hunt" "$PY" "${HUNT_DIR}/edr_hunt.py" --report-dir "$OUT_DIR" --stamp "$RUN_STAMP" --quiet
     run_phase "RemoteAccess" "$PY" "${HUNT_DIR}/remote_access_triage.py" --report-dir "$OUT_DIR" --stamp "$RUN_STAMP" --quiet
+    # journald -> findings (brute force, sudo abuse, new accounts, log/MAC tamper).
+    # Reads forensics/journal.json if present, else live journalctl; never fatal.
+    run_phase "JournalAnalysis" "$PY" "${HUNT_DIR}/journal_analysis.py" --report-dir "$OUT_DIR" --stamp "$RUN_STAMP" --live --quiet
+    # container runtime + kubernetes workload hunt (privileged/escape/RBAC). Best-effort:
+    # skips cleanly when no docker/podman/kubectl is present.
+    run_phase "ContainerHunt" "$PY" "${HUNT_DIR}/container_hunt.py" --report-dir "$OUT_DIR" --stamp "$RUN_STAMP" --live --quiet
 
     EDR_JSON="${OUT_DIR}/EDR_Report_${RUN_STAMP}.json"
     RA_JSON="${OUT_DIR}/RemoteAccess_Findings_${RUN_STAMP}.json"
+    JOURNAL_JSON="${OUT_DIR}/Journal_Findings_${RUN_STAMP}.json"
+    CONTAINER_JSON="${OUT_DIR}/Container_Findings_${RUN_STAMP}.json"
     COMBINED="${OUT_DIR}/Combined_Findings_${RUN_STAMP}.json"
 
-    "$PY" - "$EDR_JSON" "$RA_JSON" "$COMBINED" <<'PYMERGE' >>"$RUN_LOG" 2>&1 || true
+    "$PY" - "$EDR_JSON" "$RA_JSON" "$JOURNAL_JSON" "$CONTAINER_JSON" "$COMBINED" <<'PYMERGE' >>"$RUN_LOG" 2>&1 || true
 import json, sys
 merged = []
 for p in sys.argv[1:-1]:
@@ -208,6 +220,14 @@ with open(os.path.join(out_dir, f"_manifest_{stamp}.json"), "w") as fh:
     json.dump(man, fh, indent=2)
 print(f"manifest: {len(arts)} artifact(s)")
 PYMAN
+
+# --- Chain of custody: seal + sign the manifest (tamper-evident) ---------------
+CUSTODY_PY="${SCRIPT_DIR}/playbooks/reporting/evidence_custody.py"
+if [[ -f "$CUSTODY_PY" ]]; then
+    "$PY" "$CUSTODY_PY" --host-folder "$OUT_DIR" --incident-id "$INCIDENT_ID" \
+        --platform linux --quiet >>"$RUN_LOG" 2>&1 \
+        && log "  Custody sealed -> _custody_*.json (set IR_SIGNING_GPG_KEY / IR_CUSTODY_HMAC_KEY to sign)" || true
+fi
 
 # --- Status contract: uniform _status.json for SOAR gating --------------------
 TP_COUNT=0
