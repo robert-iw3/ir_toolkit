@@ -64,7 +64,7 @@ cat /etc/crontab                             >> "${WORK_DIR}/cron_files.txt"    
 # Systemd units — all states, highlight non-standard paths
 systemctl list-units --all --no-pager        > "${WORK_DIR}/systemd_units.txt"       2>/dev/null || true
 systemctl list-unit-files --no-pager         > "${WORK_DIR}/systemd_unit_files.txt"  2>/dev/null || true
-find /etc/systemd /usr/local/lib/systemd /home -name '*.service' -o -name '*.timer' 2>/dev/null \
+find /etc/systemd /usr/local/lib/systemd /home -name '*.service' -o -name '*.timer'  2>/dev/null \
                                              > "${WORK_DIR}/custom_systemd_files.txt"             || true
 
 # Init / rc scripts
@@ -86,7 +86,7 @@ while IFS= read -r f; do
 done > "${WORK_DIR}/shell_init_files.txt" 2>/dev/null || true
 
 # LD_PRELOAD / shared library hijacking
-cat /etc/ld.so.preload                       > "${WORK_DIR}/ld_so_preload.txt"       2>/dev/null || true
+cat /etc/ld.so.preload                       > "${WORK_DIR}/ld_so_preload.txt"        2>/dev/null || true
 ldconfig -p                                  > "${WORK_DIR}/ldconfig_cache.txt"       2>/dev/null || true
 
 # SUID/SGID binaries (quick check — compare with baseline in full investigation)

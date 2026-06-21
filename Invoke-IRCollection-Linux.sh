@@ -18,8 +18,11 @@
 # Usage:
 #   ./Invoke-IRCollection-Linux.sh [--output-root DIR] [--incident-id ID]
 #                                  [--skip-forensics] [--skip-hunt] [--deep]
+#                                  [--capture-memory [--memory-output /path/on/big/disk]]
 # Run as root for full visibility (shadow, all /proc, every cron); degrades
-# gracefully as a normal user.
+# gracefully as a normal user. --capture-memory pre-flights free space and auto-
+# redirects to a local volume (or --memory-output) when the output drive is too small;
+# analyze the image off-host with playbooks/linux/threat_hunting/analyze_memory_linux.py.
 # ==============================================================================
 set -uo pipefail
 
@@ -34,6 +37,8 @@ SKIP_HUNT=0
 SKIP_REPORTS=0
 DEEP=0
 CAPTURE_MEMORY=0
+MEMORY_OUTPUT=""        # explicit path for the memory image (e.g. a local disk with space)
+MEM_COMPRESS=0          # avml snappy compression (smaller image; needs avml-convert to analyze)
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -42,7 +47,9 @@ while [[ $# -gt 0 ]]; do
         --skip-forensics) SKIP_FORENSICS=1; shift ;;
         --skip-hunt)     SKIP_HUNT=1; shift ;;
         --skip-reports)  SKIP_REPORTS=1; shift ;;
-        --capture-memory) CAPTURE_MEMORY=1; shift ;;   # needs STAGED tools/avml
+        --capture-memory) CAPTURE_MEMORY=1; shift ;;     # needs STAGED tools/avml
+        --memory-output) MEMORY_OUTPUT="$2"; shift 2 ;;  # redirect image to a local volume with space
+        --compress)      MEM_COMPRESS=1; shift ;;        # avml snappy compression (smaller image)
         --deep)          DEEP=1; shift ;;
         -h|--help)       grep '^#' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "Unknown option: $1" >&2; exit 2 ;;
@@ -112,10 +119,59 @@ if [[ $SKIP_FORENSICS -eq 0 ]]; then
         AVML="${SCRIPT_DIR}/tools/avml"
         if [[ -x "$AVML" ]]; then
             log "==== PHASE: Memory (staged avml) ===="
-            if "$AVML" "${OUT_DIR}/memory_${HOSTNAME_S}.raw" >>"$RUN_LOG" 2>&1; then
-                log "  Memory image -> memory_${HOSTNAME_S}.raw"; ir_record "Memory" success
+            free_bytes() { df -P -B1 "$1" 2>/dev/null | awk 'NR==2{print $4}'; }
+            RAM_KB="$(awk '/^MemTotal:/{print $2}' /proc/meminfo 2>/dev/null || echo 0)"
+            RAM_BYTES=$(( RAM_KB * 1024 ))
+            AVML_ARGS=()
+            if [[ $MEM_COMPRESS -eq 1 ]]; then
+                AVML_ARGS+=(--compress)
+                MEM_EXT=".lime.compressed"
+                REQ_BYTES=$(( RAM_BYTES * 6 / 10 ))   # snappy ~0.6x RAM (conservative estimate)
+                MIN=$(( 1024 * 1024 ))                # 1 MiB floor (compressed can be small on idle RAM)
             else
-                log "  avml capture returned non-zero."; ir_record "Memory" failed
+                MEM_EXT=".raw"
+                REQ_BYTES=$(( RAM_BYTES + RAM_BYTES / 10 ))   # RAM * 1.1 headroom
+                MIN=$(( RAM_BYTES / 10 ))             # sanity floor: >= 10% of RAM
+            fi
+
+            MEM_PATH="${MEMORY_OUTPUT:-${OUT_DIR}/memory_${HOSTNAME_S}${MEM_EXT}}"
+            # If --memory-output is a directory (exists as one, or ends with /), drop the
+            # image inside it rather than treating it as a filename.
+            if [[ -n "$MEMORY_OUTPUT" && ( -d "$MEMORY_OUTPUT" || "$MEMORY_OUTPUT" == */ ) ]]; then
+                MEM_PATH="${MEMORY_OUTPUT%/}/memory_${HOSTNAME_S}${MEM_EXT}"
+            fi
+            MEM_DIR="$(dirname "$MEM_PATH")"; mkdir -p "$MEM_DIR" 2>/dev/null || true
+            AVAIL="$(free_bytes "$MEM_DIR")"; AVAIL="${AVAIL:-0}"
+
+            # Auto-redirect only when the analyst did NOT pin a path and the target is too small.
+            if [[ -z "$MEMORY_OUTPUT" && $RAM_BYTES -gt 0 && $AVAIL -lt $REQ_BYTES ]]; then
+                log "  Output volume has $((AVAIL/1024/1024)) MiB free; image needs ~$((REQ_BYTES/1024/1024)) MiB$([[ $MEM_COMPRESS -eq 1 ]] && echo ' (compressed est.)')."
+                for cand in /var/tmp /tmp "${HOME:-/root}" /root; do
+                    [[ -d "$cand" ]] || continue
+                    cfree="$(free_bytes "$cand")"; cfree="${cfree:-0}"
+                    if [[ $cfree -ge $REQ_BYTES ]]; then
+                        MEM_PATH="${cand%/}/memory_${HOSTNAME_S}${MEM_EXT}"
+                        log "  Auto-redirecting capture to local volume: ${MEM_PATH} ($((cfree/1024/1024)) MiB free)."
+                        break
+                    fi
+                done
+            fi
+            MEM_DIR="$(dirname "$MEM_PATH")"; AVAIL="$(free_bytes "$MEM_DIR")"; AVAIL="${AVAIL:-0}"
+
+            if [[ $RAM_BYTES -gt 0 && $AVAIL -lt $REQ_BYTES ]]; then
+                log "  SKIP: not enough space for the memory image (need ~$((REQ_BYTES/1024/1024)) MiB, have $((AVAIL/1024/1024)) MiB on $MEM_DIR)."
+                log "  Use --compress (smaller) and/or --memory-output /path/on/larger/disk."
+                ir_record "Memory" skipped
+            elif "$AVML" "${AVML_ARGS[@]}" "$MEM_PATH" >>"$RUN_LOG" 2>&1; then
+                SZ="$(stat -c %s "$MEM_PATH" 2>/dev/null || echo 0)"
+                if [[ "$SZ" -ge "$MIN" && "$SZ" -gt 0 ]]; then
+                    log "  Memory image -> ${MEM_PATH} ($((SZ/1024/1024)) MiB$([[ $MEM_COMPRESS -eq 1 ]] && echo ', snappy — avml-convert to analyze'))"; ir_record "Memory" success
+                else
+                    mv -f "$MEM_PATH" "$(dirname "$MEM_PATH")/INVALID_$(basename "$MEM_PATH")" 2>/dev/null || true
+                    log "  Memory capture INVALID (size $((SZ/1024/1024)) MiB too small) — renamed INVALID_."; ir_record "Memory" failed
+                fi
+            else
+                log "  avml capture returned non-zero (permissions/disk/kernel?). See runtime log."; ir_record "Memory" failed
             fi
         else
             log "  --capture-memory set but tools/avml not staged (run Build-OfflineToolkit-Linux.sh --include-memory)."
@@ -194,6 +250,12 @@ else
 fi
 
 # --- Manifest: SHA256 of every collected artifact -----------------------------
+# Heads-up: a large memory image makes the manifest/custody seal slow (it hashes
+# every artifact). On a USB target, hashing a 20+ GB .raw can take several minutes.
+BIGGEST="$(find "$OUT_DIR" -maxdepth 1 -type f -printf '%s\n' 2>/dev/null | sort -nr | head -1)"
+if [[ -n "${BIGGEST:-}" && "$BIGGEST" -gt $((4 * 1024 * 1024 * 1024)) ]]; then
+    log "==== PHASE: Manifest + Custody (hashing $((BIGGEST / 1024 / 1024 / 1024))+ GB image — this can take a few minutes) ===="
+fi
 "$PY" - "$OUT_DIR" "$RUN_LOG" "$INCIDENT_ID" "$HOSTNAME_S" "$RUN_STAMP" <<'PYMAN' >>"$RUN_LOG" 2>&1 || true
 import json, os, hashlib, sys, datetime
 out_dir, run_log, incident, host, stamp = sys.argv[1:6]

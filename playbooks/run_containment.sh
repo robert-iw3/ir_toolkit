@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # IR Toolkit — Playbook Containment Runner
-# Executed inside the n8n container. Runs containment and eradication playbooks
+# Runs containment and eradication playbooks
 # against the affected endpoint or cloud workload.
-# Returns a JSON result summary to stdout for n8n to parse.
+# Returns a JSON result summary to stdout.
 #
 # Usage:
 #   run_containment.sh <TARGET> <INCIDENT_ID> <PLATFORM> \

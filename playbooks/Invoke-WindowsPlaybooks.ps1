@@ -64,13 +64,13 @@ function Write-Log { param([string]$M,[string]$C='Gray')
 
 # Canonical phase order + script mapping. (00 is param-based; 01-06 read IR_* env.)
 $PhaseDefs = [ordered]@{
-    Collect              = @{ Order=0; Script='windows\00_Collect-Forensics.ps1'; Destructive=$false }
-    Contain              = @{ Order=1; Script='windows\01_Contain-Host.ps1';      Destructive=$true  }
-    EradicateProcess     = @{ Order=2; Script='windows\02_Eradicate-Process.ps1'; Destructive=$true  }
+    Collect              = @{ Order=0; Script='windows\00_Collect-Forensics.ps1';     Destructive=$false }
+    Contain              = @{ Order=1; Script='windows\01_Contain-Host.ps1';          Destructive=$true  }
+    EradicateProcess     = @{ Order=2; Script='windows\02_Eradicate-Process.ps1';     Destructive=$true  }
     EradicatePersistence = @{ Order=3; Script='windows\03_Eradicate-Persistence.ps1'; Destructive=$true }
-    BlockC2              = @{ Order=4; Script='windows\04_Block-C2.ps1';           Destructive=$true  }
-    Acquire              = @{ Order=5; Script='windows\05_Acquire-Artifact.ps1';   Destructive=$false }
-    Restore              = @{ Order=6; Script='windows\06_Restore-Host.ps1';       Destructive=$true  }
+    BlockC2              = @{ Order=4; Script='windows\04_Block-C2.ps1';              Destructive=$true  }
+    Acquire              = @{ Order=5; Script='windows\05_Acquire-Artifact.ps1';      Destructive=$false }
+    Restore              = @{ Order=6; Script='windows\06_Restore-Host.ps1';          Destructive=$true  }
 }
 
 if (-not $Phases) {

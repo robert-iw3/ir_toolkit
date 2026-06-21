@@ -294,20 +294,27 @@ powershell.exe -ExecutionPolicy Bypass -NoProfile -File .\Invoke-IRCollection.ps
 ## Step 1b — Memory analysis (run on the ANALYST machine after copying evidence back)
 
 Memory analysis runs **off the target**. Copy the collected `memory_<HOST>.*` from
-`reports\<HOST>\` back to your analyst machine, then run:
+`reports\<HOST>\` back to your analyst machine, then run `Analyze-Memory.ps1`. It **routes by
+image type**:
+
+| Captured image | Default tool | Engine | Detection logic |
+|---|---|---|---|
+| `.aff4` (go-winpmem — the **default** capture) | **MemProcFS** | `memory_forensic.py` via `vmmpyc` (no Dokany/WinFsp) | 11 modules (injection, hidden procs, C2, LOLBin, BYOVD, Run keys…) |
+| `.raw` / `.mem` / `.dmp` (winpmem/FTK or an external image) | Volatility 3 (`vol.exe`) | Volatility 3 plugins | fallback path |
+
+Because the collector defaults to **go-winpmem (AFF4)**, the **primary** analysis engine is
+**MemProcFS** — Volatility 3 is only used for raw/dmp images.
 
 ```powershell
-# Stage Volatility 3 on the analyst machine (internet required — run once)
-.\Build-OfflineToolkit.ps1 -IncludeVolatility
+# Default (AFF4) path — stage MemProcFS (+ -IncludeMemory to also stage the capture tools)
+.\Build-OfflineToolkit.ps1 -IncludeMemProcFS
 
-# If the analyst machine is also air-gapped, pre-stage the Windows symbol pack (~500 MB)
-.\Build-OfflineToolkit.ps1 -IncludeVolatility -StageSymbols
-
-# Run memory analysis against the copied image
+# Analyze the captured AFF4 image (MemProcFS, no internet symbols required)
 .\playbooks\windows\threat_hunting\Analyze-Memory.ps1 `
-    -ImagePath ".\reports\HOSTNAME\memory_HOSTNAME.raw" -OutputDir ".\reports\HOSTNAME"
+    -ImagePath ".\reports\HOSTNAME\memory_HOSTNAME.aff4" -OutputDir ".\reports\HOSTNAME"
 
-# Skip specific plugins (e.g. skip hashdump if LSASS was not accessible)
+# Fallback only — RAW/MEM/DMP images use Volatility 3 (needs MS symbols on first run):
+.\Build-OfflineToolkit.ps1 -IncludeVolatility            # add -StageSymbols if analyst box is air-gapped
 .\playbooks\windows\threat_hunting\Analyze-Memory.ps1 `
     -ImagePath ".\reports\HOSTNAME\memory_HOSTNAME.raw" -SkipPlugins "hashdump,ldrmodules"
 ```
@@ -324,9 +331,10 @@ $memory   = Get-Content ".\reports\HOSTNAME\Memory_Findings_*.json"   | ConvertF
     -ReportPath ".\reports\HOSTNAME\Combined_Findings_WithMemory.json" -Live
 ```
 
-**Why it runs separately:** the target is air-gapped; Volatility 3 needs internet to fetch
-Windows debug symbols on first run. Separating analysis from collection keeps the offline host
-offline and lets the analyst machine be set up in advance.
+**Why it runs separately:** memory analysis is resource-heavy and kept off the (air-gapped)
+target. The default MemProcFS/AFF4 path runs fully offline; only the Volatility 3 fallback
+needs internet on first run (to fetch Windows debug symbols, unless pre-staged with
+`-StageSymbols`). Separating analysis from collection keeps the offline host offline.
 
 > **IMPORTANT:** Only analyze an image whose filename does NOT start with `INVALID_`. The
 > collector renames truncated/failed captures to `INVALID_memory_<HOST>.*`.

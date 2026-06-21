@@ -8,7 +8,7 @@ suggestions for resolving Indeterminate findings. Advisory ONLY — it never ove
 the adjudicator's verdict ladder; every output is flagged source=LLM.
 
 Configurable backend — frontier OR local, no SDK dependency (stdlib urllib):
-  --provider anthropic            Claude Messages API (frontier; default model claude-sonnet-4-6)
+  --provider anthropic            Claude Messages API (frontier; default model claude-opus-4-8)
   --provider openai               OpenAI Chat Completions (frontier)
   --provider openai-compatible    ANY OpenAI-compatible /chat/completions endpoint:
                                   vLLM, Ollama, LM Studio, llama.cpp server, OpenRouter,
@@ -27,7 +27,7 @@ REDACTED to placeholders before the prompt leaves the host. Use --no-redact for 
 local model you trust. The reversible map is written to the local output, never sent.
 
 Usage:
-  llm_incident_review.py --host-folder reports/<host> --provider anthropic --model claude-sonnet-4-6
+  llm_incident_review.py --host-folder reports/<host> --provider anthropic --model claude-opus-4-8
   llm_incident_review.py --host-folder reports/<host> --provider openai-compatible \
       --base-url http://localhost:11434/v1 --model llama3.1 --no-redact
 Writes LLM_Incident_Review.md + LLM_Incident_Review.json into the host folder.

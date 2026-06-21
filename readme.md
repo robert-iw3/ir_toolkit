@@ -100,7 +100,10 @@ Run on an internet-connected machine before deploying to an isolated host. Both 
 a sha256 `tools/STAGED_MANIFEST.json`. The core workflow runs offline without any of these;
 they only enable optional depth (memory capture, YARA, extended persistence).
 
-- **Windows** — `Build-OfflineToolkit.ps1 [-IncludeMemory] [-IncludeYaraRules] [-IncludeVolatility] [-StageSymbols]`
-- **Linux** — `Build-OfflineToolkit-Linux.sh [--include-memory] [--include-cloud] [--check-only]`
+- **Windows** — `Build-OfflineToolkit.ps1 [-IncludeMemory] [-IncludeYaraRules] [-IncludeMemProcFS] [-IncludeVolatility] [-StageSymbols]`
+  (memory analysis: **MemProcFS** for the default AFF4 capture; Volatility 3 only for raw/dmp images)
+- **Linux** — `Build-OfflineToolkit-Linux.sh [--include-memory] [--include-cloud] [--stage-symbols] [--check-only]`
+  (memory analysis: **Volatility 3** wheels + `dwarf2json` + kernel ISF, vendored for offline use)
 
-See each platform's workflow doc for the full build and deployment steps.
+See each platform's workflow doc and [DEPENDENCIES.md](DEPENDENCIES.md) for the full dependency
+inventory and deployment steps.

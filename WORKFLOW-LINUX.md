@@ -129,8 +129,14 @@ python3 playbooks/linux/threat_hunting/journal_analysis.py \
 ```bash
 chmod +x ./Build-OfflineToolkit-Linux.sh
 ./Build-OfflineToolkit-Linux.sh                  # core tools + LOLDrivers cache
-./Build-OfflineToolkit-Linux.sh --include-memory # + AVML memory acquisition
+./Build-OfflineToolkit-Linux.sh --include-memory # + avml/avml-convert/dwarf2json + volatility3 wheels
+./Build-OfflineToolkit-Linux.sh --stage-symbols --symbols-kernel <ver>   # bake kernel ISF for offline analysis
+./Build-OfflineToolkit-Linux.sh --check-only --include-memory --include-cloud   # inventory only
 ```
+
+Every dependency — staged binary, vendored wheel, or assumed-present OS tool — is recorded in
+`tools/STAGED_MANIFEST.json`. See [DEPENDENCIES.md](DEPENDENCIES.md) for the full inventory
+(the toolkit's own code is **stdlib + bash only**; Volatility 3 is the sole vendored runtime).
 
 ## Step 1 — Collection (run on TARGET as root)
 
@@ -160,6 +166,85 @@ sudo ./Invoke-IRCollection-Linux.sh \
 | `--skip-reports` | Skip automated reports |
 | `--incident-id ID` | Override auto-generated ID |
 | `--output-root DIR` | Write to a specific directory (default `reports/`) |
+
+## Memory capture + analysis
+
+**Capture** (during collection) uses staged `tools/avml` (physical RAM only, compact). It
+pre-flights free space — `RAM × 1.1` — and, when the output drive is too small (e.g. a 32 GB
+USB for 24 GB RAM), **auto-redirects to a local volume** (`/var/tmp`, `/tmp`, `$HOME`) or an
+explicit `--memory-output`; a failed/truncated capture is renamed `INVALID_…` and never analyzed.
+
+```bash
+./Build-OfflineToolkit-Linux.sh --include-memory                 # stage tools/avml (once)
+sudo ./Invoke-IRCollection-Linux.sh --deep --capture-memory      # -> reports/<host>/ (auto-redirects if too small)
+sudo ./Invoke-IRCollection-Linux.sh --deep --capture-memory --compress          # snappy (~half size)
+sudo ./Invoke-IRCollection-Linux.sh --deep --capture-memory --memory-output /mnt/bigdisk   # pin a volume
+```
+
+`--compress` (snappy) roughly halves the image — use it when the output drive is tight. A
+compressed image is `…​.lime.compressed`; the analyzer decompresses it automatically via
+`avml-convert` (stage it from the avml release).
+
+**Analysis** runs **off the target** (analyst machine) — the Volatility-3-Linux counterpart of
+the Windows `Analyze-Memory.ps1`. Unlike Windows (auto-fetched PDBs), Linux needs a **symbol
+table (ISF) matching the target kernel**.
+
+**Single-run (recommended)** — `Analyze-Memory-Linux.sh` stands up an **ephemeral venv** with
+Volatility 3, builds the kernel ISF (via `Build-LinuxSymbols.sh` → `dwarf2json`), runs the
+analyzer, optionally folds findings into the verdict ladder, then **tears the whole environment
+down** — leaving only the findings:
+
+```bash
+playbooks/linux/threat_hunting/Analyze-Memory-Linux.sh \
+    --image reports/<host>/memory_<host>.raw --host-folder reports/<host> \
+    --adjudicate --fetch-symbols          # add --yara for the (slow) in-memory rule scan
+# --dry-run prints the plan; --keep-env keeps the venv; --symbols DIR reuses a prebuilt ISF;
+# --kernel VER if the image is from a different kernel than the analyst box;
+# --fetch-symbols acquires the kernel debug symbols cross-distro (debuginfod + package manager).
+```
+
+**Fully offline:** if you pre-staged with `Build-OfflineToolkit-Linux.sh --include-memory
+--stage-symbols`, the orchestrator needs **no network** — it installs Volatility from the
+vendored wheels (`tools/vol3_wheels/`, `pip --no-index`) and auto-uses the staged ISF
+(`tools/symbols/`). Drop `--fetch-symbols` in that case.
+
+Symbols need the kernel's **debug** `vmlinux` — a *generic* `vmlinux.h` (eBPF CO-RE / BTF header)
+**will not work**: Volatility needs version-exact struct offsets + symbol addresses, not
+relocatable types. The host's own `/sys/kernel/btf/vmlinux` is kernel-exact but `dwarf2json`
+can't read BTF, so a DWARF vmlinux is required. `Build-LinuxSymbols.sh` (called by the
+orchestrator with `--fetch-symbols`) acquires one **across the major distros**:
+
+| Distro family | Source `Build-LinuxSymbols.sh` uses |
+|---|---|
+| **any** (network) | **debuginfod** — `debuginfod-find debuginfo <build-id>` against the elfutils/distro federation (kernel build-id read from `/sys/kernel/notes`, or `--build-id` for another host's image) |
+| Debian / Ubuntu | ddebs repo + `linux-image-<ver>-dbgsym` |
+| RHEL / Fedora / Rocky / Alma | `dnf debuginfo-install kernel-<ver>` |
+| openSUSE / SLES | `zypper install kernel-default-debuginfo` |
+| Arch / Alpine | debuginfod only (no official kernel debug package) |
+| custom / mainline | build-tree `vmlinux` (`/lib/modules/<ver>/build/vmlinux`) or `--vmlinux PATH` |
+
+It also searches all the standard debug-vmlinux locations first, and falls back to `--vmlinux`
+/ `--build-id` when auto-acquisition can't run (air-gapped, custom kernel). Manual / offline paths:
+
+```bash
+pip install volatility3
+python3 playbooks/linux/threat_hunting/analyze_memory_linux.py \
+    --image reports/<host>/memory_<host>.raw --symbols /path/to/isf_dir --yara
+python3 playbooks/linux/threat_hunting/analyze_memory_linux.py --offline-dir vol_out/   # re-analysis
+```
+
+| Plugin | Finding | ATT&CK |
+|---|---|---|
+| `linux.pslist` + `linux.pidhashtable` | hidden process (in hashtable, not pslist — DKOM) | T1014 |
+| `linux.malfind` | injected/anonymous executable memory | T1055 |
+| `linux.psaux` | reverse-shell / offensive / implant-dir command lines | T1059.004 |
+| `linux.bash` | recovered shell history (attacker commands) | T1059.004 |
+| `linux.sockstat` | external (non-RFC1918) connections at capture (C2) | T1071 |
+| `linux.check_syscall` / `linux.check_modules` / `linux.tty_check` | syscall/module/tty hooks (rootkit) | T1014 |
+| `yarascan.YaraScan` (`--yara`) | YARA rule hits in memory (1,775 staged rules, like Windows) | T1055 / T1027 |
+
+Output `Memory_Findings_<stamp>.json` (common schema) → add to `Combined_Findings` and re-run
+`adjudicate.py` to fold memory findings into the verdict ladder.
 
 ## Step 4 — Eradication
 

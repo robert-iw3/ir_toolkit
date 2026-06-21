@@ -52,10 +52,10 @@ $RMM = @(
     @{ N='Atera';              P='ateraagent';     Logs=@() }
     @{ N='Action1';            P='action1';        Logs=@() }
     @{ N='LogMeIn';            P='logmein|lmiguardiansvc'; Logs=@() }
-    @{ N='GoToAssist';         P='gotoassist|g2'; Logs=@() }
+    @{ N='GoToAssist';         P='gotoassist|g2';  Logs=@() }
     @{ N='ZohoAssist';         P='zaservice|zohomeeting|za_connect'; Logs=@() }
     @{ N='VNC';                P='winvnc|tvnserver|vncserver|uvnc'; Logs=@() }
-    @{ N='ChromeRemoteDesktop';P='remoting_host'; Logs=@() }
+    @{ N='ChromeRemoteDesktop';P='remoting_host';  Logs=@() }
     @{ N='DWAgent';            P='dwagent';        Logs=@() }
     @{ N='Supremo';            P='supremo';        Logs=@() }
     @{ N='MeshAgent';          P='meshagent';      Logs=@() }

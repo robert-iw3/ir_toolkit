@@ -9,10 +9,17 @@
 #
 #   AVML            -> Linux volatile-memory acquisition (single static binary),
 #                      used by --capture-memory in the Linux collector
+#   avml-convert    -> decompress snappy LiME images (--compress) for Volatility
+#   dwarf2json      -> build the Volatility 3 Linux ISF from a debug vmlinux
+#   volatility3     -> memory analyzer wheels (+ yara-python) vendored for an
+#                      OFFLINE analyst venv (pip install --no-index)
+#   yara_rules      -> rule set used by the memory analyzer's --yara scan (recorded)
 #   LOLDrivers list -> vulnerable-driver catalog (offline-usable)
 #   cloud CLIs      -> aws / az / gcloud are required for the CLOUD workflow; they
 #                      are too large to bundle, so their presence + version is
 #                      RECORDED here and install hints emitted if missing
+#
+#   --include-memory stages avml + avml-convert + dwarf2json + volatility3 wheels.
 #
 # Everything lands in <toolkit>/tools/ with a sha256 manifest. The workflow
 # auto-detects and uses what is present and silently skips what is not.
@@ -20,7 +27,14 @@
 # Usage:
 #   ./Build-OfflineToolkit-Linux.sh [--tools-dir DIR] [--include-memory]
 #                                   [--include-cloud] [--check-only]
-#   --check-only   record presence/versions + write the manifest WITHOUT downloading
+#                                   [--stage-symbols [--symbols-kernel VER]]
+#   --check-only     record presence/versions + write the manifest WITHOUT downloading
+#   --stage-symbols  build the Volatility 3 Linux ISF for a kernel (default: running)
+#                    into tools/symbols/ so OFFLINE memory analysis has it (needs the
+#                    matching debug vmlinux/dbgsym reachable while still connected)
+#
+# Every dependency — staged binary, vendored wheel, OR assumed-present system tool —
+# is recorded in tools/STAGED_MANIFEST.json so the offline host's inventory is explicit.
 # ==============================================================================
 set -uo pipefail
 
@@ -29,19 +43,34 @@ TOOLS_DIR="${SCRIPT_DIR}/tools"
 INCLUDE_MEMORY=0
 INCLUDE_CLOUD=0
 CHECK_ONLY=0
-AVML_URL="https://github.com/microsoft/avml/releases/latest/download/avml"
+STAGE_SYMBOLS=0
+SYM_KERNEL=""
+AVML_URL=""   # default resolved arch-aware after parse; --avml-url overrides
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --tools-dir)     TOOLS_DIR="$2"; shift 2 ;;
+        --tools-dir)      TOOLS_DIR="$2"; shift 2 ;;
         --include-memory) INCLUDE_MEMORY=1; shift ;;
-        --include-cloud) INCLUDE_CLOUD=1; shift ;;
-        --check-only)    CHECK_ONLY=1; shift ;;
-        --avml-url)      AVML_URL="$2"; shift 2 ;;
-        -h|--help)       grep '^#' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        --include-cloud)  INCLUDE_CLOUD=1; shift ;;
+        --check-only)     CHECK_ONLY=1; shift ;;
+        --stage-symbols)  STAGE_SYMBOLS=1; INCLUDE_MEMORY=1; shift ;;
+        --symbols-kernel) SYM_KERNEL="$2"; shift 2 ;;
+        --avml-url)       AVML_URL="$2"; shift 2 ;;
+        -h|--help)        grep '^#' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "Unknown option: $1" >&2; exit 2 ;;
     esac
 done
+
+# Arch-aware release asset names (avml + dwarf2json publish per-arch binaries).
+case "$(uname -m)" in
+    x86_64|amd64)  AV_SFX="";          D2J_ASSET="dwarf2json-linux-amd64" ;;
+    aarch64|arm64) AV_SFX="-aarch64";  D2J_ASSET="dwarf2json-linux-arm64" ;;
+    *)             AV_SFX="";          D2J_ASSET="dwarf2json-linux-amd64" ;;
+esac
+AVML_REL="https://github.com/microsoft/avml/releases/latest/download"
+AVML_URL="${AVML_URL:-${AVML_REL}/avml${AV_SFX}}"
+AVMLCONV_URL="${AVML_REL}/avml-convert${AV_SFX}"
+D2J_URL="https://github.com/volatilityfoundation/dwarf2json/releases/latest/download/${D2J_ASSET}"
 
 mkdir -p "$TOOLS_DIR"
 MANIFEST="${TOOLS_DIR}/STAGED_MANIFEST.json"
@@ -63,16 +92,46 @@ download() {  # url, dest
     if [[ "$FETCH" == "curl" ]]; then curl -fsSL "$1" -o "$2"; else wget -q "$1" -O "$2"; fi
 }
 
-# --- AVML: Linux memory acquisition -------------------------------------------
-if [[ $INCLUDE_MEMORY -eq 1 ]]; then
-    dst="${TOOLS_DIR}/avml"
+stage_bin() {  # name, url, dest — download + chmod + record (honours --check-only)
+    local name="$1" url="$2" dest="$3"
     if [[ $CHECK_ONLY -eq 1 ]]; then
-        [[ -f "$dst" ]] && record "AVML" "$AVML_URL" "$dst" "present" || record "AVML" "$AVML_URL" "" "not-staged"
-    elif download "$AVML_URL" "$dst" 2>/dev/null; then
-        chmod +x "$dst"; record "AVML" "$AVML_URL" "$dst" "ok"
+        [[ -f "$dest" ]] && record "$name" "$url" "$dest" "present" || record "$name" "$url" "" "not-staged"
+    elif download "$url" "$dest" 2>/dev/null; then
+        chmod +x "$dest"; record "$name" "$url" "$dest" "ok"
     else
-        record "AVML" "$AVML_URL" "" "failed"
+        record "$name" "$url" "" "failed"
     fi
+}
+
+# --- Memory acquisition + analysis toolchain ----------------------------------
+# avml (capture) + avml-convert (decompress --compress LiME) + dwarf2json (build
+# the Volatility 3 Linux ISF) + volatility3 wheels (offline analyzer venv).
+if [[ $INCLUDE_MEMORY -eq 1 ]]; then
+    stage_bin "AVML"         "$AVML_URL"     "${TOOLS_DIR}/avml"
+    stage_bin "avml-convert" "$AVMLCONV_URL" "${TOOLS_DIR}/avml-convert"
+    stage_bin "dwarf2json"   "$D2J_URL"      "${TOOLS_DIR}/dwarf2json"
+
+    wheeldir="${TOOLS_DIR}/vol3_wheels"
+    if [[ $CHECK_ONLY -eq 1 ]]; then
+        if compgen -G "${wheeldir}/*.whl" >/dev/null 2>&1; then
+            record "volatility3-wheels" "pypi" "" "present ($(ls "${wheeldir}"/*.whl 2>/dev/null | wc -l) wheels)"
+        else
+            record "volatility3-wheels" "pypi" "" "not-staged"
+        fi
+    elif command -v python3 >/dev/null 2>&1 && mkdir -p "$wheeldir" \
+         && python3 -m pip download -q volatility3 yara-python -d "$wheeldir" >/dev/null 2>&1; then
+        record "volatility3-wheels" "pypi" "" "ok ($(ls "${wheeldir}"/*.whl 2>/dev/null | wc -l) wheels)"
+    else
+        record "volatility3-wheels" "pypi" "" "failed (analyzer can pip-install online at runtime)"
+    fi
+fi
+
+# --- YARA rules: used by the memory analyzer --yara scan (recorded, not fetched) -
+yrules="${TOOLS_DIR}/yara_rules"
+if compgen -G "${yrules}/**/*.yar*" >/dev/null 2>&1 || compgen -G "${yrules}/*.yar*" >/dev/null 2>&1; then
+    record "yara_rules" "tools/yara_rules" "" "present ($(find "$yrules" \( -name '*.yar' -o -name '*.yara' \) 2>/dev/null | wc -l) rules)"
+else
+    record "yara_rules" "tools/yara_rules" "" "not-staged (add .yar rules for --yara memory scan)"
 fi
 
 # --- LOLDrivers vulnerable-driver list ----------------------------------------
@@ -85,16 +144,64 @@ else
     record "LOLDrivers" "loldrivers.io" "" "failed"
 fi
 
+# --- Kernel symbols (ISF): the one dependency that is kernel-EXACT and can't be
+# --- pre-bundled generically. Build it while connected so offline analysis has it. -
+if [[ $STAGE_SYMBOLS -eq 1 && $CHECK_ONLY -eq 0 ]]; then
+    kv="${SYM_KERNEL:-$(uname -r)}"
+    symdir="${TOOLS_DIR}/symbols"
+    SYMBUILD="${SCRIPT_DIR}/playbooks/linux/threat_hunting/Build-LinuxSymbols.sh"
+    if built="$(bash "$SYMBUILD" --kernel "$kv" --out "$symdir" --fetch-symbols \
+                     --dwarf2json "${TOOLS_DIR}/dwarf2json" 2>/dev/null | tail -1)" \
+       && [[ -n "$built" && -d "$built" ]]; then
+        record "symbols:${kv}" "Build-LinuxSymbols" "$(ls "$symdir"/linux/*.json 2>/dev/null | head -1)" "ok"
+    else
+        record "symbols:${kv}" "Build-LinuxSymbols" "" "failed (need debug vmlinux/dbgsym for ${kv} while connected)"
+    fi
+elif [[ $CHECK_ONLY -eq 1 ]]; then
+    compgen -G "${TOOLS_DIR}/symbols/linux/*.json" >/dev/null 2>&1 \
+        && record "symbols" "tools/symbols" "" "present ($(ls "${TOOLS_DIR}"/symbols/linux/*.json 2>/dev/null | wc -l) ISF)" \
+        || record "symbols" "tools/symbols" "" "not-staged (use --stage-symbols; or fetch at analysis time)"
+fi
+
 # --- Cloud CLIs: required for the cloud workflow; record presence + versions --
 if [[ $INCLUDE_CLOUD -eq 1 || $CHECK_ONLY -eq 1 ]]; then
-    for cli in aws az gcloud; do
+    for cli in aws az gcloud kubectl terraform tofu; do
         if command -v "$cli" >/dev/null 2>&1; then
-            ver="$("$cli" --version 2>&1 | head -1 | tr -d '"' | cut -c1-40)"
+            case "$cli" in
+                kubectl)           vcmd=(version --client) ;;
+                terraform|tofu)    vcmd=(version) ;;
+                *)                 vcmd=(--version) ;;
+            esac
+            ver="$("$cli" "${vcmd[@]}" 2>&1 | head -1 | tr -d '"' | cut -c1-40)"
             record "cloud:${cli}" "system" "" "present (${ver})"
         else
-            record "cloud:${cli}" "system" "" "MISSING — install before running the cloud workflow"
+            record "cloud:${cli}" "system" "" "MISSING — install before the cloud workflow (or use the Docker image)"
         fi
     done
+fi
+
+# --- System dependency INVENTORY: the toolkit's own Python is stdlib-only; these are
+# --- OS tools the workflows shell out to. Recorded so the offline host's needs are explicit. -
+if [[ $CHECK_ONLY -eq 1 || $INCLUDE_MEMORY -eq 1 ]]; then
+    probe() {  # binary, role
+        command -v "$1" >/dev/null 2>&1 \
+            && record "sys:$1" "host" "" "present — $2" \
+            || record "sys:$1" "host" "" "absent — $2 (install on target if that capability is needed)"
+    }
+    probe python3   "core: every analyzer/report (stdlib only — no pip deps)"
+    probe bash      "core: collection + eradication scripts"
+    probe ip        "containment: network isolation"
+    probe nft       "containment: firewall (nftables)"
+    probe iptables  "containment: firewall (legacy)"
+    probe usbguard  "containment: USB device control"
+    probe dpkg      "triage: package verification (Debian/Ubuntu)"
+    probe rpm       "triage: package verification (RHEL/SUSE)"
+    probe debsums   "triage: changed-file detection (Debian)"
+    probe getcap    "triage: file capability audit (libcap)"
+    if [[ $INCLUDE_MEMORY -eq 1 || $CHECK_ONLY -eq 1 ]]; then
+        probe debuginfod-find "memory: universal ISF fetch (elfutils; connected staging)"
+        probe dpkg-deb  "memory: extract dbgsym vmlinux without root"
+    fi
 fi
 
 # --- Manifest -----------------------------------------------------------------

@@ -100,17 +100,17 @@ def is_toolkit_cmd(cmd):
 # ══════════════════════════════════════════════════════════════════════════════
 log('=== 1. LOLBin cmdline scan ===')
 LOL_PATS = [
-    (r'-enc\b|-encodedcommand',            2, '-EncodedCommand'),
-    (r'\bIEX\b|Invoke-' + 'Expression',   2, 'IEX/Invoke-Expression'),
+    (r'-enc\b|-encodedcommand',             2, '-EncodedCommand'),
+    (r'\bIEX\b|Invoke-' + 'Expression',     2, 'IEX/Invoke-Expression'),
     (r'\bmshta\b',                          2, 'mshta'),
-    (r'certutil.+(-decode|-urlcache|-f)',  2, 'certutil decode/download'),
-    (r'bitsadmin.+/transfer',              2, 'bitsadmin transfer'),
+    (r'certutil.+(-decode|-urlcache|-f)',   2, 'certutil decode/download'),
+    (r'bitsadmin.+/transfer',               2, 'bitsadmin transfer'),
     (r'Down'+'loadString|Down'+'loadFile|WebClient', 2, 'WebClient download'),
-    (r'-w\s+hid|-windowstyle\s+hid',      1, '-WindowStyle Hidden'),
-    (r'-nop\b|-noprofile\b',              1, '-NoProfile'),
+    (r'-w\s+hid|-windowstyle\s+hid',        1, '-WindowStyle Hidden'),
+    (r'-nop\b|-noprofile\b',                1, '-NoProfile'),
     (r'FromBase64String',                   1, 'Base64'),
-    (r'regsvr32\b',                        1, 'regsvr32'),
-    (r'\brundll32\b',                      1, 'rundll32'),
+    (r'regsvr32\b',                         1, 'regsvr32'),
+    (r'\brundll32\b',                       1, 'rundll32'),
 ]
 n = 0
 for p in procs:
@@ -357,7 +357,7 @@ try:
         state = str(conn.get('state', '') or '')
         if state.upper() != 'LISTEN': continue
         src_port = conn.get('src-port', 0) or 0
-        if src_port < 1024: continue           # system ports are expected
+        if src_port < 1024: continue            # system ports are expected
         src_ip = str(conn.get('src-ip', '') or '')
         if src_ip.startswith('127.'): continue  # loopback listeners are low risk
         pid_n  = conn.get('pid', 0)
