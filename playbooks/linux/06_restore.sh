@@ -19,7 +19,7 @@ restored=(); skipped=(); errors=()
 
 log() { logger -t ir-playbook "RESTORE: $*"; echo "RESTORE: $*"; }
 
-# ── 1. Un-isolate: restore the firewall ruleset captured before containment ───
+# -- 1. Un-isolate: restore the firewall ruleset captured before containment ---
 if [[ -f "${IPT_BACKUP}" ]] && command -v iptables-restore &>/dev/null; then
     iptables-restore < "${IPT_BACKUP}" && log "iptables ruleset restored from ${IPT_BACKUP}" \
         || errors+=("iptables_restore_failed")
@@ -30,10 +30,21 @@ else
     log "no firewall backup found for ${INCIDENT_ID}; skipping un-isolate"
 fi
 
-# ── 2. Restore quarantined files (sha256-verified) from the rollback journal ──
+# -- 2. Reverse file actions (sha256-verified) from the rollback journal -------
+# action=quarantine -> move the binary back and restore its original mode;
+# action=chmod       -> reapply the original mode to a file that was chmod 000'd in place.
 if [[ -f "${ROLLBACK_JOURNAL}" ]]; then
-    # Emit original<TAB>dest<TAB>sha256 for each quarantine entry.
-    while IFS=$'\t' read -r original dest sha256; do
+    while IFS=$'\t' read -r action original dest sha256 orig_mode; do
+        if [[ "${action}" == "chmod" ]]; then
+            [[ -f "${original}" ]] || { skipped+=("${original}:missing"); continue; }
+            actual=$(sha256sum "${original}" 2>/dev/null | awk '{print $1}')
+            [[ -n "${sha256}" && "${actual}" != "${sha256}" ]] && { skipped+=("${original}:sha_mismatch"); continue; }
+            chmod "${orig_mode:-755}" "${original}" 2>/dev/null \
+                && { restored+=("${original}"); log "restored mode ${orig_mode} on ${original}"; } \
+                || errors+=("restore_chmod_failed:${original}")
+            continue
+        fi
+        # quarantine
         [[ -z "${dest}" || ! -f "${dest}" ]] && { skipped+=("${original}:missing_quarantine"); continue; }
         actual=$(sha256sum "${dest}" 2>/dev/null | awk '{print $1}')
         if [[ "${actual}" != "${sha256}" ]]; then
@@ -42,7 +53,7 @@ if [[ -f "${ROLLBACK_JOURNAL}" ]]; then
         fi
         mkdir -p "$(dirname "${original}")"
         if mv "${dest}" "${original}" 2>/dev/null; then
-            chmod u+rwx "${original}" 2>/dev/null || true
+            chmod "${orig_mode:-755}" "${original}" 2>/dev/null || true   # original mode, not blanket +rwx
             restored+=("${original}")
             log "restored ${original}"
         else
@@ -53,8 +64,10 @@ import json,sys
 for ln in open('${ROLLBACK_JOURNAL}'):
     try: e=json.loads(ln)
     except Exception: continue
-    if e.get('action')=='quarantine':
-        print('\t'.join([e.get('original',''), e.get('dest',''), e.get('sha256','')]))
+    a=e.get('action','')
+    if a in ('quarantine','chmod'):
+        print('\t'.join([a, e.get('original') or e.get('path',''), e.get('dest',''),
+                         e.get('sha256',''), str(e.get('orig_mode',''))]))
 ")
 else
     log "no rollback journal at ${ROLLBACK_JOURNAL}; nothing to restore"

@@ -15,10 +15,46 @@ set -uo pipefail
 INCIDENT_ID="${IR_INCIDENT_ID:-UNKNOWN}"
 PROVIDER="${IR_CLOUD_PROVIDER:-aws}"
 TARGET="${IR_TARGET:-}"
+DRY_RUN="${IR_DRY_RUN:-1}"                       # safe by default
 ARTIFACT_DIR="/tmp/ir/${INCIDENT_ID}"
+ROLLBACK_JOURNAL="${ARTIFACT_DIR}/persistence_rollback.jsonl"   # written by 03_eradicate_persistence.sh
 
 log()  { echo "[$(date -u +%H:%M:%SZ)] [restore/${PROVIDER}] $*" | tee -a "${ARTIFACT_DIR}/restore.log"; }
 emit() { local s="$1"; local d="${2:-}"; echo "{\"phase\":\"restore\",\"status\":\"${s}\",\"detail\":\"${d}\",\"provider\":\"${PROVIDER}\"}"; }
+
+# Reverse the REVERSIBLE IAM revocations 03 journaled, on a false-positive verdict.
+reverse_iam_revocations() {
+    [[ -f "${ROLLBACK_JOURNAL}" ]] || { log "no persistence rollback journal — no IAM revocations to reverse"; return 0; }
+    PY="$(command -v python3 || command -v python)"
+    while IFS=$'\t' read -r action a b; do
+        case "${action}" in
+            iam_key_deactivate)   # a=user b=key_id  -> reactivate
+                if [[ "${DRY_RUN}" == "1" ]]; then log "[DRY-RUN] would reactivate key ${b} for ${a}"
+                else aws iam update-access-key --user-name "${a}" --access-key-id "${b}" --status Active 2>/dev/null \
+                        && log "reactivated key ${b} for ${a}" || log "WARN: could not reactivate key ${b}"; fi ;;
+            iam_role_deny)        # a=role b=policy_arn -> detach
+                if [[ "${DRY_RUN}" == "1" ]]; then log "[DRY-RUN] would detach ${b} from role ${a}"
+                else aws iam detach-role-policy --role-name "${a}" --policy-arn "${b}" 2>/dev/null \
+                        && log "detached ${b} from role ${a}" || log "WARN: could not detach policy from ${a}"; fi ;;
+            azure_sp_disable)     # a=sp -> re-enable
+                if [[ "${DRY_RUN}" == "1" ]]; then log "[DRY-RUN] would re-enable Azure SP ${a}"
+                else az ad sp update --id "${a}" --set "accountEnabled=true" --output none 2>/dev/null \
+                        && log "re-enabled Azure SP ${a}" || log "WARN: could not re-enable SP ${a}"; fi ;;
+            lambda_delete)        # a=function b=backup -> cannot auto-recreate; point at the backup
+                log "MANUAL: Lambda ${a} was deleted — recreate from backup ${b} (aws lambda create-function)" ;;
+        esac
+    done < <("${PY}" -c "
+import json,sys
+for ln in open('${ROLLBACK_JOURNAL}'):
+    try: e=json.loads(ln)
+    except Exception: continue
+    a=e.get('action','')
+    if a=='iam_key_deactivate': print('\t'.join([a,e.get('user',''),e.get('key_id','')]))
+    elif a=='iam_role_deny':    print('\t'.join([a,e.get('role',''),e.get('policy_arn','')]))
+    elif a=='azure_sp_disable': print('\t'.join([a,e.get('sp',''),'']))
+    elif a=='lambda_delete':    print('\t'.join([a,e.get('function',''),e.get('backup','')]))
+")
+}
 
 [[ -z "${TARGET}" ]] && { log "ERROR: IR_TARGET not set"; emit "failed" "no_target"; exit 1; }
 
@@ -146,3 +182,6 @@ case "${PROVIDER}" in
     gcp)   restore_gcp   ;;
     *)     log "Unknown provider: ${PROVIDER}"; emit "skipped" "unknown_provider"; exit 0 ;;
 esac
+
+# Also reverse any journaled IAM revocations (key reactivate / role detach / SP re-enable).
+reverse_iam_revocations

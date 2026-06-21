@@ -26,11 +26,13 @@ PY="$(command -v python3 || command -v python)"
 HOST_FOLDER=""
 MIN_VERDICT="Likely True Positive"
 APPLY=0
+ISOLATE=0
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --host-folder) HOST_FOLDER="$2"; shift 2 ;;
         --min-verdict) MIN_VERDICT="$2"; shift 2 ;;
+        --isolate)     ISOLATE=1; shift ;;     # run 01_contain_host.sh (full network isolation) first
         --apply)       APPLY=1; shift ;;
         -h|--help)     grep '^#' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "Unknown option: $1" >&2; exit 2 ;;
@@ -45,8 +47,13 @@ RUN_STAMP="$(date +%Y%m%d_%H%M%S)"
 INCIDENT_ID="$(basename "$HOST_FOLDER")_${RUN_STAMP}"
 
 # --- Extract indicators from the true-positive-class findings ------------------
-# Emits shell-eval'able assignments: PIDS=, PROCS=, HASHES=, PATHS=, C2_IPS=, C2_DOMAINS=, TP_COUNT=
-eval "$("$PY" - "$ADJ" "$MIN_VERDICT" <<'PYX'
+# SECURITY: finding content (process names, paths, C2 hosts) is attacker-influenceable, so it is
+# NEVER shell-eval'd. Python prints 7 newline-delimited values; bash `read`s them as literal
+# strings — no eval. Each value is stripped of newlines/commas so it stays one safe data line.
+{
+    read -r PIDS; read -r PROCS; read -r HASHES
+    read -r PATHS; read -r C2_IPS; read -r C2_DOMAINS; read -r TP_COUNT
+} < <("$PY" - "$ADJ" "$MIN_VERDICT" <<'PYX'
 import json, re, sys
 adj, min_verdict = sys.argv[1], sys.argv[2]
 RANK = {"False Positive":0,"Likely False Positive":1,"Indeterminate":2,
@@ -73,20 +80,21 @@ for f in data:
         if r:
             host = r.group(1)
             (ips if re.match(r"^\d+\.\d+\.\d+\.\d+$", host) else domains).add(host)
-    if t == "External Connection":
+    if t in ("External Connection", "External Connection (memory)"):
         m = re.match(r"(\d+\.\d+\.\d+\.\d+):", f.get("Target","") or "")
         if m:                       ips.add(m.group(1))
-def q(s): return ",".join(sorted(s))
+# Defang separators/newlines so each value is exactly one safe data line for `read`.
+def q(items):
+    out = [re.sub(r"[\r\n,]", " ", str(x)).strip() for x in items]
+    return ",".join(sorted({x for x in out if x}))
 tp = sum(1 for f in data if RANK.get(f.get("Verdict",""),0) >= floor)
-print(f'PIDS="{q(pids)}"')
-print(f'PROCS="{q(procs)}"')
-print(f'HASHES="{q(hashes)}"')
-print(f'PATHS="{q(paths)}"')
-print(f'C2_IPS="{q(ips)}"')
-print(f'C2_DOMAINS="{q(domains)}"')
-print(f'TP_COUNT="{tp}"')
+for v in (q(pids), q(procs), q(hashes), q(paths), q(ips), q(domains), str(tp)):
+    print(v)
 PYX
-)"
+)
+# Defaults so `set -u` holds even if extraction printed fewer lines.
+: "${PIDS:=}"; : "${PROCS:=}"; : "${HASHES:=}"; : "${PATHS:=}"
+: "${C2_IPS:=}"; : "${C2_DOMAINS:=}"; : "${TP_COUNT:=0}"
 
 echo "=================================================================="
 echo " ERADICATION PLAN | incident=${INCIDENT_ID}"
@@ -106,13 +114,26 @@ run_pb() {  # human-name, script, env assignments...
         return 0
     fi
     echo "[APPLY] ${name}"
-    env "$@" IR_INCIDENT_ID="$INCIDENT_ID" bash "${PB_DIR}/${script}"
+    # IR_DRY_RUN=0 tells the module to actually execute; modules default to dry-run when invoked
+    # directly (no orchestrator) so they are never destructive by accident.
+    env "$@" IR_INCIDENT_ID="$INCIDENT_ID" IR_DRY_RUN=0 bash "${PB_DIR}/${script}"
 }
 
 RESULTS_JSON="["
 sep=""
 record() { RESULTS_JSON+="${sep}$1"; sep=","; }
 
+# ORDER: contain → cut C2 → eradicate. Block the attacker's channel BEFORE killing processes so a
+# kill can't trip a dead-man's-switch and a re-spawn can't phone home mid-eradication.
+if [[ $ISOLATE -eq 1 ]]; then
+    out="$(run_pb "Network isolation" 01_contain_host.sh)"
+    echo "$out"; [[ $APPLY -eq 1 ]] && record "$(echo "$out" | tail -1)"
+fi
+if [[ -n "$C2_IPS$C2_DOMAINS" ]]; then
+    out="$(run_pb "C2 blocking" 04_block_c2.sh \
+        IR_C2_IPS="$C2_IPS" IR_C2_DOMAINS="$C2_DOMAINS")"
+    echo "$out"; [[ $APPLY -eq 1 ]] && record "$(echo "$out" | tail -1)"
+fi
 if [[ -n "$PIDS$PROCS$HASHES" ]]; then
     out="$(run_pb "Process eradication" 02_eradicate_process.sh \
         IR_MALICIOUS_PIDS="$PIDS" IR_MALICIOUS_PROCESSES="$PROCS" IR_MALICIOUS_HASHES="$HASHES")"
@@ -121,11 +142,6 @@ fi
 if [[ -n "$PATHS$HASHES$PROCS" ]]; then
     out="$(run_pb "Persistence removal" 03_eradicate_persistence.sh \
         IR_MALICIOUS_PATHS="$PATHS" IR_MALICIOUS_HASHES="$HASHES" IR_MALICIOUS_PROCESSES="$PROCS")"
-    echo "$out"; [[ $APPLY -eq 1 ]] && record "$(echo "$out" | tail -1)"
-fi
-if [[ -n "$C2_IPS$C2_DOMAINS" ]]; then
-    out="$(run_pb "C2 blocking" 04_block_c2.sh \
-        IR_C2_IPS="$C2_IPS" IR_C2_DOMAINS="$C2_DOMAINS")"
     echo "$out"; [[ $APPLY -eq 1 ]] && record "$(echo "$out" | tail -1)"
 fi
 # Credential / session revocation for implicated accounts (Principals.json).

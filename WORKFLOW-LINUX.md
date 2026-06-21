@@ -169,6 +169,16 @@ sudo ./Invoke-IRCollection-Linux.sh \
 
 ## Memory capture + analysis
 
+> **⚠️ Strongly recommended for every investigation — memory analysis is imperative.** RAM holds
+> evidence that never touches disk: fileless/`memfd` malware, injected code, decrypted payloads,
+> live C2 connections, cleartext credentials/keys, deleted-but-running binaries, and kernel
+> rootkit hooks that hide from the live OS (visible only via DKOM cross-referencing of kernel
+> structures). Modern Linux intrusions are increasingly memory-resident and living-off-the-land —
+> a disk-and-journald-only analysis will miss them, and an attacker can tamper on-disk artifacts.
+> Memory is the **most volatile** evidence (RFC 3227): capture it **first**, because a reboot or
+> power-off destroys it permanently. Run with `--capture-memory`, then analyze (below).
+
+
 **Capture** (during collection) uses staged `tools/avml` (physical RAM only, compact). It
 pre-flights free space — `RAM × 1.1` — and, when the output drive is too small (e.g. a 32 GB
 USB for 24 GB RAM), **auto-redirects to a local volume** (`/var/tmp`, `/tmp`, `$HOME`) or an
@@ -237,14 +247,15 @@ python3 playbooks/linux/threat_hunting/analyze_memory_linux.py --offline-dir vol
 |---|---|---|
 | `linux.pslist` + `linux.pidhashtable` | hidden process (in hashtable, not pslist — DKOM) | T1014 |
 | `linux.malfind` | injected/anonymous executable memory | T1055 |
-| `linux.psaux` | reverse-shell / offensive / implant-dir command lines | T1059.004 |
-| `linux.bash` | recovered shell history (attacker commands) | T1059.004 |
-| `linux.sockstat` | external (non-RFC1918) connections at capture (C2) | T1071 |
+| `linux.psaux` / `linux.bash` | reverse-shell / offensive / implant-exec cmdlines + **living-off-the-land** (encoded-exec, download cradles, GTFOBins shell escapes, credential access, defense-evasion/anti-forensics, persistence, tunneling/C2, exfil) | T1059 / T1105 / T1003 / T1070 / T1572 |
+| `linux.sockstat` | external (non-RFC1918) connections at capture (C2), **reputation-ranked** (known network apps → Low, unexpected binaries → Medium) | T1071 |
 | `linux.check_syscall` / `linux.check_modules` / `linux.tty_check` | syscall/module/tty hooks (rootkit) | T1014 |
-| `yarascan.YaraScan` (`--yara`) | YARA rule hits in memory (1,775 staged rules, like Windows) | T1055 / T1027 |
+| YARA (`--yara`) | rule hits in memory; **`--yara-scope process`** (default, `linux.vmayarascan`, per-PID, fast) or **`full`** (`yarascan.YaraScan`, exhaustive physical) | T1055 / T1027 |
+| **Correlation** | `Correlated Memory Threat` — emitted when a strong signal (injection / hidden-proc / LOTL / YARA hit) and another signal **converge on one PID** → high-confidence compromise | T1055 / T1059 |
 
-Output `Memory_Findings_<stamp>.json` (common schema) → add to `Combined_Findings` and re-run
-`adjudicate.py` to fold memory findings into the verdict ladder.
+Output `Memory_Findings_<stamp>.json` (common schema, **priority-ordered** — correlated threats
+first) → add to `Combined_Findings` and re-run `adjudicate.py` to fold into the verdict ladder.
+YARA perf knobs: `--yara-scope`, `--yara-timeout`, `--yara-rules-dir` (Linux-only rule subset).
 
 ## Step 4 — Eradication
 

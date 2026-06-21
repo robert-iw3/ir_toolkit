@@ -11,6 +11,9 @@ INCIDENT_ID="${IR_INCIDENT_ID:-UNKNOWN}"
 MALICIOUS_PIDS="${IR_MALICIOUS_PIDS:-}"
 MALICIOUS_PROCESSES="${IR_MALICIOUS_PROCESSES:-}"
 MALICIOUS_HASHES="${IR_MALICIOUS_HASHES:-}"
+# Safe by default: when invoked directly (not via the orchestrator) nothing is changed unless
+# IR_DRY_RUN=0 is set. The orchestrator passes IR_DRY_RUN=0 only under --apply.
+DRY_RUN="${IR_DRY_RUN:-1}"
 
 QUARANTINE_DIR="/var/ir/quarantine/${INCIDENT_ID}"
 mkdir -p "${QUARANTINE_DIR}"
@@ -42,10 +45,21 @@ is_protected() {
 }
 
 # -- Kill by PID (and full process tree) --------------------------------------
+# Single choke point for EVERY kill path (by-PID, by-name, by-hash, fileless/hidden/anon-rwx
+# sweeps). Enforces the protected-process guard and IR_DRY_RUN here so no path can bypass them.
 kill_tree() {
     local root_pid="$1"
     [[ "${root_pid}" =~ ^[0-9]+$ ]] || return 1
     [[ "${root_pid}" -le 1       ]] && return 1
+
+    # Protected-process guard by PID (resolve comm) — applies to all callers, not just by-name.
+    local rcomm
+    rcomm=$(cat "/proc/${root_pid}/comm" 2>/dev/null || true)
+    if [[ -n "${rcomm}" ]] && is_protected "${rcomm}"; then
+        errors+=("refused_protected_pid:${root_pid}:${rcomm}")
+        logger -t ir-playbook "ERADICATE-PROC: Refused to kill protected ${rcomm} (PID ${root_pid})"
+        return 1
+    fi
 
     # Recursively kill children first (depth-first)
     local children
@@ -55,6 +69,11 @@ kill_tree() {
     done
 
     if kill -0 "${root_pid}" 2>/dev/null; then
+        if [[ "${DRY_RUN}" == "1" ]]; then
+            echo "[DRY-RUN] would kill PID ${root_pid} (${rcomm})"
+            logger -t ir-playbook "ERADICATE-PROC: [DRY-RUN] would kill PID ${root_pid} (${rcomm})"
+            return 0
+        fi
         # Try SIGTERM first for graceful shutdown, then SIGKILL
         kill -TERM "${root_pid}" 2>/dev/null || true
         sleep 0.5
@@ -125,13 +144,19 @@ for bad_hash in "${HASH_LIST[@]}"; do
             done
             # Move to quarantine (preserves binary for forensics)
             dest="${QUARANTINE_DIR}/$(basename "${candidate}")-${bad_hash:0:12}"
-            if mv "${candidate}" "${dest}" 2>/dev/null; then
+            orig_mode=$(stat -c %a "${candidate}" 2>/dev/null || echo "")
+            if [[ "${DRY_RUN}" == "1" ]]; then
+                echo "[DRY-RUN] would quarantine ${candidate} (sha256 ${bad_hash:0:16}…)"
+                quarantined_files+=("${candidate}:dry-run")
+            elif mv "${candidate}" "${dest}" 2>/dev/null; then
                 chmod 400 "${dest}"
                 quarantined_files+=("${candidate}")
-                journal "{\"action\":\"quarantine\",\"original\":\"${candidate}\",\"dest\":\"${dest}\",\"sha256\":\"${actual_hash}\"}"
+                journal "{\"action\":\"quarantine\",\"original\":\"${candidate}\",\"dest\":\"${dest}\",\"orig_mode\":\"${orig_mode}\",\"sha256\":\"${actual_hash}\"}"
                 logger -t ir-playbook "ERADICATE-PROC: Quarantined ${candidate} (hash: ${bad_hash:0:16}…)"
             else
-                # If mv fails (e.g. cross-filesystem), make non-executable
+                # mv failed (e.g. cross-filesystem): make non-executable, but JOURNAL the original
+                # mode first so 06_restore.sh can reverse it on a false-positive verdict.
+                journal "{\"action\":\"chmod\",\"path\":\"${candidate}\",\"orig_mode\":\"${orig_mode}\",\"sha256\":\"${actual_hash}\"}"
                 chmod 000 "${candidate}" 2>/dev/null || true
                 quarantined_files+=("${candidate}:chmod000")
             fi
@@ -163,9 +188,28 @@ for _pid_maps in /proc/[0-9]*/maps; do
     [[ "${_pid}" =~ ^[0-9]+$ ]] || continue
     [[ "${_pid}" -le 1 ]] && continue
     if ! ls "/proc/${_pid}" &>/dev/null 2>&1; then
+        # RACE GUARD: a process exiting mid-scan also looks "hidden". Re-verify after a beat —
+        # if maps is gone it was merely exiting (not a rootkit), so skip.
+        sleep 0.2
+        [[ -e "/proc/${_pid}/maps" ]] || continue
+        ls "/proc/${_pid}" &>/dev/null 2>&1 && continue
         _comm=$(tr '\0' ' ' < "/proc/${_pid}/cmdline" 2>/dev/null | head -c 80 || true)
-        logger -t ir-playbook "ERADICATE-PROC: Rootkit-hidden PID ${_pid} detected (${_comm}) — killing"
-        kill_tree "${_pid}" || errors+=("hidden_pid_kill_failed:${_pid}")
+        _basecomm=$(cat "/proc/${_pid}/comm" 2>/dev/null || true)
+        # ADJUDICATION GATE: only auto-kill a hidden PID whose comm matches a known-bad indicator
+        # from the adjudicated findings. An unattributed hidden PID is FLAGGED for the analyst,
+        # never autonomously killed (consistent with the anon-rwx sweep below).
+        _hidden_bad=false
+        for _pn in "${PROC_LIST[@]}"; do
+            _pn="${_pn// /}"
+            [[ -n "${_pn}" && "${_basecomm}" == "${_pn}" ]] && _hidden_bad=true && break
+        done
+        if ${_hidden_bad}; then
+            logger -t ir-playbook "ERADICATE-PROC: Rootkit-hidden PID ${_pid} matches known-bad '${_basecomm}' — killing"
+            kill_tree "${_pid}" || errors+=("hidden_pid_kill_failed:${_pid}")
+        else
+            logger -t ir-playbook "ERADICATE-PROC: Rootkit-hidden PID ${_pid} (${_comm}) — FLAGGED for analyst (not auto-killed)"
+            errors+=("hidden_pid_flagged:${_pid}")
+        fi
     fi
 done
 

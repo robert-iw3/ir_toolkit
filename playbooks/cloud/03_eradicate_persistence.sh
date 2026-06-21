@@ -17,10 +17,15 @@ set -uo pipefail
 INCIDENT_ID="${IR_INCIDENT_ID:-UNKNOWN}"
 PROVIDER="${IR_CLOUD_PROVIDER:-aws}"
 TARGET="${IR_TARGET:-}"
-MALICIOUS_PROCS="${IR_MALICIOUS_PROCESSES:-}"  # IAM users/SAs/app IDs
-MALICIOUS_PATHS="${IR_MALICIOUS_PATHS:-}"       # ARNs, resource IDs, URLs
+MALICIOUS_PROCS="${IR_MALICIOUS_PROCESSES:-}"    # IAM users/SAs/app IDs
+MALICIOUS_PATHS="${IR_MALICIOUS_PATHS:-}"        # ARNs, resource IDs, URLs
+DRY_RUN="${IR_DRY_RUN:-1}"                       # safe by default (mutates only when 0)
 ARTIFACT_DIR="/tmp/ir/${INCIDENT_ID}"
 mkdir -p "${ARTIFACT_DIR}"
+# Rollback journal: one JSON line per REVERSIBLE action so the analyst can undo a revocation if
+# the verdict is later overturned (key reactivate, role policy detach, SP re-enable).
+ROLLBACK_JOURNAL="${ARTIFACT_DIR}/persistence_rollback.jsonl"
+journal() { echo "$1" >> "${ROLLBACK_JOURNAL}"; }
 
 log()  { echo "[$(date -u +%H:%M:%SZ)] [persist/${PROVIDER}] $*" | tee -a "${ARTIFACT_DIR}/persistence.log"; }
 emit() { local s="$1"; local d="${2:-}"; echo "{\"phase\":\"persistence_removal\",\"status\":\"${s}\",\"detail\":\"${d}\",\"provider\":\"${PROVIDER}\"}"; }
@@ -43,17 +48,27 @@ eradicate_aws() {
                 --query 'AccessKeyMetadata[*].AccessKeyId' --output text 2>/dev/null | \
             tr '\t' '\n' | while read -r key_id; do
                 [[ -z "${key_id}" ]] && continue
-                aws iam update-access-key --user-name "${entity}" --access-key-id "${key_id}" --status Inactive
-                log "Deactivated access key ${key_id} for ${entity}"
+                if [[ "${DRY_RUN}" == "1" ]]; then
+                    log "[DRY-RUN] would deactivate access key ${key_id} for ${entity}"
+                else
+                    aws iam update-access-key --user-name "${entity}" --access-key-id "${key_id}" --status Inactive
+                    journal "{\"action\":\"iam_key_deactivate\",\"user\":\"${entity}\",\"key_id\":\"${key_id}\"}"
+                    log "Deactivated access key ${key_id} for ${entity} (reversible: --status Active)"
+                fi
                 removed=1
             done
 
         # Try as IAM role — attach deny-all policy
         elif aws iam get-role --role-name "${entity}" --output none 2>/dev/null; then
-            log "Attaching deny-all policy to compromised role ${entity}..."
             local policy_arn="arn:aws:iam::aws:policy/AWSDenyAll"
-            aws iam attach-role-policy --role-name "${entity}" --policy-arn "${policy_arn}" 2>/dev/null && \
-                { log "AWSDenyAll attached to role ${entity}"; removed=1; } || true
+            if [[ "${DRY_RUN}" == "1" ]]; then
+                log "[DRY-RUN] would attach AWSDenyAll to role ${entity}"; removed=1
+            else
+                log "Attaching deny-all policy to compromised role ${entity}..."
+                aws iam attach-role-policy --role-name "${entity}" --policy-arn "${policy_arn}" 2>/dev/null && {
+                    journal "{\"action\":\"iam_role_deny\",\"role\":\"${entity}\",\"policy_arn\":\"${policy_arn}\"}"
+                    log "AWSDenyAll attached to role ${entity}"; removed=1; } || true
+            fi
         fi
     done
 
@@ -64,9 +79,20 @@ eradicate_aws() {
         [[ -z "${path}" ]] && continue
         if [[ "${path}" == *"function:"* ]]; then
             local fn_name="${path##*function:}"
-            log "Deleting Lambda function ${fn_name}..."
-            aws lambda delete-function --region "${region}" --function-name "${fn_name}" 2>/dev/null && \
-                { log "Lambda ${fn_name} deleted"; removed=1; } || true
+            if [[ "${DRY_RUN}" == "1" ]]; then
+                log "[DRY-RUN] would back up + delete Lambda function ${fn_name}"; removed=1
+            else
+                # Lambda delete is IRREVERSIBLE — back up config + code location first for recreate.
+                local bak="${ARTIFACT_DIR}/lambda_${fn_name//[^A-Za-z0-9]/_}.json"
+                aws lambda get-function --region "${region}" --function-name "${fn_name}" \
+                    --output json > "${bak}" 2>/dev/null \
+                    && { journal "{\"action\":\"lambda_delete\",\"function\":\"${fn_name}\",\"backup\":\"${bak}\"}"
+                         log "Backed up Lambda ${fn_name} config → ${bak}"; } \
+                    || log "WARN: could not back up Lambda ${fn_name} before delete"
+                log "Deleting Lambda function ${fn_name}..."
+                aws lambda delete-function --region "${region}" --function-name "${fn_name}" 2>/dev/null && \
+                    { log "Lambda ${fn_name} deleted"; removed=1; } || true
+            fi
         fi
     done
 
@@ -83,12 +109,17 @@ eradicate_azure() {
 
         # Revoke service principal tokens
         if az ad sp show --id "${entity}" --output none 2>/dev/null; then
-            log "Revoking Azure AD service principal ${entity} credentials..."
-            az ad sp credential reset --id "${entity}" --append --output none 2>/dev/null && \
-                { log "SP ${entity} credentials rotated (forced re-auth)"; removed=1; } || true
-            # Disable the SP
-            az ad sp update --id "${entity}" --set "accountEnabled=false" --output none 2>/dev/null && \
-                { log "SP ${entity} disabled"; removed=1; } || true
+            if [[ "${DRY_RUN}" == "1" ]]; then
+                log "[DRY-RUN] would rotate credentials + disable Azure SP ${entity}"; removed=1
+            else
+                log "Revoking Azure AD service principal ${entity} credentials..."
+                az ad sp credential reset --id "${entity}" --append --output none 2>/dev/null && \
+                    { log "SP ${entity} credentials rotated (forced re-auth)"; removed=1; } || true
+                # Disable the SP (reversible: accountEnabled=true)
+                az ad sp update --id "${entity}" --set "accountEnabled=false" --output none 2>/dev/null && {
+                    journal "{\"action\":\"azure_sp_disable\",\"sp\":\"${entity}\"}"
+                    log "SP ${entity} disabled"; removed=1; } || true
+            fi
         fi
     done
 
@@ -112,11 +143,15 @@ eradicate_gcp() {
                 --project="${project}" \
                 --format="value(name)" 2>/dev/null | \
             grep -v "system:" | while read -r key_name; do
-                gcloud iam service-accounts keys delete "${key_name}" \
-                    --iam-account="${entity}" \
-                    --project="${project}" \
-                    --quiet 2>/dev/null && \
-                    { log "Deleted SA key ${key_name}"; removed=1; } || true
+                if [[ "${DRY_RUN}" == "1" ]]; then
+                    log "[DRY-RUN] would delete SA key ${key_name} for ${entity}"; removed=1
+                else
+                    gcloud iam service-accounts keys delete "${key_name}" \
+                        --iam-account="${entity}" \
+                        --project="${project}" \
+                        --quiet 2>/dev/null && \
+                        { log "Deleted SA key ${key_name}"; removed=1; } || true
+                fi
             done
         fi
     done

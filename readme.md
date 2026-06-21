@@ -40,6 +40,26 @@ collection  →  analysis  →  reporting  →  memory forensics  →  eradicati
 All three platforms follow this shape. Each platform's workflow doc has its own end-to-end
 diagram and specifics: [Windows](WORKFLOW-WINDOWS.md) · [Linux](WORKFLOW-LINUX.md) · [Cloud](WORKFLOW-CLOUD.md).
 
+> ### ⚠️ Capture and analyze memory — it is imperative, not optional
+>
+> For any serious investigation, **capture volatile memory first and analyze it.** Memory is the
+> only place that holds evidence which *never touches disk*:
+> - **Fileless / in-memory-only malware** — reflective loading, `memfd_create`, packed/decrypted-
+>   in-RAM payloads. A disk-and-logs-only investigation **does not see these at all.**
+> - **Process injection & live C2** — injected code regions, established attacker connections,
+>   and the decoded commands behind obfuscated one-liners exist only in RAM.
+> - **Rootkit ground truth** — kernel rootkits actively hide processes, modules, and hooks from
+>   the *live* OS; raw memory exposes them by cross-referencing kernel structures (DKOM).
+> - **Cleartext secrets** — credentials, keys, and tokens that are encrypted on disk sit
+>   decrypted in memory.
+> - **Anti-forensics resilience** — a present attacker can wipe logs and tamper disk artifacts;
+>   the memory image reflects the machine's true state at the instant of capture.
+>
+> RAM is the **most volatile** evidence (RFC 3227 order of volatility): once the host is rebooted
+> or powered off, it is **gone forever** — acquisition is a one-shot. Skipping memory means a
+> forensic analysis that is incomplete by construction and can be actively deceived. Memory
+> capture + analysis is wired into every platform here (Windows: MemProcFS; Linux: Volatility 3).
+
 ---
 
 ## Reports

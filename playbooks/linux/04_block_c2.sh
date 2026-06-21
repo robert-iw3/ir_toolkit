@@ -53,6 +53,18 @@ elif command -v nft &>/dev/null; then
     USE_NFTABLES=true
 fi
 
+# Capture the pre-block firewall state to the path 06_restore.sh reads, so the C2 DROP rules can be
+# reversed even when this runs WITHOUT 01_contain_host.sh first (eradication-only flow). Never
+# overwrite an existing backup (01's pre-containment baseline takes precedence).
+mkdir -p /var/ir 2>/dev/null || true
+if $USE_IPTABLES && command -v iptables-save &>/dev/null; then
+    [[ -f "/var/ir/iptables-pre-${INCIDENT_ID}.rules" ]] || \
+        iptables-save > "/var/ir/iptables-pre-${INCIDENT_ID}.rules" 2>/dev/null || true
+elif $USE_NFTABLES && command -v nft &>/dev/null; then
+    [[ -f "/var/ir/nftables-pre-${INCIDENT_ID}.rules" ]] || \
+        nft list ruleset > "/var/ir/nftables-pre-${INCIDENT_ID}.rules" 2>/dev/null || true
+fi
+
 # -- Block C2 IPs at firewall level --------------------------------------------
 for c2_ip in "${IP_LIST[@]}"; do
     if $USE_IPTABLES; then

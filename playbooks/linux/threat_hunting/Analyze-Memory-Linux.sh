@@ -31,7 +31,7 @@ SYM_BUILDER="${SCRIPT_DIR}/Build-LinuxSymbols.sh"
 ADJUDICATOR="${SCRIPT_DIR}/adjudicate.py"
 
 IMAGE=""; HOST_FOLDER=""; SYMBOLS=""; KERNEL="$(uname -r)"; BUILD_ID=""; DBGD_URLS=""
-YARA=0; ADJUDICATE=0; KEEP=0; DRYRUN=0; QUIET=0; FETCH=0
+YARA=0; ADJUDICATE=0; KEEP=0; DRYRUN=0; QUIET=0; FETCH=0; YARA_SCOPE=""; YARA_TIMEOUT=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -39,9 +39,11 @@ while [[ $# -gt 0 ]]; do
         --host-folder) HOST_FOLDER="$2"; shift 2 ;;
         --symbols)     SYMBOLS="$2"; shift 2 ;;
         --kernel)      KERNEL="$2"; shift 2 ;;
-        --build-id)    BUILD_ID="$2"; shift 2 ;;            # kernel build-id for debuginfod (cross-host images)
+        --build-id)    BUILD_ID="$2"; shift 2 ;;             # kernel build-id for debuginfod (cross-host images)
         --debuginfod-urls) DBGD_URLS="$2"; shift 2 ;;
         --yara)        YARA=1; shift ;;
+        --yara-scope)  YARA_SCOPE="$2"; shift 2 ;;           # process (default, fast) | full (exhaustive)
+        --yara-timeout) YARA_TIMEOUT="$2"; shift 2 ;;
         --adjudicate)  ADJUDICATE=1; shift ;;
         --fetch-symbols|--install-dbgsym) FETCH=1; shift ;;  # debuginfod + distro pkg mgr (sudo)
         --keep-env)    KEEP=1; shift ;;
@@ -141,6 +143,8 @@ fi
 ARGS=(--image "$IMAGE" --output-dir "$HOST_FOLDER" --stamp "$STAMP")
 [[ -n "$SYMBOLS" ]] && ARGS+=(--symbols "$SYMBOLS")
 [[ $YARA -eq 1 ]] && ARGS+=(--yara)
+[[ -n "$YARA_SCOPE" ]] && ARGS+=(--yara-scope "$YARA_SCOPE")
+[[ -n "$YARA_TIMEOUT" ]] && ARGS+=(--yara-timeout "$YARA_TIMEOUT")
 [[ $QUIET -eq 1 ]] && ARGS+=(--quiet)
 log "running analyzer..."
 python "$ANALYZER" "${ARGS[@]}" || log "analyzer returned non-zero (see output)."
@@ -152,18 +156,9 @@ if [[ $ADJUDICATE -eq 1 && -f "$MEM_FINDINGS" ]]; then
     COMBINED="$(ls -1t "${HOST_FOLDER}"/Combined_Findings_*.json 2>/dev/null | head -1)"
     if [[ -n "$COMBINED" ]]; then
         log "merging memory findings into $(basename "$COMBINED") + re-adjudicating..."
-        "$PY" - "$COMBINED" "$MEM_FINDINGS" <<'PYMERGE'
-import json, sys
-combined, mem = sys.argv[1], sys.argv[2]
-def load(p):
-    try:
-        with open(p, encoding="utf-8-sig") as fh:
-            d = json.load(fh); return d if isinstance(d, list) else [d]
-    except Exception: return []
-merged = load(combined) + load(mem)
-with open(combined, "w") as fh: json.dump(merged, fh, indent=2)
-print(f"merged {len(merged)} finding(s)")
-PYMERGE
+        # Idempotent, content-deduped merge — re-running analysis no longer bloats Combined.
+        "$PY" "${SCRIPT_DIR}/../../reporting/merge_findings.py" "$COMBINED" "$MEM_FINDINGS" \
+            | sed 's/^/  /' || log "merge failed."
         if [[ -f "$ADJUDICATOR" ]]; then
             "$PY" "$ADJUDICATOR" --host-folder "$HOST_FOLDER" --report "$COMBINED" \
                 --stamp "$STAMP" >/dev/null 2>&1 \

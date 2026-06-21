@@ -76,7 +76,9 @@ run_pb() {  # phase, script
     local script="${CLOUD_DIR}/$2"
     [[ ! -f "$script" ]] && { echo "[skip] $2 not found"; return 0; }
     if [[ $APPLY -eq 0 ]]; then echo "[plan] would run $2"; return 0; fi
-    echo "[run] $2"; bash "$script" || echo "[warn] $2 returned non-zero"
+    # IR_DRY_RUN=0 tells the module to execute; modules default to dry-run when invoked directly,
+    # so a stray direct run never mutates the cloud account.
+    echo "[run] $2"; IR_DRY_RUN=0 bash "$script" || echo "[warn] $2 returned non-zero"
 }
 
 # -- Eradicate -----------------------------------------------------------------

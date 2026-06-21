@@ -293,6 +293,16 @@ powershell.exe -ExecutionPolicy Bypass -NoProfile -File .\Invoke-IRCollection.ps
 
 ## Step 1b — Memory analysis (run on the ANALYST machine after copying evidence back)
 
+> **⚠️ Do this for every serious investigation — memory analysis is imperative.** RAM is the only
+> place that holds evidence which never touches disk: process injection and shellcode, fileless /
+> reflective-loading malware, decrypted payloads, live C2 connections, cleartext credentials and
+> tokens (LSASS), and rootkits/BYOVD that hide from the live OS. Modern Windows attacks are
+> heavily in-memory and LOLBin-driven — a disk-and-Event-Log-only investigation misses them, and a
+> present attacker can clear logs and tamper artifacts while memory still reflects ground truth.
+> RAM is the **most volatile** evidence (RFC 3227): capture it **first** (`-CaptureMemory`), because
+> a reboot/power-off destroys it permanently. Always pair collection with this analysis step.
+
+
 Memory analysis runs **off the target**. Copy the collected `memory_<HOST>.*` from
 `reports\<HOST>\` back to your analyst machine, then run `Analyze-Memory.ps1`. It **routes by
 image type**:
