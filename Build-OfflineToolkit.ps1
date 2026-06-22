@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Stage all OPTIONAL third-party tools into the toolkit BEFORE it goes to an
     isolated host. Run this on an INTERNET-CONNECTED machine.
@@ -14,7 +14,7 @@
         Handle / ListDlls   -> open handles, loaded modules
         PsTools / Tcpvcon   -> process + connection enumeration
         Strings             -> static triage of suspect binaries
-        (-IncludeMemory)    -> WinPmem — default auto-staged memory capture tool.
+        (-IncludeMemory)    -> WinPmem - default auto-staged memory capture tool.
                                RAW format; images pad MMIO gaps (image > actual RAM on
                                some systems). Works without any manual steps.
         (-IncludeFTKImager) -> Print FTK Imager manual staging instructions.
@@ -148,7 +148,7 @@ foreach ($t in $catalog) {
     }
 }
 
-# --- FTK Imager CLI (optional — requires manual staging) ---------------------
+# --- FTK Imager CLI (optional - requires manual staging) ---------------------
 # FTK Imager 8+ is a paid product from Exterro. Older free versions (4.7.x) require
 # registration form + email delivery. Neither can be auto-downloaded.
 # Manual staging: place ftkimager.exe + its runtime DLLs into tools\.
@@ -157,7 +157,7 @@ foreach ($t in $catalog) {
 #      + all DLLs in that folder into tools\
 # Use: Invoke-IRCollection.ps1 -CaptureMemory -MemoryTool ftk
 if ($IncludeFTKImager) {
-    Write-Host "[i] FTK Imager — manual staging required (paid/gated download)." -ForegroundColor Yellow
+    Write-Host "[i] FTK Imager - manual staging required (paid/gated download)." -ForegroundColor Yellow
     Write-Host "    1. Download from https://www.exterro.com/forensic-toolkit/ftk-imager" -ForegroundColor Yellow
     Write-Host "    2. Install, then copy ftkimager.exe + DLLs from the install dir into $ToolsDir\" -ForegroundColor Yellow
     Write-Host "    3. Run: Invoke-IRCollection.ps1 -CaptureMemory -MemoryTool ftk" -ForegroundColor Yellow
@@ -169,18 +169,18 @@ if ($IncludeFTKImager) {
     }
 }
 
-# --- Magnet RAM Capture (optional — requires manual staging) -----------------
+# --- Magnet RAM Capture (optional - requires manual staging) -----------------
 # Magnet RAM Capture is a free tool from Magnet Forensics but requires registration.
 # Manual staging: download from https://www.magnetforensics.com/resources/magnet-ram-capture/
-# Place MRCv*.exe (e.g. MRCv120.exe) directly into tools\ — no rename needed.
+# Place MRCv*.exe (e.g. MRCv120.exe) directly into tools\ - no rename needed.
 # Note: MRC v1.2.x is GUI-only for output path selection; /accepteula is the only CLI flag.
 # Use: Invoke-IRCollection.ps1 -CaptureMemory -MemoryTool magnet
 if ($IncludeMagnet) {
-    Write-Host "[i] Magnet RAM Capture — manual staging required (free, registration at magnetforensics.com)." -ForegroundColor Yellow
+    Write-Host "[i] Magnet RAM Capture - manual staging required (free, registration at magnetforensics.com)." -ForegroundColor Yellow
     Write-Host "    1. Register and download MRCv*.exe from https://www.magnetforensics.com/resources/magnet-ram-capture/" -ForegroundColor Yellow
     Write-Host "    2. Place MRCv*.exe (e.g. MRCv120.exe) directly in $ToolsDir\" -ForegroundColor Yellow
     Write-Host "    3. Run: Invoke-IRCollection.ps1 -CaptureMemory -MemoryTool magnet" -ForegroundColor Yellow
-    Write-Host "    NOTE: MRC v1.2.x opens a GUI file-save dialog — output path is selected manually." -ForegroundColor Gray
+    Write-Host "    NOTE: MRC v1.2.x opens a GUI file-save dialog - output path is selected manually." -ForegroundColor Gray
     $mrcExe = Get-ChildItem -Path $ToolsDir -Filter 'MRC*.exe' -ErrorAction SilentlyContinue | Select-Object -First 1
     if ($mrcExe) {
         Write-Host "    [+] $($mrcExe.Name) already present in tools\" -ForegroundColor Green
@@ -190,9 +190,9 @@ if ($IncludeMagnet) {
     }
 }
 
-# --- go-winpmem (primary — AFF4 with sparse streams, no MMIO gap padding) ----
+# --- go-winpmem (primary - AFF4 with sparse streams, no MMIO gap padding) ----
 # The Go rewrite of WinPmem: signed, compact AFF4 output, free from GitHub.
-# AFF4 uses sparse streams — MMIO gaps are not zero-padded, so the image is
+# AFF4 uses sparse streams - MMIO gaps are not zero-padded, so the image is
 # close to physical RAM size rather than the full physical address space.
 # This is the DEFAULT tool for -CaptureMemory.
 if ($IncludeMemory) {
@@ -202,7 +202,7 @@ if ($IncludeMemory) {
     try {
         Invoke-WebRequest -Uri $goUrl -OutFile $dst -UseBasicParsing -TimeoutSec 180 -ErrorAction Stop
         Save-Hash 'go-winpmem' $goUrl $dst 'ok'
-        Write-Host "    -> go-winpmem.exe (AFF4 default, compact — run with -MemoryTool go-winpmem)" -ForegroundColor Green
+        Write-Host "    -> go-winpmem.exe (AFF4 default, compact - run with -MemoryTool go-winpmem)" -ForegroundColor Green
     } catch {
         Write-Host "    FAILED: $($_.Exception.Message)" -ForegroundColor Yellow
         Save-Hash 'go-winpmem' $goUrl $null "failed: $($_.Exception.Message)"
@@ -214,7 +214,7 @@ if ($IncludeMemory) {
     try {
         Invoke-WebRequest -Uri $WinPmemUrl -OutFile $dst -UseBasicParsing -TimeoutSec 180 -ErrorAction Stop
         Save-Hash 'WinPmem' $WinPmemUrl $dst 'ok'
-        Write-Host "    -> winpmem.exe (RAW — use -MemoryTool winpmem)" -ForegroundColor Green
+        Write-Host "    -> winpmem.exe (RAW - use -MemoryTool winpmem)" -ForegroundColor Green
     } catch {
         Write-Host "    FAILED (override with -WinPmemUrl): $($_.Exception.Message)" -ForegroundColor Yellow
         Save-Hash 'WinPmem' $WinPmemUrl $null "failed: $($_.Exception.Message)"
@@ -284,7 +284,7 @@ if ($IncludeYaraRules) {
     )
 
     foreach ($src in $ruleSources) {
-        Write-Host "[*] YARA rules — $($src.Name) ..." -ForegroundColor Cyan
+        Write-Host "[*] YARA rules - $($src.Name) ..." -ForegroundColor Cyan
         $zipPath = Join-Path $tmp "$($src.Name).zip"
         $exPath  = Join-Path $tmp "$($src.Name)_ex"
         $destDir = Join-Path $yaraRulesDir $src.SubDir
@@ -309,7 +309,7 @@ if ($IncludeYaraRules) {
 }
 
 # --- MemProcFS (AFF4-native memory analysis, no mount driver required) -------
-# MemProcFS by Ulf Frisk — free, open source, directly downloadable from GitHub.
+# MemProcFS by Ulf Frisk - free, open source, directly downloadable from GitHub.
 # Used by Analyze-Memory.ps1 when the image is .aff4 (go-winpmem output).
 # Supports AFF4 natively; Volatility standalone does not.
 # Forensic mode (-forensic 1) writes CSV/JSON output without needing to mount.
@@ -319,7 +319,7 @@ if ($IncludeMemProcFS) {
         $rel = Invoke-WebRequest -Uri 'https://api.github.com/repos/ufrisk/MemProcFS/releases/latest' `
                    -UseBasicParsing -TimeoutSec 15 -ErrorAction Stop |
                Select-Object -ExpandProperty Content | ConvertFrom-Json
-        # Windows x64 zip — prefer the versioned "latest" alias asset
+        # Windows x64 zip - prefer the versioned "latest" alias asset
         $asset = $rel.assets |
                  Where-Object { $_.name -match 'win_x64-latest\.zip$' } |
                  Select-Object -First 1
@@ -382,7 +382,7 @@ if ($IncludeMemProcFS) {
                         Write-Host "    sqlite3 download failed: $($_.Exception.Message)" -ForegroundColor Yellow
                     }
                 } else {
-                    Write-Host "    sqlite3: no URL resolved — MemProcFS forensic db queries will not be available." -ForegroundColor Yellow
+                    Write-Host "    sqlite3: no URL resolved - MemProcFS forensic db queries will not be available." -ForegroundColor Yellow
                 }
             } else {
                 Write-Host "    memprocfs.exe not found in archive." -ForegroundColor Yellow
@@ -397,7 +397,7 @@ if ($IncludeMemProcFS) {
         Save-Hash 'MemProcFS' 'github' $null "failed: $($_.Exception.Message)"
     }
 
-    # Also stage Python 3.12 embeddable — used by vmmpyc for AFF4 analysis (no Dokany needed).
+    # Also stage Python 3.12 embeddable - used by vmmpyc for AFF4 analysis (no Dokany needed).
     # Embeddable package: self-contained zip, no installer, no system changes, bare-Windows safe.
     Write-Host "[*] Python 3.12 embeddable (vmmpyc runtime) ..." -ForegroundColor Cyan
     $pyDir = Join-Path $mpcDir 'python'
@@ -425,7 +425,7 @@ if ($IncludeMemProcFS) {
         Save-Hash 'Python312' $pyUrl $null "failed: $($_.Exception.Message)"
     }
 
-    # Also stage Dokany x64 MSI — MemProcFS requires Dokany for VFS mounting.
+    # Also stage Dokany x64 MSI - MemProcFS requires Dokany for VFS mounting.
     # Analyze-Memory.ps1 installs Dokany before analysis and uninstalls after.
     Write-Host "[*] Dokany x64 MSI (MemProcFS VFS driver) ..." -ForegroundColor Cyan
     $dokanDst = Join-Path $ToolsDir 'dokan_x64.msi'
@@ -529,27 +529,27 @@ $manifest | Select-Object Name, Status, File | Format-Table -AutoSize
 # SIG # Begin signature block
 # MIIcoQYJKoZIhvcNAQcCoIIckjCCHI4CAQExDzANBglghkgBZQMEAgEFADB5Bgor
 # BgEEAYI3AgEEoGswaTA0BgorBgEEAYI3AgEeMCYCAwEAAAQQH8w7YFlLCE63JNLG
-# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCD5OuuTiPkKCt8o
-# 0eXuZkYZYGhSZnpywGN2UJMVXN1az6CCFrQwggN2MIICXqADAgECAhBa5MQyEl22
-# qUV1bZluOcpOMA0GCSqGSIb3DQEBCwUAMFMxGjAYBgNVBAsMEUluY2lkZW50IFJl
+# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCBDlgEUDaJ8ZnHm
+# AX3zTS/eLatxgwymjLrAT3u8WI5GKqCCFrQwggN2MIICXqADAgECAhAbL3xr3F9b
+# nkbveZC/LiR8MA0GCSqGSIb3DQEBCwUAMFMxGjAYBgNVBAsMEUluY2lkZW50IFJl
 # c3BvbnNlMRMwEQYDVQQKDApJUiBUb29sa2l0MSAwHgYDVQQDDBdJUiBUb29sa2l0
-# IENvZGUgU2lnbmluZzAeFw0yNjA2MjAwMDU5NDZaFw0zMTA2MjAwMTA5NDZaMFMx
+# IENvZGUgU2lnbmluZzAeFw0yNjA2MjIwNDI0NDVaFw0zMTA2MjIwNDM0NDVaMFMx
 # GjAYBgNVBAsMEUluY2lkZW50IFJlc3BvbnNlMRMwEQYDVQQKDApJUiBUb29sa2l0
 # MSAwHgYDVQQDDBdJUiBUb29sa2l0IENvZGUgU2lnbmluZzCCASIwDQYJKoZIhvcN
-# AQEBBQADggEPADCCAQoCggEBAJ1nFbqBzQLbEhUUTT10Lrva+ooE/uVqzTJbGk5/
-# xh3zYBEAaRil7obceqCWtDg6KSjbDQP8wto42fHUK8tp0FU0NEi2+rkWHfcpeasm
-# z2e+UFQMDlXRcxg7dqe+08OB4pFhwrHSPo0m7HZAgtpHd02POka7jaYVoAnScg7i
-# LuZiRSJ3tJKZu1KCSTntV+LbicnowTlaDEvr7JQzSVs+5BpNadU3n/ujzH088Mgm
-# CoXooQpF12SzbZNCZ+kbgza6bNMbEHNGkLr9S0vHQD95oKPWF7YuOu7jqtkuCOZc
-# KYYi4nOXFwLqXmJ+sqqpR2NrrfMkz4VaALGIZ93o10CHWDkCAwEAAaNGMEQwDgYD
-# VR0PAQH/BAQDAgeAMBMGA1UdJQQMMAoGCCsGAQUFBwMDMB0GA1UdDgQWBBQRXBKC
-# VXuhcK7rCDzb/6SAfPGwvDANBgkqhkiG9w0BAQsFAAOCAQEAlZhDvun+4lQ0yd2C
-# +pAFD3B2/l2N9hArAcHhp6DaO48NSIT3eyyhGrfk8f3lDVhvjEbUDDmb6Oe67rBN
-# 3W7Dp1Y+W8Z96kC3miq7UbmVTGkiQGZFwi0KJ8tw++//vlU3zlW9nhqwFxzm7DfL
-# zECzv6bnd9Ri+1R4zhvkd5BLTuwLjPLkzbOTdsGwbXWWOK2gTTCr82I7G9xcq9Gv
-# qAcoJAHVEiNKt7p7Y+ScDL/AZGBMCBTsN9gcAoIgq22EWBHHV02HmPfuYyddaq1c
-# Lmjot0+5wVoPVl4wNktght1WVHDlk3EpEJF5qc7Yhl3YtniIEHQoO8BkWykpFDhy
-# q5wz7TCCBY0wggR1oAMCAQICEA6bGI750C3n79tQ4ghAGFowDQYJKoZIhvcNAQEM
+# AQEBBQADggEPADCCAQoCggEBAKuTSorzjXf0qc4qX04KtYn2ErVj9RAkn/1f/9YN
+# llrRj0s3urh/LnWmHn4vUjPrDTzHXUx4udOclWNlv52uCMAfXKZR3qD73OCHHQ2l
+# +1s4JqrAdGhr6QPyIhCDwl7wqQUfekQtBep+SqbM0vkbvup3WKgol+c3fIUxvM8E
+# bPLg5CcNWug6Twj+Wn1FJidJihmYARSKT5PFv32BLbffUpuvdWXxzRIRv8c4EE+S
+# bWs3lTiCGrp1X33mXYiMRNAiF5ofrCJwRA7LESh4TCqXWDSvs+KFBi1ZxEnLxmUk
+# 1Wrzq11umlIzoJhnEN0VyBvLK6X40uTF50piU+5kGy9kZlkCAwEAAaNGMEQwDgYD
+# VR0PAQH/BAQDAgeAMBMGA1UdJQQMMAoGCCsGAQUFBwMDMB0GA1UdDgQWBBSpc1pf
+# XTSlgxdtXKDrlumz7H67TjANBgkqhkiG9w0BAQsFAAOCAQEAdPAxdgyk/YzF72lK
+# 4P1I3Lwjice2yAR0aoXSEP5gO/xnAvuqCiAcdPfJhqMrrfq5iFLqTuWSfz+k9irn
+# hjzyWgmo2GUrQ8BVRoNAw7HpTJo7Rw8+FfDzyy+stq9UKWrkflHqwb7oBD+aBs/5
+# ZccFKZi8oeV79CCTGdwXKYgE+xYbV//Twr7rpMbVUqbchEDdZXEzT2GdEUd5B02L
+# bDGJ4Gjz8AtCFcSXWQlLnAQxd5CJVFHDkyfkEs2VvBPtR/MBCF3NiNufb8HgClhS
+# ZHayqVVZhUd+NS7/orBY5M1Ioc0/kGiNO3nlWf1IlAPk/jsILweFZkUO0wBTot/O
+# b18zszCCBY0wggR1oAMCAQICEA6bGI750C3n79tQ4ghAGFowDQYJKoZIhvcNAQEM
 # BQAwZTELMAkGA1UEBhMCVVMxFTATBgNVBAoTDERpZ2lDZXJ0IEluYzEZMBcGA1UE
 # CxMQd3d3LmRpZ2ljZXJ0LmNvbTEkMCIGA1UEAxMbRGlnaUNlcnQgQXNzdXJlZCBJ
 # RCBSb290IENBMB4XDTIyMDgwMTAwMDAwMFoXDTMxMTEwOTIzNTk1OVowYjELMAkG
@@ -653,31 +653,31 @@ $manifest | Select-Object Name, Status, File | Format-Table -AutoSize
 # y2ueIu9THFVkT+um1vshETaWyQo8gmBto/m3acaP9QsuLj3FNwFlTxq25+T4QwX9
 # xa6ILs84ZPvmpovq90K8eWyG2N01c4IhSOxqt81nMYIFQzCCBT8CAQEwZzBTMRow
 # GAYDVQQLDBFJbmNpZGVudCBSZXNwb25zZTETMBEGA1UECgwKSVIgVG9vbGtpdDEg
-# MB4GA1UEAwwXSVIgVG9vbGtpdCBDb2RlIFNpZ25pbmcCEFrkxDISXbapRXVtmW45
-# yk4wDQYJYIZIAWUDBAIBBQCggYQwGAYKKwYBBAGCNwIBDDEKMAigAoAAoQKAADAZ
+# MB4GA1UEAwwXSVIgVG9vbGtpdCBDb2RlIFNpZ25pbmcCEBsvfGvcX1ueRu95kL8u
+# JHwwDQYJYIZIAWUDBAIBBQCggYQwGAYKKwYBBAGCNwIBDDEKMAigAoAAoQKAADAZ
 # BgkqhkiG9w0BCQMxDAYKKwYBBAGCNwIBBDAcBgorBgEEAYI3AgELMQ4wDAYKKwYB
-# BAGCNwIBFTAvBgkqhkiG9w0BCQQxIgQgwyw7UiZAVP8hBOVSzn6fiuXn6VLJqGgi
-# n7EZwONENtkwDQYJKoZIhvcNAQEBBQAEggEAD33rILhT9UArEkGYODvKThVA+nMF
-# iccjjKXfpaHa6Obkp3CiY5z8shY84pbBkNXFQWRrqSz3cSa9E4zbC5t6t5ojZaV0
-# eHsNyvCdmwtIq3UzayyD6LORFrSqI6G/3SNmSXMbybgO7cU+QwTCHBYVV7xIMdFv
-# 09Jc7U9kieuQRugXJnrXMOH7iEWeupRpbu2D+Zvy686Nu5+pgjnJMqECkL4KnBK5
-# diDUk/0Jq87KMAckLFIQAsgFt++RiT0BfFJsOhVPWqlR0Yo6edgpdeedXk7vafbe
-# 5N+gV9j6OPkEMX7N2cZe4ZZE2bMzojhfkKUTAg6NONiRnwQC9Bqsk63ENKGCAyYw
+# BAGCNwIBFTAvBgkqhkiG9w0BCQQxIgQgwKJfDAGO+Z4w6UBKl3T6Y1ZDaLi9zEuN
+# yoFUlAKS5m0wDQYJKoZIhvcNAQEBBQAEggEAYzQGWdYoESLpnWCw3NpQRz+sX3a8
+# be0cMoXJiNLXRChGPsKVQ/l2RFUlE1RaSb8s/l55aWCP8WplHazGExigQEtq8bD5
+# rcjsPXqhSCd+xpQK3vqK2kw4zUHvQgWx/T6UDSiRhAxp2O7JAPGXebeKBPWr0Ly7
+# c9nuUyDA4+RK73H4S4Q2g+ip497YgzikGitzEvlnz9YuMg4gQimtIrk1jgitClC3
+# 7dJ9HIMYVGDmVym+5SrWcdksX00B7U8S93LztX6xruxUGCh/SV/1JRoTWJ4GLjYZ
+# ygzFdaEh/olbM8wEmmJrHa/PKyzFKIe9bkDo3On/qYWAAYCKD1uIqmyj/KGCAyYw
 # ggMiBgkqhkiG9w0BCQYxggMTMIIDDwIBATB9MGkxCzAJBgNVBAYTAlVTMRcwFQYD
 # VQQKEw5EaWdpQ2VydCwgSW5jLjFBMD8GA1UEAxM4RGlnaUNlcnQgVHJ1c3RlZCBH
 # NCBUaW1lU3RhbXBpbmcgUlNBNDA5NiBTSEEyNTYgMjAyNSBDQTECEAqA7xhLjfEF
 # gtHEdqeVdGgwDQYJYIZIAWUDBAIBBQCgaTAYBgkqhkiG9w0BCQMxCwYJKoZIhvcN
-# AQcBMBwGCSqGSIb3DQEJBTEPFw0yNjA2MjAwMTE0MjdaMC8GCSqGSIb3DQEJBDEi
-# BCC2+064ljIq7KJt0u543KNBHd66TyLaUDijPd+HbqVzYjANBgkqhkiG9w0BAQEF
-# AASCAgBrO0cU0xOH6AURG7JV9SJS24X8FaS4fXgoZmJznLS/8THsoJBo5ressn5I
-# d0lHSIHvroud+fD6uI1Pmj1cDA1tcFJGb0Nvg4Lja1/lmnIVuEb271aAvxZLZaXU
-# rr8p8b+bPm6+fYPQj2BfGgamDfKfks/+22qazCIPA3ZuEQGRRTT3MYVuluRTPJYc
-# afjHEY4LANX7SgdRcopWEyfoAEBMDBGFLt1//Qwq0HKug/XCIo9Q1k9Jy4t5RgnV
-# 33onJhHuOrKs6AIYyxu5NdByDFt0ms/021uiKP12YGj0RlEkOWUJJlgQaDdclz52
-# AfwuN/J4gjIeAIOjQ1Xm8sMo+x2KtJQIBmEGSzwvitzn8ReIxJ3ErMtK6xIrzDXY
-# yVrmcPUVozsVzzoNTSo07K+5WzK/rsUExhC6Nx+Jpt1HCLnVCNwqF/4newqe9iPW
-# VIujrsTrkt3i3HyqWTaOOzD8cmcFEPp6Ic6KmxrkasamMTu2tJprD3VG/B2YtNLv
-# XUrPru8DfnEOfmHcWTgZFT4p55+Hk3P1OwfAPTW24zBYQUK8EhR1MgiiFPO1+pIh
-# ibgm2VC+JeJcrkf+tBEG1S2AJsW2SwlZotnvHfd0GqfESFPqYN6laxFL0XWPXcCD
-# +oaKpDDGrRUcJmjjzMOIUnNzwM5bEXY2RlGnCkmQl9MrhARzBA==
+# AQcBMBwGCSqGSIb3DQEJBTEPFw0yNjA2MjIwNDM0NDZaMC8GCSqGSIb3DQEJBDEi
+# BCDzME9LMYJTsz2ZLR1M6okUzxiRQY/vXN7wUjpI9ymWXjANBgkqhkiG9w0BAQEF
+# AASCAgDCxwXQbuDc7pezG7rYCp2m+MI7FDCECdll4pLpFPOUQWfJ4WjSNqCK/ovD
+# dqVnbBv6ElYagT11BWs7gWS6/dKrQXQuyiSM9mU/szngZHe3WA/MDt0J62hP+CM9
+# LFmQnx3MskVrpR2GKxLxdYXR8KSW3GYT0PVy/9SeKsou3OpkLu52Fz4q5H1PICOg
+# EMv8GGbCAADxYDtT0K/1f1bcVqPGrZw+hKpOsbX5TDHRl+aF8BnZp88d+4btNugS
+# oeWBgY2IeYdTu+p55FLe/OlIdMyUlHWJ41OOtAc5YFCPbz6i34AtlQfuHrRAmp2K
+# WfA0yet/qEpoxJWvaRl7hvgqV4yEV0sG4uvbUFCqRAlpTJJGaq9PvhSngCxydQDu
+# s9ctPemO84vNrBSXHicVXF3n9v1Isg4reTK/ubUTeIV47eOLPPOIWeOLM7yqyuLZ
+# hZuTgsaR8ibzJZ12QDJsdOpu8ewF5gAjCx+F4Qus/G05DR/RneMWSvLwDBjlUgoP
+# 81eELr3TZT4PUtLwL/vE9hBC6FPFS5mJCGOflPdLowbibLm5PaBBFsi1PAh8jkYC
+# odbif4bH9IZAHHZNUm22hUgS7bpSusej+IyO1kkb3Md3UiKIjkzhHVv/uhA1cyGt
+# /whPvzsnOpgJG4mgaGpYYKoH75seAWgLzZYwDzsq6Ogi5/A40g==
 # SIG # End signature block

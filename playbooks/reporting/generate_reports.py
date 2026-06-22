@@ -189,11 +189,23 @@ def correlate(findings, remote_findings):
         if "T1562" in (mitre or "") or "Defender Disabled" in get(f, "Type"):
             defender_off = True
 
+    # Cluster memory YARA matches per process (Target = "PID 1234 (proc.exe)") so a
+    # host with many matches collapses to one row per PID with a hit count + rules.
+    yara_clusters = OrderedDict()
+    for f in findings:
+        if get(f, "Type") == "YARA Match (Memory)":
+            tgt = get(f, "Target")
+            yara_clusters.setdefault(tgt, [])
+            m = re.search(r"Rule:\s*([^|]+?)(?:\s*\||$)", get(f, "Details"))
+            if m:
+                yara_clusters[tgt].append(m.group(1).strip())
+
     return {
         "funnel": funnel,
         "tp": tp,
         "tp_count": len(tp),
         "total": len(findings),
+        "yara_clusters": yara_clusters,
         "techniques": techniques,
         "rats": rats,
         "relays": relays,
@@ -303,6 +315,24 @@ def md_incident(model, host, incident, analyst, when):
     a("")
     a("---")
     a("")
+
+    # Memory YARA matches, clustered per process (count + rules per PID).
+    yc = model.get("yara_clusters") or {}
+    if yc:
+        total_hits = sum(len(v) for v in yc.values())
+        a("## YARA matches by process (memory)")
+        a("")
+        a(f"{total_hits} match(es) across {len(yc)} process(es), clustered per PID.")
+        a("")
+        a("| Process (PID) | Hits | Rules |")
+        a("|---|---:|---|")
+        for tgt in sorted(yc, key=lambda k: len(yc[k]), reverse=True):
+            rules = ", ".join(dict.fromkeys(yc[tgt]))   # unique, order-preserving
+            a(f"| {tgt} | {len(yc[tgt])} | {rules} |")
+        a("")
+        a("---")
+        a("")
+
     a("## 4. Adjudication funnel")
     a("")
     a("| Verdict | Count |")

@@ -121,7 +121,12 @@ a sha256 `tools/STAGED_MANIFEST.json`. The core workflow runs offline without an
 they only enable optional depth (memory capture, YARA, extended persistence).
 
 - **Windows** — `Build-OfflineToolkit.ps1 [-IncludeMemory] [-IncludeYaraRules] [-IncludeMemProcFS] [-IncludeVolatility] [-StageSymbols]`
-  (memory analysis: **MemProcFS** for the default AFF4 capture; Volatility 3 only for raw/dmp images)
+  Memory capture: `go-winpmem` (AFF4) → analyst-side analysis via **MemProcFS + Python 3.12 embeddable** (AFF4 native, no driver install) or **Volatility 3** (raw/dmp). `Build-OfflineToolkit.ps1 -IncludeMemProcFS` stages MemProcFS, Python 3.12, sqlite3, and Dokany MSI into `tools/`.
+
+  Full recommended staging for a Windows deployment:
+  ```powershell
+  .\Build-OfflineToolkit.ps1 -IncludeMemory -IncludeYaraRules -IncludeMemProcFS -IncludeVolatility
+  ```
 - **Linux** — `Build-OfflineToolkit-Linux.sh [--include-memory] [--include-cloud] [--stage-symbols] [--check-only]`
   (memory analysis: **Volatility 3** wheels + `dwarf2json` + kernel ISF, vendored for offline use)
 

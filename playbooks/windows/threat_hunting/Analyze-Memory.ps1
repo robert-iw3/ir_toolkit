@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Offline post-collection memory analysis. Runs Volatility 3 plugins against a
     captured .raw image and emits ONLY concerning findings in the same JSON schema
@@ -26,6 +26,7 @@
       windows.hashdump                 - NTLM hashes (credential access)
       windows.svcscan                  - rogue services not in the SCM
       windows.ldrmodules               - unlinked DLLs (process injection)
+      windows.vadyarascan              - YARA scan of process memory (staged rules)
 
     Output: Memory_Findings_<stamp>.json in -OutputDir (defaults to image parent folder).
     Integrate with the main pipeline: add Memory_Findings_*.json to Combined_Findings and
@@ -54,23 +55,96 @@ param(
     [string]$OutputDir   = '',
     [string]$VolExe      = '',
     [string]$SymbolDir   = '',
-    [string]$SkipPlugins = ''
+    [string]$SkipPlugins = '',
+
+    # Merge memory findings into Combined_Findings and run Get-FindingContext.ps1 -Live.
+    [switch]$Adjudicate
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Continue'
 
 # -- Helpers -------------------------------------------------------------------
-# Safe property accessor — returns $Default when property is missing or null.
+# Safe property accessor - returns $Default when property is missing or null.
 function Get-Prop {
     param($Obj, [string[]]$Names, $Default = '')
     foreach ($n in $Names) {
         try {
             $v = $Obj.$n
+            # Member access on a collection (or a JSON array value) yields Object[];
+            # take the first element so downstream [long]/[string] casts can't blow up.
+            if ($v -is [System.Array]) { $v = @($v)[0] }
             if ($null -ne $v -and [string]$v -ne '') { return $v }
         } catch {}
     }
     return $Default
+}
+
+function Import-MemoryFindings {
+    # Read a Memory_Findings JSON file into a List of findings. Returns a List (never
+    # $null) so .Count is correct on PS 5.1 and 7+; an array return mis-counts the
+    # empty case across versions. Callers use .Count directly (no @() wrap).
+    param([Parameter(Mandatory)][string]$Path)
+    $list = [System.Collections.Generic.List[object]]::new()
+    if (-not (Test-Path -LiteralPath $Path)) { return ,$list }
+    $raw = Get-Content -LiteralPath $Path -Raw
+    if ([string]::IsNullOrWhiteSpace($raw)) { return ,$list }
+    $data = $null
+    try { $data = $raw | ConvertFrom-Json -ErrorAction Stop } catch { return ,$list }
+    if ($null -ne $data) {
+        foreach ($item in @($data)) { if ($null -ne $item) { $list.Add($item) } }
+    }
+    return ,$list
+}
+
+function ConvertTo-FindingsJson {
+    # Serialize findings to a JSON string that is always an array on 5.1 and 7+.
+    # (5.1 collapses a single finding to a bare object / a List to {value,Count}.)
+    param($Findings)
+    $arr = @($Findings)
+    if ($arr.Count -eq 0) { return '[]' }
+    $json = ConvertTo-Json -InputObject $arr -Depth 6
+    if ($json.TrimStart()[0] -ne '[') { $json = "[`r`n$json`r`n]" }
+    return $json
+}
+
+# -- YARA helpers (shared by the Volatility branch; parity with memory_yara.py) --
+function Test-YaraNoiseRule {
+    # True for high-FP noise rule-name prefixes.
+    param([string]$Name)
+    return [bool]($Name -match '(?i)^(generic_|test_|debug_|example_|placeholder|with_|pua_|riskware_|grayware_)')
+}
+
+function Get-YaraSeverity {
+    # Critical for high-signal rule names, otherwise High.
+    param([string]$Name)
+    $low = ([string]$Name).ToLower()
+    foreach ($k in 'cobalt','beacon','meterpreter','mimikatz','shellcode','inject','empire') {
+        if ($low.Contains($k)) { return 'Critical' }
+    }
+    return 'High'
+}
+
+function New-CombinedYaraFile {
+    # Build one vol3 --yara-file include file from a rules dir; $null if no rules.
+    param([string]$RulesDir)
+    if (-not (Test-Path -LiteralPath $RulesDir)) { return $null }
+    $files = @(Get-ChildItem -LiteralPath $RulesDir -Recurse -Include '*.yar','*.yara' -File -ErrorAction SilentlyContinue)
+    if ($files.Count -eq 0) { return $null }
+    $combined = Join-Path ([System.IO.Path]::GetTempPath()) ("yara_combined_{0}.yar" -f [guid]::NewGuid().ToString('N'))
+    $sb = [System.Text.StringBuilder]::new()
+    foreach ($f in $files) { [void]$sb.AppendLine('include "' + $f.FullName + '"') }
+    Set-Content -LiteralPath $combined -Value $sb.ToString() -Encoding UTF8
+    return $combined
+}
+
+function Merge-FindingSets {
+    # Concatenate two finding sets into one List (version-safe; drops nulls).
+    param($Existing, $New)
+    $list = [System.Collections.Generic.List[object]]::new()
+    foreach ($f in @($Existing)) { if ($null -ne $f) { $list.Add($f) } }
+    foreach ($f in @($New))      { if ($null -ne $f) { $list.Add($f) } }
+    return ,$list
 }
 
 # -- Resolve paths -------------------------------------------------------------
@@ -103,9 +177,31 @@ if (-not $VolExe) {
         $search = $parent
     }
 }
-# -- Tool routing: AFF4 -> MemProcFS, raw/mem/dmp -> Volatility ----------------
-$imageExt   = [System.IO.Path]::GetExtension($ImagePath).ToLower()
-$useMemProcFS = $imageExt -eq '.aff4'
+# -- Tool routing by image-file extension -------------------------------------
+# Explicit per-format decision. MemProcFS is the DEFAULT engine (it reads AFF4
+# natively); Volatility 3 is used ONLY for the raw-style formats it can parse --
+# vol.exe's standalone build has no pyaff4 and cannot open AFF4 at all, so AFF4
+# and any unknown/extensionless image must never be sent to Volatility.
+function Get-MemoryEngine {
+    param([Parameter(Mandatory)][string]$ImagePath)
+    $ext = [System.IO.Path]::GetExtension($ImagePath).ToLower()
+    switch ($ext) {
+        '.aff4'  { 'MemProcFS' }   # go-winpmem capture format
+        '.raw'   { 'Volatility' }  # raw physical-memory dump
+        '.mem'   { 'Volatility' }
+        '.dmp'   { 'Volatility' }
+        '.lime'  { 'Volatility' }
+        '.vmem'  { 'Volatility' }
+        '.bin'   { 'Volatility' }
+        '.dump'  { 'Volatility' }
+        '.crash' { 'Volatility' }
+        '.img'   { 'Volatility' }
+        default  { 'MemProcFS' }   # unknown -> default to the AFF4-capable engine
+    }
+}
+
+$AnalysisEngine = Get-MemoryEngine -ImagePath $ImagePath
+$useMemProcFS   = $AnalysisEngine -eq 'MemProcFS'
 
 if ($useMemProcFS) {
     # AFF4 files from go-winpmem are analyzed with MemProcFS, which supports AFF4 natively.
@@ -169,6 +265,7 @@ function Write-Log {
 }
 
 $script:Findings = [System.Collections.Generic.List[object]]::new()
+$findingsWrittenByPython = $false   # set true once the Python path writes the findings file
 
 function Add-Finding {
     param([string]$Severity, [string]$Type, [string]$Target, [string]$Details, [string]$Mitre)
@@ -183,16 +280,17 @@ function Add-Finding {
 }
 
 function Invoke-VolPlugin {
-    param([string]$Plugin)
+    param([string]$Plugin, [string[]]$PluginArgs = @(), [int]$TimeoutSec = 0)
     Write-Log "  [vol] $Plugin ..." 'Cyan'
     $plugLog  = Join-Path $OutputDir "_vol_${Plugin}_$RunStamp.log"
     $argList  = [System.Collections.Generic.List[string]]::new()
     $argList.Add('-r'); $argList.Add('json')
     $argList.Add('-f'); $argList.Add($ImagePath)
-    if (Test-Path -LiteralPath $SymbolDir) {
+    if ($SymbolDir -and (Test-Path -LiteralPath $SymbolDir)) {
         $argList.Add('--symbol-dirs'); $argList.Add($SymbolDir)
     }
     $argList.Add($Plugin)
+    foreach ($a in $PluginArgs) { $argList.Add($a) }   # plugin-specific args follow the plugin
     try {
         $raw  = & $VolExe @argList 2>$plugLog
         if ($LASTEXITCODE -ne 0) {
@@ -216,8 +314,13 @@ if ($useMemProcFS) {
     Write-Log " tool  : $mpcExe" 'Green'
     Write-Log '===================================================' 'Green'
 
-    # ── Primary path: vmmpyc Python API (no Dokany/WinFsp required) ──────────
-    # Uses vmmpyc.pyd bundled with MemProcFS. No system-level changes — nothing
+    # Dokany/VFS fallback runs only if the primary vmmpyc Python path does NOT
+    # complete the analysis. This is a SEPARATE flag from $useMemProcFS so that a
+    # successful Python run can skip Dokany without disturbing tool routing.
+    $runDokany = $true
+
+    # -- Primary path: vmmpyc Python API (no Dokany/WinFsp required) ----------
+    # Uses vmmpyc.pyd bundled with MemProcFS. No system-level changes - nothing
     # to install or revert. Requires Python 3.x (python.exe in PATH).
     $pyScript  = Join-Path $PSScriptRoot 'memory_forensic.py'
     # Prefer bundled Python in tools\memprocfs\python\ (staged offline, no system Python needed).
@@ -230,7 +333,7 @@ if ($useMemProcFS) {
         foreach ($c in @('python','python3')) {
             try { $v = & $c --version 2>&1; if ($LASTEXITCODE -eq 0 -and $v -match 'Python 3') { $pyExe = $c; break } } catch {}
         }
-        if ($pyExe) { Write-Log "  Using system Python (bundle tools\memprocfs\python\ not staged — run Build-OfflineToolkit.ps1 -IncludeMemProcFS)" 'Yellow' }
+        if ($pyExe) { Write-Log "  Using system Python (bundle tools\memprocfs\python\ not staged - run Build-OfflineToolkit.ps1 -IncludeMemProcFS)" 'Yellow' }
     }
 
     if ($pyExe -and (Test-Path -LiteralPath $pyScript)) {
@@ -238,26 +341,28 @@ if ($useMemProcFS) {
         $pyLog = Join-Path $OutputDir "_MemProcFS_$RunStamp.log"
         & $pyExe $pyScript $ImagePath $OutputDir 2>&1 | Tee-Object -FilePath $pyLog -Append
         if ($LASTEXITCODE -eq 0) {
-            $count = $script:Findings.Count  # findings written directly by py script
             Write-Log "  Python analysis complete." 'Green'
-            # Jump to output section — Python script already wrote Memory_Findings_*.json
+            # Python already wrote the canonical Memory_Findings_*.json (a proper array).
             $pyFindings = Get-ChildItem -Path $OutputDir -Filter "Memory_Findings_*.json" |
                           Sort-Object LastWriteTime -Descending | Select-Object -First 1
             if ($pyFindings) {
                 Write-Log "  Findings: $($pyFindings.FullName)" 'Green'
-                $script:Findings = @(Get-Content -LiteralPath $pyFindings.FullName -Raw | ConvertFrom-Json)
+                $script:Findings = Import-MemoryFindings -Path $pyFindings.FullName
+                # Report on (and don't clobber) Python's own findings file.
+                $OutFile = $pyFindings.FullName
+                $findingsWrittenByPython = $true
             }
-            # Skip Dokany/VFS path
-            $useMemProcFS = $false
+            # Primary analysis done by Python - skip the Dokany/VFS fallback.
+            $runDokany = $false
         } else {
-            Write-Log "  vmmpyc analysis failed (exit $LASTEXITCODE) — falling back to MemProcFS/Dokany path." 'Yellow'
+            Write-Log "  vmmpyc analysis failed (exit $LASTEXITCODE) - falling back to MemProcFS/Dokany path." 'Yellow'
         }
     } else {
-        if (-not $pyExe)      { Write-Log '  Python 3 not found — falling back to MemProcFS/Dokany path.' 'Yellow' }
+        if (-not $pyExe)      { Write-Log '  Python 3 not found - falling back to MemProcFS/Dokany path.' 'Yellow' }
         if (-not (Test-Path $pyScript)) { Write-Log "  memory_forensic.py not found at $pyScript" 'Yellow' }
     }
 
-    if ($useMemProcFS) {
+    if ($runDokany) {
     $sqliteDb   = Join-Path $OutputDir 'vmm.sqlite3'
     $mpcLogPath = Join-Path $OutputDir "_MemProcFS_$RunStamp.log"
 
@@ -281,7 +386,7 @@ if ($useMemProcFS) {
         $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
                     [Security.Principal.WindowsBuiltInRole]::Administrator)
         if (-not $isAdmin) {
-            Write-Log '[!] AFF4 analysis requires Administrator — Dokany MSI cannot install without elevation.' 'Yellow'
+            Write-Log '[!] AFF4 analysis requires Administrator - Dokany MSI cannot install without elevation.' 'Yellow'
             Write-Log '    Re-run from an elevated PowerShell (Run as Administrator).' 'Yellow'
             Write-Log "    pwsh -ExecutionPolicy Bypass -File `"$($MyInvocation.MyCommand.Path)`" -ImagePath `"$ImagePath`" -OutputDir `"$OutputDir`"" 'Yellow'
             exit 1
@@ -310,17 +415,17 @@ if ($useMemProcFS) {
             Tee-Object -FilePath $mpcLogPath -Append
     } finally {
         Pop-Location
-        # Uninstall Dokany if we installed it — leave no forensic footprint on the analyst machine.
+        # Uninstall Dokany if we installed it - leave no forensic footprint on the analyst machine.
         if ($dokanWeInstalled) {
             Write-Log '  Uninstalling Dokany ...' 'Cyan'
             $uninst = Start-Process msiexec.exe -ArgumentList "/x `"$dokanMsi`" /quiet /norestart" -PassThru -Wait
             if ($uninst.ExitCode -eq 0) { Write-Log '  Dokany uninstalled.' 'Green' }
-            else { Write-Log "  Dokany uninstall returned exit $($uninst.ExitCode) — may need manual removal." 'Yellow' }
+            else { Write-Log "  Dokany uninstall returned exit $($uninst.ExitCode) - may need manual removal." 'Yellow' }
         }
     }
 
     if (-not (Test-Path -LiteralPath $sqliteDb)) {
-        Write-Log '[!] vmm.sqlite3 not written — check _MemProcFS_*.log for errors.' 'Yellow'
+        Write-Log '[!] vmm.sqlite3 not written - check _MemProcFS_*.log for errors.' 'Yellow'
         exit 1
     }
     Write-Log "  Forensic database: $sqliteDb" 'Green'
@@ -410,8 +515,12 @@ if ($useMemProcFS) {
             Write-Log "  External connections: $n" 'Yellow'
         }
     }
+    }   # end inner if ($runDokany) - Dokany/VFS fallback (no else clause)
 
 } else {
+# NOTE: this else binds to the OUTER if ($useMemProcFS). It runs ONLY for
+# Volatility-supported image formats - never as a fallback when AFF4/MemProcFS
+# routing was chosen (a failed MemProcFS run does NOT silently fall through here).
 
 Write-Log '===================================================' 'Green'
 Write-Log " Memory Analysis (Volatility / raw)" 'Green'
@@ -607,52 +716,124 @@ if ('ldrmodules' -notin $skipSet) {
         $n = @($script:Findings | Where-Object { $_.Type -eq 'Unlinked DLL (Memory)' }).Count
         Write-Log "  Unlinked DLLs: $n" 'Yellow'
     }
-}   # end inner if ($useMemProcFS) — Dokany/sqlite branch
+}   # end if ('ldrmodules' ...) within the Volatility branch
 
-}   # end outer if ($useMemProcFS)
+# -- 8. YARA scan of process memory (vadyarascan) ------------------------------
+# Parity with the MemProcFS/Python path: scan process VADs with the staged rules.
+if ('yara' -notin $skipSet -and 'vadyarascan' -notin $skipSet) {
+    Write-Log '=== YARA memory scan (vadyarascan) ===' 'Cyan'
+    $rulesDir = Join-Path $toolsDir 'yara_rules'
+    $combined = New-CombinedYaraFile -RulesDir $rulesDir
+    if (-not $combined) {
+        Write-Log "  SKIP: no YARA rules in $rulesDir" 'Yellow'
+    } else {
+        try {
+            $yaraData = Invoke-VolPlugin 'windows.vadyarascan' @('--yara-file', $combined)
+            $seen  = [System.Collections.Generic.HashSet[string]]::new()
+            $yHits = 0
+            foreach ($row in @($yaraData)) {
+                if ($yHits -ge 200) { break }                 # cap noise
+                $rule = [string](Get-Prop $row @('Rule') '')
+                if (-not $rule -or (Test-YaraNoiseRule $rule)) { continue }
+                $procId = Get-Prop $row @('PID','Pid') '?'
+                $proc   = [string](Get-Prop $row @('Process','ImageFileName') 'unknown')
+                if (-not $seen.Add("$procId|$rule")) { continue }   # one finding per PID+rule
+                Add-Finding (Get-YaraSeverity $rule) 'YARA Match (Memory)' `
+                    "PID $procId ($proc)" `
+                    "Rule: $rule (vadyarascan)" `
+                    'T1055 (Process Injection), T1027 (Obfuscated Files)'
+                $yHits++
+            }
+        } finally {
+            if (Test-Path -LiteralPath $combined) {
+                Remove-Item -LiteralPath $combined -Force -ErrorAction SilentlyContinue
+            }
+        }
+        $n = @($script:Findings | Where-Object { $_.Type -eq 'YARA Match (Memory)' }).Count
+        Write-Log "  YARA matches: $n" 'Yellow'
+    }
+}
 
-} # end else (Volatility branch)
+}   # end else (Volatility branch = else of the outer if ($useMemProcFS))
 
 # -- Output --------------------------------------------------------------------
-$count = $script:Findings.Count
+$count = $script:Findings.Count   # always a List (Add-Finding or Import-MemoryFindings)
 Write-Log '===================================================' 'Green'
 Write-Log " Memory analysis complete -- $count concerning finding(s)" 'Green'
 Write-Log " Output: $OutFile" 'Green'
 Write-Log '===================================================' 'Green'
 
+# The Python/MemProcFS path already wrote a correct findings array; only the
+# Volatility/Dokany path (which builds $script:Findings here) needs to serialize.
+if (-not $findingsWrittenByPython) {
+    ConvertTo-FindingsJson $script:Findings | Out-File -FilePath $OutFile -Encoding UTF8
+}
+
 if ($count -gt 0) {
-    $script:Findings | ConvertTo-Json -Depth 5 | Out-File -FilePath $OutFile -Encoding UTF8
     Write-Host "`n[+] $count finding(s) -> $(Split-Path $OutFile -Leaf)" -ForegroundColor Green
-    Write-Host '[i] To adjudicate: merge Memory_Findings_*.json into Combined_Findings and re-run Get-FindingContext.ps1 -Live' -ForegroundColor Cyan
+    if (-not $Adjudicate) {
+        Write-Host '[i] To adjudicate now, re-run with -Adjudicate (merges into Combined_Findings + Get-FindingContext.ps1 -Live)' -ForegroundColor Cyan
+    }
 } else {
     Write-Host "`n[+] No concerning findings from memory analysis." -ForegroundColor Green
-    @() | ConvertTo-Json | Out-File -FilePath $OutFile -Encoding UTF8
+}
+
+# -- Auto-wire into adjudication (opt-in) --------------------------------------
+# Merge memory findings into the host's Combined_Findings and adjudicate live,
+# instead of leaving it as a manual analyst step.
+if ($Adjudicate) {
+    $ctxScript = Join-Path $PSScriptRoot 'Get-FindingContext.ps1'
+    if (-not (Test-Path -LiteralPath $ctxScript)) {
+        Write-Log "  -Adjudicate: Get-FindingContext.ps1 not found next to this script - skipping." 'Yellow'
+    } else {
+        $memFindings = Import-MemoryFindings -Path $OutFile
+        $prevCombined = Get-ChildItem -Path $OutputDir -Filter 'Combined_Findings_*.json' -File -ErrorAction SilentlyContinue |
+                        Sort-Object LastWriteTime -Descending | Select-Object -First 1
+        $existing = if ($prevCombined) { Import-MemoryFindings -Path $prevCombined.FullName } else { @() }
+        $merged = Merge-FindingSets $existing $memFindings
+        $combinedOut = Join-Path $OutputDir "Combined_Findings_$RunStamp.json"
+        ConvertTo-FindingsJson $merged | Out-File -FilePath $combinedOut -Encoding UTF8
+        Write-Log "  Merged $($merged.Count) finding(s) -> $(Split-Path $combinedOut -Leaf)" 'Green'
+        Write-Log "  Adjudicating (Get-FindingContext.ps1 -Live) ..." 'Cyan'
+        & $ctxScript -HostFolder $OutputDir -ReportPath $combinedOut -Live
+
+        # Roll the adjudicated memory findings through to ALL workflow reports
+        # (Incident_Report, Attack_Graph, IOCs, Principals, ATT&CK Navigator).
+        $reportScript = Join-Path $PSScriptRoot '..\..\reporting\generate_reports.ps1'
+        if (Test-Path -LiteralPath $reportScript) {
+            Write-Log "  Regenerating reports (Incident_Report, Attack_Graph, IOCs, Principals) ..." 'Cyan'
+            & $reportScript -HostFolder $OutputDir
+            Write-Log "  Reports updated with memory findings." 'Green'
+        } else {
+            Write-Log "  Report generator not found at $reportScript - reports not regenerated." 'Yellow'
+        }
+    }
 }
 
 # SIG # Begin signature block
 # MIIcoQYJKoZIhvcNAQcCoIIckjCCHI4CAQExDzANBglghkgBZQMEAgEFADB5Bgor
 # BgEEAYI3AgEEoGswaTA0BgorBgEEAYI3AgEeMCYCAwEAAAQQH8w7YFlLCE63JNLG
-# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCBwdE3fvjJKIzeR
-# BajetyukQ0IKOSpjl25FWsPjQEL1f6CCFrQwggN2MIICXqADAgECAhBa5MQyEl22
-# qUV1bZluOcpOMA0GCSqGSIb3DQEBCwUAMFMxGjAYBgNVBAsMEUluY2lkZW50IFJl
+# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCC1WZx7XIT+d7ds
+# 3Mj876pZ9cf/z5lzd9wTQvl2LtQ1hqCCFrQwggN2MIICXqADAgECAhAbL3xr3F9b
+# nkbveZC/LiR8MA0GCSqGSIb3DQEBCwUAMFMxGjAYBgNVBAsMEUluY2lkZW50IFJl
 # c3BvbnNlMRMwEQYDVQQKDApJUiBUb29sa2l0MSAwHgYDVQQDDBdJUiBUb29sa2l0
-# IENvZGUgU2lnbmluZzAeFw0yNjA2MjAwMDU5NDZaFw0zMTA2MjAwMTA5NDZaMFMx
+# IENvZGUgU2lnbmluZzAeFw0yNjA2MjIwNDI0NDVaFw0zMTA2MjIwNDM0NDVaMFMx
 # GjAYBgNVBAsMEUluY2lkZW50IFJlc3BvbnNlMRMwEQYDVQQKDApJUiBUb29sa2l0
 # MSAwHgYDVQQDDBdJUiBUb29sa2l0IENvZGUgU2lnbmluZzCCASIwDQYJKoZIhvcN
-# AQEBBQADggEPADCCAQoCggEBAJ1nFbqBzQLbEhUUTT10Lrva+ooE/uVqzTJbGk5/
-# xh3zYBEAaRil7obceqCWtDg6KSjbDQP8wto42fHUK8tp0FU0NEi2+rkWHfcpeasm
-# z2e+UFQMDlXRcxg7dqe+08OB4pFhwrHSPo0m7HZAgtpHd02POka7jaYVoAnScg7i
-# LuZiRSJ3tJKZu1KCSTntV+LbicnowTlaDEvr7JQzSVs+5BpNadU3n/ujzH088Mgm
-# CoXooQpF12SzbZNCZ+kbgza6bNMbEHNGkLr9S0vHQD95oKPWF7YuOu7jqtkuCOZc
-# KYYi4nOXFwLqXmJ+sqqpR2NrrfMkz4VaALGIZ93o10CHWDkCAwEAAaNGMEQwDgYD
-# VR0PAQH/BAQDAgeAMBMGA1UdJQQMMAoGCCsGAQUFBwMDMB0GA1UdDgQWBBQRXBKC
-# VXuhcK7rCDzb/6SAfPGwvDANBgkqhkiG9w0BAQsFAAOCAQEAlZhDvun+4lQ0yd2C
-# +pAFD3B2/l2N9hArAcHhp6DaO48NSIT3eyyhGrfk8f3lDVhvjEbUDDmb6Oe67rBN
-# 3W7Dp1Y+W8Z96kC3miq7UbmVTGkiQGZFwi0KJ8tw++//vlU3zlW9nhqwFxzm7DfL
-# zECzv6bnd9Ri+1R4zhvkd5BLTuwLjPLkzbOTdsGwbXWWOK2gTTCr82I7G9xcq9Gv
-# qAcoJAHVEiNKt7p7Y+ScDL/AZGBMCBTsN9gcAoIgq22EWBHHV02HmPfuYyddaq1c
-# Lmjot0+5wVoPVl4wNktght1WVHDlk3EpEJF5qc7Yhl3YtniIEHQoO8BkWykpFDhy
-# q5wz7TCCBY0wggR1oAMCAQICEA6bGI750C3n79tQ4ghAGFowDQYJKoZIhvcNAQEM
+# AQEBBQADggEPADCCAQoCggEBAKuTSorzjXf0qc4qX04KtYn2ErVj9RAkn/1f/9YN
+# llrRj0s3urh/LnWmHn4vUjPrDTzHXUx4udOclWNlv52uCMAfXKZR3qD73OCHHQ2l
+# +1s4JqrAdGhr6QPyIhCDwl7wqQUfekQtBep+SqbM0vkbvup3WKgol+c3fIUxvM8E
+# bPLg5CcNWug6Twj+Wn1FJidJihmYARSKT5PFv32BLbffUpuvdWXxzRIRv8c4EE+S
+# bWs3lTiCGrp1X33mXYiMRNAiF5ofrCJwRA7LESh4TCqXWDSvs+KFBi1ZxEnLxmUk
+# 1Wrzq11umlIzoJhnEN0VyBvLK6X40uTF50piU+5kGy9kZlkCAwEAAaNGMEQwDgYD
+# VR0PAQH/BAQDAgeAMBMGA1UdJQQMMAoGCCsGAQUFBwMDMB0GA1UdDgQWBBSpc1pf
+# XTSlgxdtXKDrlumz7H67TjANBgkqhkiG9w0BAQsFAAOCAQEAdPAxdgyk/YzF72lK
+# 4P1I3Lwjice2yAR0aoXSEP5gO/xnAvuqCiAcdPfJhqMrrfq5iFLqTuWSfz+k9irn
+# hjzyWgmo2GUrQ8BVRoNAw7HpTJo7Rw8+FfDzyy+stq9UKWrkflHqwb7oBD+aBs/5
+# ZccFKZi8oeV79CCTGdwXKYgE+xYbV//Twr7rpMbVUqbchEDdZXEzT2GdEUd5B02L
+# bDGJ4Gjz8AtCFcSXWQlLnAQxd5CJVFHDkyfkEs2VvBPtR/MBCF3NiNufb8HgClhS
+# ZHayqVVZhUd+NS7/orBY5M1Ioc0/kGiNO3nlWf1IlAPk/jsILweFZkUO0wBTot/O
+# b18zszCCBY0wggR1oAMCAQICEA6bGI750C3n79tQ4ghAGFowDQYJKoZIhvcNAQEM
 # BQAwZTELMAkGA1UEBhMCVVMxFTATBgNVBAoTDERpZ2lDZXJ0IEluYzEZMBcGA1UE
 # CxMQd3d3LmRpZ2ljZXJ0LmNvbTEkMCIGA1UEAxMbRGlnaUNlcnQgQXNzdXJlZCBJ
 # RCBSb290IENBMB4XDTIyMDgwMTAwMDAwMFoXDTMxMTEwOTIzNTk1OVowYjELMAkG
@@ -756,31 +937,31 @@ if ($count -gt 0) {
 # y2ueIu9THFVkT+um1vshETaWyQo8gmBto/m3acaP9QsuLj3FNwFlTxq25+T4QwX9
 # xa6ILs84ZPvmpovq90K8eWyG2N01c4IhSOxqt81nMYIFQzCCBT8CAQEwZzBTMRow
 # GAYDVQQLDBFJbmNpZGVudCBSZXNwb25zZTETMBEGA1UECgwKSVIgVG9vbGtpdDEg
-# MB4GA1UEAwwXSVIgVG9vbGtpdCBDb2RlIFNpZ25pbmcCEFrkxDISXbapRXVtmW45
-# yk4wDQYJYIZIAWUDBAIBBQCggYQwGAYKKwYBBAGCNwIBDDEKMAigAoAAoQKAADAZ
+# MB4GA1UEAwwXSVIgVG9vbGtpdCBDb2RlIFNpZ25pbmcCEBsvfGvcX1ueRu95kL8u
+# JHwwDQYJYIZIAWUDBAIBBQCggYQwGAYKKwYBBAGCNwIBDDEKMAigAoAAoQKAADAZ
 # BgkqhkiG9w0BCQMxDAYKKwYBBAGCNwIBBDAcBgorBgEEAYI3AgELMQ4wDAYKKwYB
-# BAGCNwIBFTAvBgkqhkiG9w0BCQQxIgQg0opY42pj8buwPhTR3QxN7M6+kBZfcBSv
-# kmF6g1e2gdAwDQYJKoZIhvcNAQEBBQAEggEASLDH9QkBVrYw2RYCCt1WcBE9R08B
-# Z+2iry5e67HaM3NSqk0Pm9slpVh30Sp5Yo/867Yt5nEcXsbnLBHeOxc2QWtyk9mF
-# x1mbGC/eyJJPmgbIum3PZ30M6A66K9N02D4xTsSgU+xhS0CoCEusrAVkymDU/dLq
-# q8WfRVcDtXP9bknV2E4vhpv6KQ0qJHLMhZHcTRUCh/zs9TT23ieWXhhubZT96raY
-# xWmuoer/Qgs550QT1Op0nylL4eenb+WJEd+dT0yN8XYnVqe1JVm7MJSMAXfUaqrh
-# k8+Ch/gOsA8aMtn7gAtqBDaJme1CW9cX378N49hixAtLR05VO+qe5RLoYaGCAyYw
+# BAGCNwIBFTAvBgkqhkiG9w0BCQQxIgQgMMnle70U2xQsnQRow9leHKtp12lB9Z2l
+# 5P/MOSH0QX4wDQYJKoZIhvcNAQEBBQAEggEAda5UG7SOG2MCo05msD9soiPeANXW
+# nPoj8Tu5wns+w0TNvikLpbX7pH21zDAicBJI9C5yiuDYEysByTPBY+yVvqQsWM3I
+# qALoOZr7JjyB7lB0Pc4nBBsQwmouk/G3ixc1IaPFnHbdl+GWDV4ofYTuNg9lhmgi
+# dYkRUwripQUphBAMrywstP1fhoZV50MInJp0l0Y7MRCx1NnLn8M7XiGmhKCqlKMy
+# LMeZnJk4hDNzpsB/PT31YsVWe1KA23gdCQ4uRmGaR/O7r1ezIWaUSJgSxEaeiRIC
+# ozuBM8iW9U8fRj+sj8+HM8d5QIH2GcwUGcRWLB1YfP4UHpnIBN9ktg8hmaGCAyYw
 # ggMiBgkqhkiG9w0BCQYxggMTMIIDDwIBATB9MGkxCzAJBgNVBAYTAlVTMRcwFQYD
 # VQQKEw5EaWdpQ2VydCwgSW5jLjFBMD8GA1UEAxM4RGlnaUNlcnQgVHJ1c3RlZCBH
 # NCBUaW1lU3RhbXBpbmcgUlNBNDA5NiBTSEEyNTYgMjAyNSBDQTECEAqA7xhLjfEF
 # gtHEdqeVdGgwDQYJYIZIAWUDBAIBBQCgaTAYBgkqhkiG9w0BCQMxCwYJKoZIhvcN
-# AQcBMBwGCSqGSIb3DQEJBTEPFw0yNjA2MjAwMTE0MzJaMC8GCSqGSIb3DQEJBDEi
-# BCAtO3ZT76ntzn6eSrZX2zVjWbiYnb9/M9ZtWVh0guZATDANBgkqhkiG9w0BAQEF
-# AASCAgAjTmHJOrsdlROwqwcDEI6st8s/aApGrveK9BCb80f6u4JhBa/yW5y0E5nf
-# ez5crCC5oivd/kyQyCvkpMEMU5nHqci6pXBAx98Ql9K0enPKksHdjx1vXNFT04zP
-# zgA8gnLHdchjemMdtPWPtRGhYO2YIwbyUETJ+eARFdKHQNrPXe54T4MKe+Vhf1vQ
-# SU7XpIAvroEc0lD0Zns2/P9Vec7eShxYXGdNJmONTmS7Yuoffd3LRhu+yZtQlrsv
-# +pXm5rRhXJ3Pv347JcHNnzEGVNWPXse8Li9+3z7odZK2D8IisD5iR34YCwBpi87n
-# 5VIxW/xlGussqeuF9oOC3vHRGRgsC92yt/X+HR4K7258a5z45FW+SQuK5U19J8Ku
-# hVn6j/5sexDtTKHsp0x2CJaI4leGtxEHXN9kD0oQe+LbuZziSxxwsyf/ayyR75ei
-# rrKRlt3xqKGUbHd324y9EytfAyz3C5bjULkA2Am51IZPn6gxKGdKgaqk4YdJkUzk
-# fp/9C2dRsg5tCPBe4eZ2/VQgYZC+3l7jKxbnN/9VvV+AWQ4hSvuyxx8Tdz2XwUkU
-# mLDOw7OuiRFuAOZioxuy08C0cnReu04/XbyCvEZ2DbLX8vQdIQb61ltA+roOgArd
-# rgseqG6Z+r0TzjLWo+m+KXMuaiHuMgtIbuzqj7BFKseGRYMVWQ==
+# AQcBMBwGCSqGSIb3DQEJBTEPFw0yNjA2MjIwNDM0NTNaMC8GCSqGSIb3DQEJBDEi
+# BCDHIxRo3Wflfc3FNRVy5UdIN4SuCTrtysK452Ej6vlW6zANBgkqhkiG9w0BAQEF
+# AASCAgDDIrN2OlvT/X5CcB0dgeO+9qnfEl6J2RRp48qiVAClwDjrEVd4ZQMDf/SB
+# BNlqwgMmGRNCpaSXovvfAxdzG6T6dBcnlpRbzLnnvdO26sFFItgnMad5IeYUffR4
+# Y7qu0sSC4sEGyUpcrf1U22tEBhoujpEOTsnrhj35CGGM4jA3aY2eMwoJ2jU05jZb
+# SuCo87iznmPCjaLu9FA5cBAjnEPgyVQZdo0IGjD6Rr0XbO40PH7eQrHK6IsJBcdv
+# JEzwqdki4JclWVSwDM+DhOXQvqVN+4dSGFeTv3gtDhZy+GQa0+x506+7t/Dgcyth
+# n9SXasOV9GPvRbYhwA1/UkxSbRMy6XMGPo/Ziabq1jJLdRTxlP/KXpXiSKkjGc+L
+# gEWaFMkTdKLnCHk42r4Ib/WG6PWMivrSGGqfjOvEcdkqXxWsunEyGm4imbkH/hzd
+# RH5x6qDAilGj+HCHX4VL3hllWtk2TPPEPHaGGEDKgkgxMNPd8VgN7WODzYC7foYB
+# e5sPL/g8WydgNg2BUCn++9+51Yb3nQmn13xbjBnB3EGjUs8qRfit9knYGnWv88DS
+# FAGilucV7aK68LZ8FXUgfDbzzTIsM+reImhcIZL5pEdmHCjF+l1QyOJRhvMRn40G
+# 2oTRExeA8RlmJ/z06AqYrCIJvjM+FmdXm8RGtdpUZJPyBgw2Mg==
 # SIG # End signature block

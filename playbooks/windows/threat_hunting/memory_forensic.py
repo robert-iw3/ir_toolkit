@@ -1,25 +1,25 @@
 #!/usr/bin/env python3
 """
 Advanced forensic memory analysis using MemProcFS vmmpyc Python API.
-No Dokany/WinFsp required — pure library access.
+No Dokany/WinFsp required  - pure library access.
 Staged offline via: Build-OfflineToolkit.ps1 -IncludeMemProcFS
 
 Usage: python memory_forensic.py <image.aff4> <output_dir>
-Output: Memory_Findings_<stamp>.json — concerning findings only.
+Output: Memory_Findings_<stamp>.json  - concerning findings only.
 
 Detection modules:
-  1.  LOLBin cmdlines            — encoded commands, IEX, WebClient downloads
-  2.  Hidden processes           — DKOM / PEB-unlink artifacts
-  3.  Injected memory            — executable private VAD (no backing file)
-  4.  External network           — established/listening connections to external IPs
-  5.  Shellcode threads          — user-mode threads starting outside any loaded module
-  6.  Parent-child anomalies     — processes spawned from unexpected parents
-  7.  Process path spoofing      — mismatched image path vs expected location
-  8.  Credential tooling         — known dumping/lateral-movement tool names in cmdline
-  9.  Suspicious network bind    — user processes listening on non-standard ports
-  10. Kernel driver check        — BYOVD-class driver names
-  11. Registry Run persistence   — LOLBin commands in live Run keys
-  12. YARA memory scan           — staged rule sets (Elastic/ReversingLabs/Neo23x0) per-process,
+  1.  LOLBin cmdlines             - encoded commands, IEX, WebClient downloads
+  2.  Hidden processes            - DKOM / PEB-unlink artifacts
+  3.  Injected memory             - executable private VAD (no backing file)
+  4.  External network            - established/listening connections to external IPs
+  5.  Shellcode threads           - user-mode threads starting outside any loaded module
+  6.  Parent-child anomalies      - processes spawned from unexpected parents
+  7.  Process path spoofing       - mismatched image path vs expected location
+  8.  Credential tooling          - known dumping/lateral-movement tool names in cmdline
+  9.  Suspicious network bind     - user processes listening on non-standard ports
+  10. Kernel driver check         - BYOVD-class driver names
+  11. Registry Run persistence    - LOLBin commands in live Run keys
+  12. YARA memory scan            - staged rule sets (Elastic/ReversingLabs/Neo23x0) per-process,
                                    15s per-process timeout, noise-rule suppression
 """
 
@@ -27,6 +27,11 @@ import sys, os, re, json, threading
 import glob as _glob
 from datetime import datetime
 from pathlib import Path
+
+# The bundled embeddable Python does not put this script's own directory on
+# sys.path (its ._pth disables that), so sibling imports like memory_yara fail.
+# Add it explicitly.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 if len(sys.argv) < 3:
     print(f"Usage: python {Path(__file__).name} <image> <output_dir>"); sys.exit(1)
@@ -73,10 +78,10 @@ procs   = vmm.process_list()
 pid_map = {p.pid: p for p in procs}
 log(f'Processes: {len(procs)}')
 
-# Known system/kernel-mode processes — skip user-mode checks for these
+# Known system/kernel-mode processes  - skip user-mode checks for these
 KERNEL_PROCS = {'system', 'secure system', 'registry', 'memory compression',
                 'interrupts', 'idle', 'mssmbios'}
-# Toolkit's own scripts — exclude from LOLBin self-detection
+# Toolkit's own scripts  - exclude from LOLBin self-detection
 TOOLKIT_SCRIPTS = {
     'invoke-ircollection.ps1', 'edr_toolkit.ps1', 'edr_toolkit_deploy.ps1',
     'get-persistencesnapshot.ps1', 'get-remoteaccesstriage.ps1',
@@ -95,9 +100,9 @@ def is_toolkit_cmd(cmd):
     cl = cmd.lower()
     return any(s in cl for s in TOOLKIT_SCRIPTS)
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 # 1. LOLBin / suspicious command lines
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 log('=== 1. LOLBin cmdline scan ===')
 LOL_PATS = [
     (r'-enc\b|-encodedcommand',             2, '-EncodedCommand'),
@@ -128,9 +133,9 @@ for p in procs:
         n += 1
 log(f'  Suspicious cmdlines: {n}')
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 # 2. Hidden processes
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 log('=== 2. Hidden process detection ===')
 n = 0
 for p in procs:
@@ -143,9 +148,9 @@ for p in procs:
         n += 1
 log(f'  Hidden: {n}')
 
-# ══════════════════════════════════════════════════════════════════════════════
-# 3. Injected memory — executable private VAD without backing file
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
+# 3. Injected memory  - executable private VAD without backing file
+# ==============================================================================
 log('=== 3. Injected memory (private exec VAD) ===')
 EXEC_RE = re.compile(r'(?i)\bX\b|EXECUTE|EXEC_READ|EXEC_READWRITE')
 n = 0
@@ -170,9 +175,9 @@ for p in procs:
     if n > 30: break
 log(f'  Injected regions: {n}')
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 # 4. External network connections
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 log('=== 4. External network connections ===')
 PRIVATE = re.compile(r'^(127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|::1$|fe80:|0\.0\.0\.0$)', re.I)
 n = 0
@@ -194,9 +199,9 @@ try:
 except Exception as e: log(f'  Net error: {e}', 'WARN')
 log(f'  External connections: {n}')
 
-# ══════════════════════════════════════════════════════════════════════════════
-# 5. Shellcode threads — start address outside any loaded module (user-mode only)
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
+# 5. Shellcode threads  - start address outside any loaded module (user-mode only)
+# ==============================================================================
 log('=== 5. Shellcode thread detection ===')
 # Filter: user-mode address range, exclude kernel-mode procs and ntdll-like ranges
 USER_MAX  = 0x800000000000        # x64 user-mode ceiling
@@ -213,20 +218,20 @@ for p in procs:
     for t in threads:
         start = t.get('va-win32start', 0)
         if not start or start <= 0x10000 or start >= USER_MAX: continue
-        if start >= NTDLL_LOW: continue    # ntdll user-shared area — expected
+        if start >= NTDLL_LOW: continue    # ntdll user-shared area  - expected
         if t.get('exitstatus', 0) != 0: continue   # only running threads
         in_mod = any(lo <= start < hi for lo, hi in mod_set)
         if not in_mod:
             add('High', 'Shellcode Thread (Memory)',
                 f'PID {p.pid} ({p.name}) TID={t.get("tid")}',
-                f'Thread start {start:#x} falls outside all loaded modules — likely shellcode injection',
+                f'Thread start {start:#x} falls outside all loaded modules  - likely shellcode injection',
                 'T1055.003 (Thread Hijacking), T1055')
             n += 1
 log(f'  Shellcode threads: {n}')
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 # 6. Parent-child anomalies
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 log('=== 6. Parent-child relationship anomalies ===')
 # Expected parent -> {set of child names}
 EXPECTED_PARENTS = {
@@ -271,9 +276,9 @@ for p in procs:
         n += 1
 log(f'  Anomalous parent-child: {n}')
 
-# ══════════════════════════════════════════════════════════════════════════════
-# 7. Process path spoofing — image not in expected system directory
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
+# 7. Process path spoofing  - image not in expected system directory
+# ==============================================================================
 log('=== 7. Process path spoofing ===')
 # Well-known system processes that must live in System32 or SysWOW64
 SYSTEM32_PROCS = {
@@ -303,9 +308,9 @@ for p in procs:
         n += 1
 log(f'  Path-spoofed system procs: {n}')
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 # 8. Known offensive tooling in process names / cmdlines
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 log('=== 8. Known offensive tooling ===')
 TOOL_PATTERNS = [
     # Credential dumping
@@ -339,9 +344,9 @@ for p in procs:
             break
 log(f'  Known offensive tools: {n}')
 
-# ══════════════════════════════════════════════════════════════════════════════
-# 9. Suspicious network listeners — user processes on non-standard ports
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
+# 9. Suspicious network listeners  - user processes on non-standard ports
+# ==============================================================================
 log('=== 9. Suspicious network listeners ===')
 # Processes legitimately listening on high ports
 LISTENER_ALLOWLIST = {
@@ -365,15 +370,15 @@ try:
         if any(a in pname for a in LISTENER_ALLOWLIST): continue
         add('Medium', 'Suspicious Network Listener (Memory)',
             f'PID {pid_n} ({pname})',
-            f'User process listening on {src_ip}:{src_port} — potential backdoor bind shell',
+            f'User process listening on {src_ip}:{src_port}  - potential backdoor bind shell',
             'T1071 (Application Layer Protocol), T1571 (Non-Standard Port)')
         n += 1
 except Exception as e: log(f'  Listener check error: {e}', 'WARN')
 log(f'  Suspicious listeners: {n}')
 
-# ══════════════════════════════════════════════════════════════════════════════
-# 10. Kernel driver check — BYOVD-class names
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
+# 10. Kernel driver check  - BYOVD-class names
+# ==============================================================================
 log('=== 10. Kernel driver scan ===')
 VULN_DRV = re.compile(
     r'(?i)(RTCore64|WinRing0|GDRV|ASMIO|cpuz\d|nvoclock|kprocesshacker|'
@@ -391,9 +396,9 @@ try:
 except Exception as e: log(f'  Driver scan error: {e}', 'WARN')
 log(f'  Suspicious drivers: {n}')
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 # 11. Registry Run key persistence (live hive)
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 log('=== 11. Registry Run persistence ===')
 RUN_KEYS = [
     r'HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Run',
@@ -417,77 +422,112 @@ for rk in RUN_KEYS:
     except: pass
 log(f'  Suspicious Run keys: {n}')
 
-# ══════════════════════════════════════════════════════════════════════════════
-# 12. YARA memory scan — staged rules from tools/yara_rules/
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
+# 12. YARA memory scan  - staged rules from tools/yara_rules/
+# ==============================================================================
 log('=== 12. YARA memory scan ===')
 
+try:
+    import memory_yara as myara   # vmmpyc-free: rule handling, canary, trust verdict
+except Exception as e:
+    myara = None
+    log(f'  SKIP: memory_yara import failed ({e}) - YARA scan skipped', 'WARN')
+
 YARA_RULES_DIR  = Path(mpc_dir).parent / 'yara_rules'
-YARA_TIMEOUT    = 15          # seconds per process before abort
-YARA_MAX_HITS   = 200         # cap findings to avoid noise explosion
-YARA_SKIP_PROCS = KERNEL_PROCS | {'memcompression', 'registry'}
-# Rule name prefixes/patterns that generate high FP volume in memory context
-YARA_NOISE_RE = re.compile(
-    r'(?i)^(generic_|test_|debug_|example_|placeholder|with_|pua_|riskware_|grayware_)',
-    re.I)
-
-def _collect_rule_files():
-    """Return list of .yar/.yara file paths from the staged rule directories."""
-    paths = []
-    for ext in ('*.yar', '*.yara'):
-        paths.extend(_glob.glob(str(YARA_RULES_DIR / '**' / ext), recursive=True))
-    return paths
-
-def _scan_process_yara(proc, rule_files, timeout_sec, results_out):
-    """Run YARA scan on one process with abort-on-timeout. Writes hits to results_out."""
-    try:
-        y = proc.search_yara(rule_files)
-        # Arm the abort timer before blocking result() call
-        timer = threading.Timer(timeout_sec, y.abort)
-        timer.start()
-        try:
-            hits = y.result()
-        finally:
-            timer.cancel()
-        if not hits:
-            return
-        for hit in hits:
-            rule_name = str(hit.get('id', ''))
-            if YARA_NOISE_RE.match(rule_name):
-                continue
-            match_count = sum(len(v) for v in hit.get('matches', {}).values())
-            results_out.append((proc, rule_name, hit, match_count))
-    except Exception:
-        pass  # aborted, or process memory unavailable
+YARAC_EXE       = Path(mpc_dir).parent / 'yarac64.exe'
+YARA_TIMEOUT    = 15        # seconds per process before abort
+YARA_MAX_HITS   = 200       # cap findings to avoid noise explosion
+YARA_MAX_CRASH  = 25        # max worker restarts (skips one crashing PID each)
+YARA_WORKER     = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'memory_yara_worker.py')
 
 yara_count = 0
-if not YARA_RULES_DIR.is_dir():
-    log(f'  SKIP: {YARA_RULES_DIR} not found — run Build-OfflineToolkit.ps1 -IncludeYaraRules', 'WARN')
+if myara is None:
+    pass   # import failure already logged above
+elif not YARA_RULES_DIR.is_dir():
+    log(f'  SKIP: {YARA_RULES_DIR} not found  - run Build-OfflineToolkit.ps1 -IncludeYaraRules', 'WARN')
+elif not YARAC_EXE.is_file():
+    log(f'  SKIP: yarac64.exe not staged at {YARAC_EXE} - cannot compile ruleset', 'WARN')
+elif not os.path.isfile(YARA_WORKER):
+    log(f'  SKIP: worker not found at {YARA_WORKER}', 'WARN')
 else:
-    rule_files = _collect_rule_files()
-    log(f'  Rules: {len(rule_files)} files in {YARA_RULES_DIR.name}/')
-    hits_buf = []
-    for p in procs:
-        if yara_count >= YARA_MAX_HITS: break
-        if p.name.lower() in YARA_SKIP_PROCS or is_system_proc(p): continue
-        _scan_process_yara(p, rule_files, YARA_TIMEOUT, hits_buf)
-        for proc_hit, rule_name, hit, match_count in hits_buf:
-            HIGH_SIG = ('cobalt','beacon','meterpreter','mimikatz','shellcode','inject','empire')
-            sev = 'Critical' if any(k in rule_name.lower() for k in HIGH_SIG) else 'High'
-            add(sev, 'YARA Match (Memory)',
-                f'PID {proc_hit.pid} ({proc_hit.name})',
-                f'Rule: {rule_name} | {match_count} match(es)',
-                'T1055 (Process Injection), T1027 (Obfuscated Files)')
-            yara_count += 1
-        hits_buf.clear()
-    log(f'  YARA findings: {yara_count}')
+    import subprocess as _sp
+    all_rules = myara.collect_rule_files(str(YARA_RULES_DIR))
+    win_rules = myara.filter_windows_rules(all_rules)   # drop Linux/macOS rules
+    log(f'  Rules: {len(win_rules)} Windows-applicable (of {len(all_rules)} staged)')
 
-# ══════════════════════════════════════════════════════════════════════════════
+    # Compile the Windows ruleset + DOS-stub canary into ONE .yac. search_yara needs
+    # compiled rules (a list of source paths silently compiles to nothing); the canary
+    # rides along so every per-process result proves the engine inspected memory.
+    canary_src = os.path.join(OUTPUT_DIR, f'_yara_canary_{stamp}.yar')
+    with open(canary_src, 'w', encoding='utf-8') as cf:
+        cf.write(myara.canary_rule_source())
+    real_yac = os.path.join(OUTPUT_DIR, f'_yara_win_{stamp}.yac')
+    yac, n_ok, n_fail = myara.compile_ruleset(win_rules + [canary_src], str(YARAC_EXE), real_yac)
+    if not yac:
+        log('  SKIP: ruleset failed to compile - YARA scan skipped', 'WARN')
+    else:
+        log(f'  Compiled {n_ok} rule file(s) into one ruleset'
+            + (f' ({n_fail} excluded)' if n_fail else ''),
+            'WARN' if n_fail else 'INFO')
+
+        # Run the scan in an isolated worker subprocess. A native MemProcFS segfault
+        # on a pathological process (e.g. dwm.exe GPU mappings) only kills the worker;
+        # we restart it with the crashing PID skipped and resume past it.
+        results_path = os.path.join(OUTPUT_DIR, f'_yara_results_{stamp}.jsonl')
+        open(results_path, 'w').close()
+        skip = set()
+        crashes = 0
+        for _attempt in range(YARA_MAX_CRASH + 1):
+            rc = _sp.call([sys.executable, YARA_WORKER, IMAGE_PATH, yac, results_path,
+                           ','.join(str(s) for s in sorted(skip)), mpc_dir, str(YARA_TIMEOUT)])
+            try:
+                with open(results_path, encoding='utf-8') as rf:
+                    summary = myara.parse_worker_jsonl(rf.read().splitlines())
+            except OSError:
+                summary = {'done': False, 'started_pids': set(), 'finished_pids': set(),
+                           'finished': [], 'canary_hits': 0}
+            if summary['done']:
+                break
+            # Treat already-skipped PIDs as resolved so we flag the NEW crasher, not
+            # a stale 'start' record left in the appended results file by a prior run.
+            bad = myara.crashing_pid(summary['started_pids'], summary['finished_pids'] | skip)
+            if bad is None:
+                break   # exited without 'done' and no clear crasher - stop
+            skip.add(bad); skip |= summary['finished_pids']   # skip crasher + already-scanned
+            crashes += 1
+            log(f'  YARA worker crashed (native) on PID {bad} - skipping and resuming', 'WARN')
+
+        # Build findings from the accumulated results.
+        for pid, name, hits in summary['finished']:
+            if yara_count >= YARA_MAX_HITS: break
+            seen = set()
+            for rule_name, match_count in hits:
+                if myara.is_noise_rule(rule_name): continue
+                if (pid, rule_name) in seen: continue        # one finding per PID+rule
+                seen.add((pid, rule_name))
+                add(myara.severity_for_rule(rule_name), 'YARA Match (Memory)',
+                    f'PID {pid} ({name})',
+                    f'Rule: {rule_name} | {match_count} match(es)',
+                    'T1055 (Process Injection), T1027 (Obfuscated Files)')
+                yara_count += 1
+
+        for f in (real_yac, canary_src, results_path):   # clean up temp artifacts
+            try: os.unlink(f)
+            except OSError: pass
+
+        procs_scanned = len(summary['finished_pids'])
+        if crashes:
+            log(f'  YARA: {crashes} process(es) skipped after native scanner crashes', 'WARN')
+        verdict = myara.yara_trust_verdict(procs_scanned, summary['canary_hits'], crashes)
+        log(f'  {verdict["message"]}', 'INFO' if verdict['trusted'] else 'ERROR')
+        log(f'  YARA findings: {yara_count}')
+
+# ==============================================================================
 # Summary
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 total = len(findings)
 log('=' * 60)
-log(f'Analysis complete — {total} concerning finding(s)  |  build {vmm.kernel.build}')
+log(f'Analysis complete  - {total} concerning finding(s)  |  build {vmm.kernel.build}')
 for sev in ('Critical','High','Medium'):
     c = sum(1 for f in findings if f['Severity'] == sev)
     if c: log(f'  {sev}: {c}')

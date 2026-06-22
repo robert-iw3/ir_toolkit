@@ -36,14 +36,14 @@ flowchart TD
     Incident_Report · Attack_Graph · Timeline"/]:::artifact
 
     B9 --> C0(["ANALYST MACHINE — post-collection"]):::phase
-    C0 --> C1["Analyze-Memory.ps1
+    C0 --> C1["Analyze-Memory.ps1 -Adjudicate
     AFF4 → memory_forensic.py via vmmpyc
-    RAW/DMP → Volatility 3"]:::tool
+    RAW/DMP → Volatility 3 (vadyarascan)"]:::tool
     C1 --> C2[/"Memory_Findings.json
     injection · hidden procs · C2 · LOLBin
-    BYOVD drivers · Run key persistence"/]:::artifact
-    C2 --> C3["Merge → Combined_Findings
-    Re-adjudicate · regenerate reports"]:::step
+    BYOVD · Run keys · YARA (trust-verified)"/]:::artifact
+    C2 --> C3["Merge → Combined_Findings → adjudicate
+    → regenerate ALL reports (rollup)"]:::step
 
     C3 --> D0(["TARGET HOST — Administrator"]):::phase
     D0 --> D1["Invoke-Eradication.ps1 -Apply
@@ -97,7 +97,10 @@ Full physical memory image for post-collection offline analysis. AFF4 sparse for
 | ETW/AMSI tamper | ETW autologger sessions disabled; AMSI provider registry keys missing or renamed |
 | Registry | WMI event subscriptions; PendingFileRenameOperations; services running from Temp/AppData; IFEO debugger hijacks; AppInit DLLs |
 | Scheduled tasks | Score-based: encoded commands, IEX, WebClient download, hidden window, mshta in task action |
-| File hunt (optional) | Epoch/impossible timestamps (pre-2003 — timestomping); entropy ≥7.2 in non-image/non-script files; Alternate Data Streams in high-risk paths; YARA scan (1,773 rules: Elastic + ReversingLabs + Neo23x0) |
+| File hunt (optional) | Epoch/impossible timestamps (pre-2003 — timestomping); entropy ≥7.2 in non-image/non-script files; Alternate Data Streams in high-risk paths; YARA scan over the **full** Windows-applicable rule set (Elastic + ReversingLabs + Neo23x0, Linux/macOS rules filtered out) — runs a marker **self-test** so a "0 matches" result is provable, surfaces yara64 compile errors instead of swallowing them |
+
+**Memory YARA scan** (`Analyze-Memory.ps1` → `memory_forensic.py` / `memory_yara.py`)
+The staged Windows rules are compiled **once** into a single `.yac` (search_yara needs compiled rules, not source paths — passing paths silently scans nothing) and run against every process. A DOS-stub **canary** rides along so each result proves the engine actually inspected memory (`YARA self-test OK: canary matched in N/M processes` — or a loud `FAILED` if not). The scan runs in an isolated worker subprocess: a process that crashes the native scanner (e.g. `dwm.exe`) only kills the worker, which the parent restarts past the offender, so the scan always completes. Matches cluster **per PID** (count + rule list) in the incident report. The Volatility/raw path gets the same coverage via `windows.vadyarascan`.
 
 **Remote-access triage** (`Get-RemoteAccessTriage.ps1`)
 Installed and running RMM agents (60+ signatures); ClickFix / CAPTCHA-lure PowerShell drops; browser history for RMM download pages; RunMRU for suspicious command execution; msiexec/installer logs for silent RAT installs.
@@ -117,12 +120,65 @@ Detection logic — flags executables that:
 
 Each finding includes a pivot hint: *"Check Amcache for SHA1, Event 4688 for cmdline."* The adjudicator resolves the file path on-host, verifies the Authenticode chain, and assigns a verdict — Microsoft-signed installer temporaries clear as False Positive; LOLBins staged in Temp fail the path/hash check and become True Positive / High. Findings flow into `Combined_Findings` → adjudication on every collection run.
 
+### Stage 1b · Clock context (automatic, first act of collection)
+
+`Get-ClockContext.ps1` is called before any phase and writes `_clock.json`:
+- Host timezone + UTC offset (for timeline normalization across hosts)
+- NTP synchronization status via `w32tm /query /status`
+- Clock skew against the responder's own UTC reference (cross-host correlation requires a common timeline basis)
+
+### Stage 1c · Evidence custody seal (automatic, last act of collection)
+
+`Seal-EvidenceCustody.ps1` seals the sha256 `_manifest_*.json` after all artifacts are written:
+- Records operator identity (`$env:IR_OPERATOR` or `DOMAIN\user@hostname`)
+- HMAC-SHA256 signature of the manifest (set `$env:IR_CUSTODY_HMAC_KEY`)
+- Appends to append-only `_custody_log.jsonl`
+- `Seal-EvidenceCustody.ps1 -Verify` re-hashes the manifest and confirms no tampering
+
 ### Stage 2 · Analysis
 
 **Adjudication** (`Get-FindingContext.ps1 -Live`)
-Every raw finding is enriched with on-host context: Authenticode signature chain (publisher, timestamp, revocation); file owner and install path; hash against known-good baselines; whether the binary is in Program Files vs Temp/AppData. Verdict ladder: `False Positive` → `Indeterminate` → `Likely True Positive` → `True Positive`. Evidence bundles written for every TP-class finding.
+Every raw finding is enriched with on-host context: Authenticode signature chain (publisher, timestamp, revocation); file owner and install path; hash against known-good baselines; whether the binary is in Program Files vs Temp/AppData. Verdict ladder: `False Positive` → `Likely False Positive` → `Indeterminate` → `Likely True Positive` → `True Positive`. Evidence bundles written for every TP-class finding.
+
+The final report holds **only beyond-doubt (true-positive-class) anomalies**. To get there the adjudicator applies generalizable noise controls that hold on *any* Windows host (never host-specific tuning — the rule is "suppress only what is impossible to be malicious, never blindside an investigation"):
+- **Weak standalone signals are capped at `Indeterminate`.** ShimCache/Amcache are *historical* execution records (a missing binary is normal for installers/updaters), and high entropy is a by-design property of countless legit files. On their own these are pivot leads, not proof — they are elevated only when corroborated (invalid signature, external egress, or a remote-access/LOLBin abuse match).
+- **`NotSigned` ≠ invalid signature.** Only a genuinely bad signature (tampered/revoked/untrusted) is a strong signal; unsigned-but-otherwise-clean is weak.
+- **Script hosts** (`powershell`/`pwsh`/`cmd`) are flagged only when the command line shows real abuse (encoded command, download cradle, hidden window) — a bare shell is not proof.
+- **The toolkit's own staged tools** (`yara64`, `autorunsc`, `winpmem`, …) are cleared outright — they execute on every host during collection.
+- Local device-path forms (`\\?\`, `\\.\`) are not treated as UNC network paths; version strings in paths (`…\3.0.0.18\…`) are not parsed as IPs.
+
+Everything that does not clear the bar is **not dropped** — it is written to a separate pivot-leads log (see Output files) so the analyst can still review it.
+
+**Run-to-run delta** (`Delta_<stamp>.json`)
+Each adjudication run compares against the previous `Adjudication_*.json` and writes a diff: `NEW` (first seen this run), `RESOLVED` (present last run, gone now), `CHANGED_VERDICT` (same target/type, different verdict). Tracks remediation progress across repeated collections on the same host.
 
 **IOC extraction** — C2 endpoints, file hashes, ATT&CK techniques, implicated principals, Defender exclusion tampering.
+
+**ATT&CK Navigator layer** (`attck_navigator_layer.json`)
+All observed MITRE techniques exported as a Navigator v4.9 layer. Open at https://mitre-attack.github.io/attack-navigator/ to visualise detection coverage for this incident.
+
+### Output files (per-host folder: `reports\<HOSTNAME>\`)
+
+The reports are intentionally split: the three **final reports** show only beyond-doubt anomalies; the **full record** keeps every verdict; the **pivot-leads log** holds the downgraded leads so nothing is lost.
+
+| File | What it is |
+|---|---|
+| `Incident_Report.md` | **Final report.** Executive incident summary — true-positive-class findings only, with the remote-access/C2 narrative, implicated accounts, and the recommended eradication command. |
+| `Attack_Graph.md` | **Final report.** MITRE ATT&CK tactic-ordered kill-chain of the true-positive-class findings. |
+| `Adjudication_<stamp>.md` | **Final report.** Highly-suspicious findings only, with full per-finding evidence (signature, hash, path trust, command line, notes). |
+| `attck_navigator_layer.json` | ATT&CK Navigator v4.9 layer of observed techniques. |
+| `Adjudication_<stamp>.json` / `.csv` | **Full record** — *every* finding with its verdict, confidence, and notes (nothing dropped). Machine-readable feed for SIEM. |
+| `Adjudication_PivotLeads_<stamp>.csv` | **Separate leads log** — the lower-confidence findings (`Indeterminate` / `Likely False Positive` / `False Positive`). Review only if one corroborates a beyond-doubt finding. |
+| `Delta_<stamp>.json` | Run-to-run verdict diff (`NEW` / `RESOLVED` / `CHANGED_VERDICT`) vs the previous adjudication on this host. |
+| `Combined_Findings_<stamp>.json` | Raw wave-1 findings (pre-adjudication), merged from all detection modules. |
+| `EDR_Report_<stamp>.json/.csv/.html` | Wave-1 EDR hunt output (raw detections before adjudication). |
+| `findings_amcache_<stamp>.json` | ShimCache / Amcache historical-execution findings. |
+| `Evidence\<finding>\` | Per-finding evidence bundle (copied binary, hashes, signature, loaded modules, network) for TP-class findings. |
+| `_clock.json` | Host clock context (timezone, UTC offset, NTP sync state, skew) for timeline normalization. |
+| `_custody_<stamp>.json` + `_custody_log.jsonl` | Chain-of-custody seal — SHA256 manifest + HMAC-SHA256 signature of all collected files. |
+| `forensics-<stamp>.zip` | Raw collected artifacts (event-log CSVs, process/network/persistence snapshots, ShimCache/Amcache exports). |
+| `Memory_Findings_<stamp>.json` | Memory-analysis findings (only if a memory image was captured and analyzed). |
+| `_<Phase>_<stamp>.log` / `_runtime_<stamp>.log` | Per-phase and overall runtime logs for the collection. |
 
 ### Stage 3 · Memory analysis (analyst machine, post-collection)
 

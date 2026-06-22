@@ -1,11 +1,11 @@
-<#
+﻿<#
 .SYNOPSIS
     One-time Defender setup for the IR Toolkit. Automates every step that CAN be
     automated; guides the user through the two GUI clicks that cannot.
 
 .DESCRIPTION
     Windows Defender Tamper Protection prevents programmatic changes to real-time
-    protection settings, exclusions, and AMSI scanning — even from an Administrator.
+    protection settings, exclusions, and AMSI scanning - even from an Administrator.
     The only supported way to change those settings is through the Windows Security
     GUI while Tamper Protection is active.
 
@@ -48,7 +48,7 @@ function Get-DefenderActive {
 }
 
 function Open-DefenderSettings {
-    # Opens Virus & threat protection settings — where the Tamper Protection toggle lives.
+    # Opens Virus & threat protection settings - where the Tamper Protection toggle lives.
     try {
         Start-Process 'windowsdefender://threatsettings' -ErrorAction Stop
     } catch {
@@ -60,7 +60,7 @@ function Open-DefenderSettings {
 function Add-AllExclusions {
     Write-Step "Adding folder and process exclusions..." 'Green'
 
-    # Folder exclusions — covers all scripts and output
+    # Folder exclusions - covers all scripts and output
     $foldersToExclude = @($ToolkitRoot)
     foreach ($folder in $foldersToExclude) {
         try {
@@ -71,7 +71,7 @@ function Add-AllExclusions {
         }
     }
 
-    # Process exclusions — all staged binaries that would be flagged behaviorally
+    # Process exclusions - all staged binaries that would be flagged behaviorally
     $processExes = @(
         'autorunsc64.exe', 'autorunsc.exe',
         'yara64.exe',      'yarac64.exe',
@@ -113,12 +113,12 @@ function Add-AllExclusions {
 function Enable-ForensicAuditing {
     # Enable process creation (4688) and command-line auditing.
     # Without these, Amcache/ShimCache findings cannot be correlated with parent processes
-    # or command lines — the single biggest gap in post-collection forensic pivoting.
+    # or command lines - the single biggest gap in post-collection forensic pivoting.
     # This is a one-time setup that persists across reboots.
     Write-Step "Enabling forensic audit policies (4688 process creation + cmdline logging)..." 'Cyan'
     $errors = 0
 
-    # 4688 — Process Creation (Success)
+    # 4688 - Process Creation (Success)
     try {
         & auditpol /set /subcategory:"Process Creation" /success:enable /failure:enable 2>$null | Out-Null
         Write-Host "  [+] Audit: Process Creation (4688) enabled." -ForegroundColor Green
@@ -132,19 +132,19 @@ function Enable-ForensicAuditing {
         Write-Host "  [+] Audit: Command-line logging in 4688 enabled." -ForegroundColor Green
     } catch { Write-Host "  [!] Could not enable cmdline logging in 4688." -ForegroundColor Yellow; $errors++ }
 
-    # 4698/4702 — Scheduled Task Created/Modified (needed for task persistence detection)
+    # 4698/4702 - Scheduled Task Created/Modified (needed for task persistence detection)
     try {
         & auditpol /set /subcategory:"Other Object Access Events" /success:enable 2>$null | Out-Null
         Write-Host "  [+] Audit: Other Object Access Events (task 4698/4702) enabled." -ForegroundColor Green
     } catch { $errors++ }
 
-    # 7045 — New Service Installed is in System log; verify it is captured
-    Write-Host "  [i] Service install events (7045) are in the System log — always recorded." -ForegroundColor Gray
+    # 7045 - New Service Installed is in System log; verify it is captured
+    Write-Host "  [i] Service install events (7045) are in the System log - always recorded." -ForegroundColor Gray
 
     if ($errors -eq 0) {
         Write-Host "  [+] All forensic audit policies applied. Process parent chains will be in Security log on next collection." -ForegroundColor Green
     } else {
-        Write-Host "  [!] $errors audit policy change(s) failed — may need Group Policy override." -ForegroundColor Yellow
+        Write-Host "  [!] $errors audit policy change(s) failed - may need Group Policy override." -ForegroundColor Yellow
     }
 }
 
@@ -165,28 +165,11 @@ function Wait-TamperOff {
     Write-Host "  [+] Tamper Protection is OFF." -ForegroundColor Green
 }
 
-function Wait-TamperOn {
-    Write-Host "`nWaiting for Tamper Protection to be re-enabled..." -ForegroundColor Yellow
-    Write-Host "    (Toggle it back ON in the Windows Security window)" -ForegroundColor Gray
-    $dots = 0
-    while ((Get-TamperStatus) -eq $false) {
-        Start-Sleep -Seconds 2
-        $dots++
-        if ($dots % 5 -eq 0) { Write-Host "    still waiting..." -ForegroundColor DarkGray }
-        if ($dots -gt 60) {
-            Write-Host "`n[!] Tamper Protection was not re-enabled within 2 minutes." -ForegroundColor Yellow
-            Write-Host "    Please enable it manually in Windows Security." -ForegroundColor Yellow
-            return
-        }
-    }
-    Write-Host "  [+] Tamper Protection is back ON." -ForegroundColor Green
-}
-
 # -- Main -----------------------------------------------------------------------
 
 Write-Host @"
 ============================================================
-  IR Toolkit — Defender Setup
+  IR Toolkit - Defender Setup
   Toolkit root: $ToolkitRoot
 ============================================================
 "@ -ForegroundColor Cyan
@@ -194,10 +177,10 @@ Write-Host @"
 # -- Step 0: Import code-signing certificate (if scripts are signed) -----------
 # Importing the IR Toolkit cert into TrustedPublisher lets Defender trust the
 # scripts at AMSI content-scan time WITHOUT requiring Tamper Protection to be off.
-# This is a PKI operation (CertEnroll API), not a Defender API call — TP does not block it.
+# This is a PKI operation (CertEnroll API), not a Defender API call - TP does not block it.
 $irCert = Join-Path $ToolsDir 'ir_toolkit.cer'
 if (Test-Path -LiteralPath $irCert) {
-    Write-Step "Code-signing certificate found — importing into TrustedPublisher store..." 'Cyan'
+    Write-Step "Code-signing certificate found - importing into TrustedPublisher store..." 'Cyan'
     try {
         $x509 = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new($irCert)
         $store = [System.Security.Cryptography.X509Certificates.X509Store]::new(
@@ -221,7 +204,7 @@ if (Test-Path -LiteralPath $irCert) {
         Write-Host "      Continuing with exclusion-based setup as fallback." -ForegroundColor Gray
     }
 } else {
-    Write-Host "  [i] No ir_toolkit.cer found — scripts are not signed." -ForegroundColor Gray
+    Write-Host "  [i] No ir_toolkit.cer found - scripts are not signed." -ForegroundColor Gray
     Write-Host "      Run .\Invoke-SignToolkit.ps1 on the analyst machine to sign all scripts." -ForegroundColor Gray
     Write-Host "      Signed scripts eliminate the need for Tamper Protection toggle on future runs." -ForegroundColor Gray
 }
@@ -237,19 +220,18 @@ if (-not (Get-DefenderActive)) {
 $tamperStatus = Get-TamperStatus
 
 if ($tamperStatus -eq $false) {
-    # TP already off — add exclusions and audit policies immediately
+    # TP already off - add exclusions and audit policies immediately
     Write-Step "Tamper Protection is already OFF." 'Green'
     $ok = Add-AllExclusions
     Enable-ForensicAuditing
     if ($ok) {
-        Write-Step "Setup complete. Re-enable Tamper Protection now." 'Cyan'
-        Open-DefenderSettings
-        Write-Host "  Opening Windows Security... toggle Tamper Protection back ON." -ForegroundColor Yellow
-        Wait-TamperOn
+        Write-Step "Setup complete." 'Cyan'
+        Write-Host "  Leave Tamper Protection OFF - it must stay off for the whole scan." -ForegroundColor Yellow
+        Write-Host "  Invoke-IRCollection.ps1 re-enables it automatically when the scan finishes." -ForegroundColor Yellow
     }
 } else {
-    # TP is on — guide the user through turning it off
-    Write-Step "Tamper Protection is ON — it must be toggled off via the GUI." 'Yellow'
+    # TP is on - guide the user through turning it off
+    Write-Step "Tamper Protection is ON - it must be toggled off via the GUI." 'Yellow'
     Write-Host @"
 
   Why this is required:
@@ -263,7 +245,7 @@ if ($tamperStatus -eq $false) {
     3. Click "Manage settings" under "Virus & threat protection settings".
     4. Scroll to "Tamper Protection" and toggle it OFF.
     5. Confirm the UAC prompt.
-    6. Return to this window — setup continues automatically.
+    6. Return to this window - setup continues automatically.
 
 "@ -ForegroundColor White
 
@@ -275,19 +257,15 @@ if ($tamperStatus -eq $false) {
     $ok = Add-AllExclusions
     Enable-ForensicAuditing
 
-    Write-Step "Re-enable Tamper Protection." 'Cyan'
+    Write-Step "Exclusions are set - LEAVE Tamper Protection OFF." 'Cyan'
     Write-Host @"
 
-  Tamper Protection should be turned back ON immediately after exclusions are set.
-  The IR Toolkit exclusions you just added will persist after TP is re-enabled.
-
-  1. In the Windows Security window (still open), toggle Tamper Protection back ON.
-  2. Confirm the UAC prompt.
+  Do NOT turn Tamper Protection back on yet. It must stay OFF for the entire
+  collection scan, or Defender's AMSI will block the toolkit scripts.
+  Invoke-IRCollection.ps1 re-enables Tamper Protection automatically when the
+  scan finishes.
 
 "@ -ForegroundColor White
-
-    Open-DefenderSettings
-    Wait-TamperOn
 }
 
 # -- Summary --------------------------------------------------------------------
@@ -311,27 +289,27 @@ Write-Host @"
 # SIG # Begin signature block
 # MIIcoQYJKoZIhvcNAQcCoIIckjCCHI4CAQExDzANBglghkgBZQMEAgEFADB5Bgor
 # BgEEAYI3AgEEoGswaTA0BgorBgEEAYI3AgEeMCYCAwEAAAQQH8w7YFlLCE63JNLG
-# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCDAPk57wRu7LvLZ
-# HB7RzJQMg0eGW6hL5i0HLoaWjVZ3aKCCFrQwggN2MIICXqADAgECAhBa5MQyEl22
-# qUV1bZluOcpOMA0GCSqGSIb3DQEBCwUAMFMxGjAYBgNVBAsMEUluY2lkZW50IFJl
+# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCDV6KKDkPIx564x
+# Ppa4z3WUPfJZObVKrelrpPJD5QOzpaCCFrQwggN2MIICXqADAgECAhAbL3xr3F9b
+# nkbveZC/LiR8MA0GCSqGSIb3DQEBCwUAMFMxGjAYBgNVBAsMEUluY2lkZW50IFJl
 # c3BvbnNlMRMwEQYDVQQKDApJUiBUb29sa2l0MSAwHgYDVQQDDBdJUiBUb29sa2l0
-# IENvZGUgU2lnbmluZzAeFw0yNjA2MjAwMDU5NDZaFw0zMTA2MjAwMTA5NDZaMFMx
+# IENvZGUgU2lnbmluZzAeFw0yNjA2MjIwNDI0NDVaFw0zMTA2MjIwNDM0NDVaMFMx
 # GjAYBgNVBAsMEUluY2lkZW50IFJlc3BvbnNlMRMwEQYDVQQKDApJUiBUb29sa2l0
 # MSAwHgYDVQQDDBdJUiBUb29sa2l0IENvZGUgU2lnbmluZzCCASIwDQYJKoZIhvcN
-# AQEBBQADggEPADCCAQoCggEBAJ1nFbqBzQLbEhUUTT10Lrva+ooE/uVqzTJbGk5/
-# xh3zYBEAaRil7obceqCWtDg6KSjbDQP8wto42fHUK8tp0FU0NEi2+rkWHfcpeasm
-# z2e+UFQMDlXRcxg7dqe+08OB4pFhwrHSPo0m7HZAgtpHd02POka7jaYVoAnScg7i
-# LuZiRSJ3tJKZu1KCSTntV+LbicnowTlaDEvr7JQzSVs+5BpNadU3n/ujzH088Mgm
-# CoXooQpF12SzbZNCZ+kbgza6bNMbEHNGkLr9S0vHQD95oKPWF7YuOu7jqtkuCOZc
-# KYYi4nOXFwLqXmJ+sqqpR2NrrfMkz4VaALGIZ93o10CHWDkCAwEAAaNGMEQwDgYD
-# VR0PAQH/BAQDAgeAMBMGA1UdJQQMMAoGCCsGAQUFBwMDMB0GA1UdDgQWBBQRXBKC
-# VXuhcK7rCDzb/6SAfPGwvDANBgkqhkiG9w0BAQsFAAOCAQEAlZhDvun+4lQ0yd2C
-# +pAFD3B2/l2N9hArAcHhp6DaO48NSIT3eyyhGrfk8f3lDVhvjEbUDDmb6Oe67rBN
-# 3W7Dp1Y+W8Z96kC3miq7UbmVTGkiQGZFwi0KJ8tw++//vlU3zlW9nhqwFxzm7DfL
-# zECzv6bnd9Ri+1R4zhvkd5BLTuwLjPLkzbOTdsGwbXWWOK2gTTCr82I7G9xcq9Gv
-# qAcoJAHVEiNKt7p7Y+ScDL/AZGBMCBTsN9gcAoIgq22EWBHHV02HmPfuYyddaq1c
-# Lmjot0+5wVoPVl4wNktght1WVHDlk3EpEJF5qc7Yhl3YtniIEHQoO8BkWykpFDhy
-# q5wz7TCCBY0wggR1oAMCAQICEA6bGI750C3n79tQ4ghAGFowDQYJKoZIhvcNAQEM
+# AQEBBQADggEPADCCAQoCggEBAKuTSorzjXf0qc4qX04KtYn2ErVj9RAkn/1f/9YN
+# llrRj0s3urh/LnWmHn4vUjPrDTzHXUx4udOclWNlv52uCMAfXKZR3qD73OCHHQ2l
+# +1s4JqrAdGhr6QPyIhCDwl7wqQUfekQtBep+SqbM0vkbvup3WKgol+c3fIUxvM8E
+# bPLg5CcNWug6Twj+Wn1FJidJihmYARSKT5PFv32BLbffUpuvdWXxzRIRv8c4EE+S
+# bWs3lTiCGrp1X33mXYiMRNAiF5ofrCJwRA7LESh4TCqXWDSvs+KFBi1ZxEnLxmUk
+# 1Wrzq11umlIzoJhnEN0VyBvLK6X40uTF50piU+5kGy9kZlkCAwEAAaNGMEQwDgYD
+# VR0PAQH/BAQDAgeAMBMGA1UdJQQMMAoGCCsGAQUFBwMDMB0GA1UdDgQWBBSpc1pf
+# XTSlgxdtXKDrlumz7H67TjANBgkqhkiG9w0BAQsFAAOCAQEAdPAxdgyk/YzF72lK
+# 4P1I3Lwjice2yAR0aoXSEP5gO/xnAvuqCiAcdPfJhqMrrfq5iFLqTuWSfz+k9irn
+# hjzyWgmo2GUrQ8BVRoNAw7HpTJo7Rw8+FfDzyy+stq9UKWrkflHqwb7oBD+aBs/5
+# ZccFKZi8oeV79CCTGdwXKYgE+xYbV//Twr7rpMbVUqbchEDdZXEzT2GdEUd5B02L
+# bDGJ4Gjz8AtCFcSXWQlLnAQxd5CJVFHDkyfkEs2VvBPtR/MBCF3NiNufb8HgClhS
+# ZHayqVVZhUd+NS7/orBY5M1Ioc0/kGiNO3nlWf1IlAPk/jsILweFZkUO0wBTot/O
+# b18zszCCBY0wggR1oAMCAQICEA6bGI750C3n79tQ4ghAGFowDQYJKoZIhvcNAQEM
 # BQAwZTELMAkGA1UEBhMCVVMxFTATBgNVBAoTDERpZ2lDZXJ0IEluYzEZMBcGA1UE
 # CxMQd3d3LmRpZ2ljZXJ0LmNvbTEkMCIGA1UEAxMbRGlnaUNlcnQgQXNzdXJlZCBJ
 # RCBSb290IENBMB4XDTIyMDgwMTAwMDAwMFoXDTMxMTEwOTIzNTk1OVowYjELMAkG
@@ -435,31 +413,31 @@ Write-Host @"
 # y2ueIu9THFVkT+um1vshETaWyQo8gmBto/m3acaP9QsuLj3FNwFlTxq25+T4QwX9
 # xa6ILs84ZPvmpovq90K8eWyG2N01c4IhSOxqt81nMYIFQzCCBT8CAQEwZzBTMRow
 # GAYDVQQLDBFJbmNpZGVudCBSZXNwb25zZTETMBEGA1UECgwKSVIgVG9vbGtpdDEg
-# MB4GA1UEAwwXSVIgVG9vbGtpdCBDb2RlIFNpZ25pbmcCEFrkxDISXbapRXVtmW45
-# yk4wDQYJYIZIAWUDBAIBBQCggYQwGAYKKwYBBAGCNwIBDDEKMAigAoAAoQKAADAZ
+# MB4GA1UEAwwXSVIgVG9vbGtpdCBDb2RlIFNpZ25pbmcCEBsvfGvcX1ueRu95kL8u
+# JHwwDQYJYIZIAWUDBAIBBQCggYQwGAYKKwYBBAGCNwIBDDEKMAigAoAAoQKAADAZ
 # BgkqhkiG9w0BCQMxDAYKKwYBBAGCNwIBBDAcBgorBgEEAYI3AgELMQ4wDAYKKwYB
-# BAGCNwIBFTAvBgkqhkiG9w0BCQQxIgQgqqx4ufPIIrnHGZNBmGa82naIt1CMMqse
-# ExbiDvmBHPQwDQYJKoZIhvcNAQEBBQAEggEAY49pCX5AeW2au3NFDdCf2bbuM0Yg
-# OekcVmJtzP3URwoZaifjFTTAXZWI4Nfh3C7PSmfmc1l1RHjFK80rQTK+npkXNbBb
-# BnLAtxbWxOFCKwmO2Dt1+m1NW384LRKNVL9jxWjscdZ7LQTWACX5XuJUy8MN+yUu
-# D4SWPKWm7TopjDsweNA3Zmiy/I8OopohGnjDs4uDdI8crNV7ErAn12QyBUP0p6K9
-# s4Q/zQL9hbOE2IaRaUNI41fcO7fc2E52zN4lUPm9sNh1T+GSt0z6alQCBi943jxT
-# J+QbzBSNUTD5Reh+AW9cJZfwTvjqdIJiM5AjQia8UJlubRbqD8EI4y59HKGCAyYw
+# BAGCNwIBFTAvBgkqhkiG9w0BCQQxIgQgZnrEHGOlaKJKrlNBxQNsafDryCnngl1q
+# otc7dGWBEyQwDQYJKoZIhvcNAQEBBQAEggEAgeK0CzZn9ZM3RSnQxKRiquXqstEj
+# ZrV0CwH51HOGVsGkmh724kVHij9mW1zCtq8z+Slz247+IelKjbuLg+6IIyzJLekS
+# +GcRUzADsAL6CnRldn+upCsNeW7GkVFQXEkSOr05dK8GQ7RJxZC4CxHH7iAakq81
+# un7O4xy/bf4s603SRAmelCQ/Ce77RLx6vzaVSY/M3ChKhRdlG1MmdqpV4seixBNy
+# lMrfW94m7tj/OWQhU+pNvNK6Xrdvm9vLTWup04FW4GIOIDlnyapeIfIODMeK4wOh
+# wnL5ozG42D+qNSaujbUAsuD5PODHPKGHZmdnItLYkfPRFbM7W8L/O5Ii1qGCAyYw
 # ggMiBgkqhkiG9w0BCQYxggMTMIIDDwIBATB9MGkxCzAJBgNVBAYTAlVTMRcwFQYD
 # VQQKEw5EaWdpQ2VydCwgSW5jLjFBMD8GA1UEAxM4RGlnaUNlcnQgVHJ1c3RlZCBH
 # NCBUaW1lU3RhbXBpbmcgUlNBNDA5NiBTSEEyNTYgMjAyNSBDQTECEAqA7xhLjfEF
 # gtHEdqeVdGgwDQYJYIZIAWUDBAIBBQCgaTAYBgkqhkiG9w0BCQMxCwYJKoZIhvcN
-# AQcBMBwGCSqGSIb3DQEJBTEPFw0yNjA2MjAwMTE0MjhaMC8GCSqGSIb3DQEJBDEi
-# BCBVtleE4APdQoSv04shY8yN5MdyoaphEPYjqIg9fD/ckTANBgkqhkiG9w0BAQEF
-# AASCAgCl2opOeUwbNLKa9QAuFOOKnKidRg8f5KK1EhRuwtnv3vKlLLT8IGX4ApRs
-# oiSrrK3Kw4vQli2fQE0LbcumSNpvrkyQfd0VVblXbhQUs0h7qAgj4Siaj3KkVKlx
-# WL73YMCA34c3rVXWNuh8y4Wq9eYYkgfa1VYRQWkqn+mtjnz64O09U3me//KF6qWU
-# eBQu6MHvpwq0bLWRRVzFeeCTlo3f40RSBGscExYAHXPZmVwX9Ucob+FLKLFbtT9L
-# 8nrZPx3AfrDYz+39OBM8vHWuzUyy8NI90g+NcLpILQ+PRyker0sfN+yZZJdQmooP
-# z4YpQnQN3MVSqGHl5XaeqqWSkOeoXzBX/Rc8dT+OQFJ8pp3TS7RJwPpp/v4JxFtS
-# Bga53eFQ34EYumOAYa3TuY9Jv1d7AuRtdUkMI3oc+pyaO4XZNjG2MzDd73Yhgjfv
-# KhVm7AvUDxlUhFo+43H67F/ldbjTggVVU1zrrnqVaC+/3ItPgmfVUy7IS9LZEC1w
-# UrU9z7HeKnrg+0lPdEVbLw5YsOS/Sq/lUEo+jzeXb4zXOHEhkx3AmNFBIBNkV7/o
-# Do1I8hqTRrj0PbnnhZW1p9xLrUoUnIPnBJsQIzqIkka3pUgZi0oegELKj9VgrTsI
-# 18EZ9IMzoEjcUDYS6Ol6oNVPDudU/tmnjfucsZXCI/zWnneFUw==
+# AQcBMBwGCSqGSIb3DQEJBTEPFw0yNjA2MjIwNDM0NDlaMC8GCSqGSIb3DQEJBDEi
+# BCCvJxgA01mYhQofjayzaDV28Im1cEIUkdHfkHYBVc1PjjANBgkqhkiG9w0BAQEF
+# AASCAgABrAk9TSCNPe5uLPBccMyR4ZsoEunfzX2hRZJszdooVQpMyEemYBRmnbzg
+# B3Ztk0F4Vs2q2a1HTMT0cf5zlFGlxhTPc6E2g6s9sy48Vnmh2lguHsYO4Dih9QCn
+# CjkwM/eY5P4MbchN5dFxdvJmyFS20BSGIv/mdEuuYxaQ15N3QVSTKsqVoDz6kVwY
+# fskxjwnemhjf2aam4jl/7He7g3TQj020cG8Wz2ZietHdtK3/WszC8gn+qzeGU3Ya
+# 1QZ5pmDv+M/iBRYvIr7aG2UgJdevqD8dIW5g7Vc+DmkIWKsLhHGWp0cTvwmTQhl7
+# o6S5+Y05IpdB7678crWxr09R1bapSOjdgtBZF/nrDS7osxUSi6V/XehciKOZj6Y9
+# 7WNhsDkTzrvG2cayo8clJX3wLe0hX9MkoGF0KezTRQDUJzjqVg8H8J3qK0/BAAvf
+# NOowD9klgOXGwdhtaNGMtyQ/ZNHC/4QDTJs08Bxb+QulgCFIsq1WQt93pJrdyk6t
+# sviJ8ZJfCABiDlIRXNiZRLhCC3GZN5PGkfrPQ0CPwPSrwFUfIRrqGA1RuG45tDjn
+# 9dpj5zZGWr9CWPo8ODwcW/bw0Ha3BqjE73CzscPeeAYYbZrOoyrzEO66wS0gs+li
+# QOHpN2eOWJY32wyvzo27Z0bbZyXYNeDihCOP8mm4G/tIkwuOhg==
 # SIG # End signature block

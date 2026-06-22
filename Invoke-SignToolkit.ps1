@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Generate a self-signed code-signing certificate and sign all IR Toolkit .ps1 files.
     Run this ONCE on the analyst machine before deploying the toolkit to a USB/target host.
@@ -6,15 +6,15 @@
 .DESCRIPTION
     After signing, Defender's AMSI trusts the scripts at load time without requiring
     Tamper Protection to be toggled off. The only step needed on the target host is
-    importing the public certificate into the TrustedPublisher store — Invoke-PrepareDefender.ps1
+    importing the public certificate into the TrustedPublisher store - Invoke-PrepareDefender.ps1
     does this automatically when the cert file is present in tools\.
 
     Workflow:
       1. Run this script on the analyst machine (requires admin for LocalMachine cert store).
       2. Copy the signed toolkit (including tools\ir_toolkit.cer) to the target USB/host.
-      3. On the target: Invoke-PrepareDefender.ps1 imports the cert → no TP toggle needed.
+      3. On the target: Invoke-PrepareDefender.ps1 imports the cert -> no TP toggle needed.
 
-    The private key (PFX) stays on the analyst machine — only the public cert (.cer) is
+    The private key (PFX) stays on the analyst machine - only the public cert (.cer) is
     copied with the toolkit. Defender validates the signature against TrustedPublisher
     without needing the private key on the target.
 
@@ -24,7 +24,7 @@
 .PARAMETER WhatIf       Show what would be signed without signing.
 
 .EXAMPLE
-    # Sign everything — cert created, all .ps1 signed
+    # Sign everything - cert created, all .ps1 signed
     .\Invoke-SignToolkit.ps1
 
     # Preview without signing
@@ -50,6 +50,22 @@ $StampUrl   = 'http://timestamp.digicert.com'
 
 function Write-Step { param([string]$Msg, [string]$Color = 'Cyan')
     Write-Host "[$(Get-Date -Format 'HH:mm:ss')] $Msg" -ForegroundColor $Color }
+
+function Remove-ScriptSignature {
+    # Strip an existing Authenticode block before re-signing, matched by WHOLE LINE
+    # so a marker STRING inside code (e.g. Build-Toolkit's IndexOf) is never mistaken
+    # for the block and truncated. Rewrites CRLF + one trailing newline for a clean sign.
+    param([string]$Path)
+    $marker = '# SIG ' + '# Begin signature block'   # split so this file never self-matches
+    $lines  = [System.IO.File]::ReadAllLines($Path)
+    $idx = -1
+    for ($i = $lines.Length - 1; $i -ge 0; $i--) {
+        if ($lines[$i].Trim() -eq $marker) { $idx = $i; break }
+    }
+    $kept = if ($idx -lt 0) { $lines } elseif ($idx -eq 0) { @() } else { $lines[0..($idx - 1)] }
+    $text = (($kept -join "`r`n").TrimEnd("`r", "`n")) + "`r`n"
+    [System.IO.File]::WriteAllText($Path, $text, [System.Text.UTF8Encoding]::new($true))
+}
 
 # -- Step 1: Find or create the code-signing certificate ----------------------
 Write-Step "Looking for existing '$CertSubject' certificate..."
@@ -86,7 +102,7 @@ if (-not $PfxPassword) {
     $PfxPassword = ConvertTo-SecureString -String ([guid]::NewGuid().ToString('N')) -AsPlainText -Force
 }
 Export-PfxCertificate -Cert $cert -FilePath $PfxPath -Password $PfxPassword -Force | Out-Null
-Write-Step "  -> ir_toolkit.pfx  (PFX password was randomly generated — save separately if archiving)" 'Green'
+Write-Step "  -> ir_toolkit.pfx  (PFX password was randomly generated - save separately if archiving)" 'Green'
 Write-Host "  NOTE: ir_toolkit.pfx stays on the analyst machine only. Do NOT copy to target." -ForegroundColor Yellow
 
 # -- Step 3: Trust the cert locally so signing and chain validation work -------
@@ -114,18 +130,33 @@ $signed = 0; $failed = 0
 
 foreach ($s in $scripts) {
     if ($PSCmdlet.ShouldProcess($s.FullName, 'Set-AuthenticodeSignature')) {
-        try {
-            $result = Set-AuthenticodeSignature -FilePath $s.FullName -Certificate $cert `
-                          -TimestampServer $StampUrl -HashAlgorithm SHA256 -ErrorAction Stop
-            if ($result.Status -eq 'Valid') {
-                $signed++
-            } else {
-                Write-Step "  WARN: $($s.Name) status=$($result.Status)" 'Yellow'
-                $failed++
+        Remove-ScriptSignature -Path $s.FullName    # clean previous sig + normalize EOL
+        $ok = $false
+        # The DigiCert timestamp server rate-limits under rapid-fire requests, so a
+        # couple of files randomly fail. Retry with backoff; on persistent timestamp
+        # failure, sign WITHOUT a timestamp so the file is still signed (sig then
+        # expires with the cert, in 5 years - acceptable fallback).
+        for ($attempt = 1; $attempt -le 4 -and -not $ok; $attempt++) {
+            try {
+                $result = Set-AuthenticodeSignature -FilePath $s.FullName -Certificate $cert `
+                              -TimestampServer $StampUrl -HashAlgorithm SHA256 -ErrorAction Stop
+                if ($result.Status -eq 'Valid') { $signed++; $ok = $true }
+                else { throw "status=$($result.Status)" }
+            } catch {
+                if ($attempt -lt 4) { Start-Sleep -Milliseconds (500 * $attempt) }
             }
-        } catch {
-            Write-Step "  FAIL: $($s.Name) — $($_.Exception.Message)" 'Red'
-            $failed++
+        }
+        if (-not $ok) {
+            try {
+                $result = Set-AuthenticodeSignature -FilePath $s.FullName -Certificate $cert `
+                              -HashAlgorithm SHA256 -ErrorAction Stop      # no timestamp fallback
+                if ($result.Status -eq 'Valid') {
+                    $signed++; $ok = $true
+                    Write-Step "  $($s.Name): signed WITHOUT timestamp (timestamp server unavailable)" 'Yellow'
+                }
+            } catch {
+                Write-Step "  FAIL: $($s.Name) - $($_.Exception.Message)" 'Red'; $failed++
+            }
         }
     } else {
         Write-Host "  WhatIf: would sign $($s.FullName)" -ForegroundColor Gray
@@ -142,7 +173,7 @@ if ($sample) {
         $(if ($sig.Status -eq 'Valid') { 'Green' } else { 'Yellow' })
 }
 
-# -- Step 6: Clean up — remove the cert from this analyst machine -------------
+# -- Step 6: Clean up - remove the cert from this analyst machine -------------
 # The cert's job is done: scripts are signed and .cer/.pfx are saved.
 # Remove it from all Windows cert stores on this machine to leave no trace.
 Write-Step "Removing cert from analyst-machine cert stores (leave no trace)..." 'Cyan'
@@ -163,34 +194,35 @@ Write-Host "  [+] Cert removed from all local stores. No residue on this machine
 
 Write-Host ""
 Write-Host "=== NEXT STEPS ===" -ForegroundColor Cyan
-Write-Host "  1. ir_toolkit.cer is included in the toolkit folder — deploy as-is to target USB." -ForegroundColor Gray
+Write-Host "  1. ir_toolkit.cer is included in the toolkit folder - deploy as-is to target USB." -ForegroundColor Gray
 Write-Host "  2. On the target host, Invoke-PrepareDefender.ps1 imports the cert automatically." -ForegroundColor Gray
 Write-Host "  3. Invoke-IRCollection.ps1 removes the cert from the target after the run." -ForegroundColor Gray
 Write-Host "  4. Re-run this script after any script changes to update signatures." -ForegroundColor Gray
+
 # SIG # Begin signature block
 # MIIcoQYJKoZIhvcNAQcCoIIckjCCHI4CAQExDzANBglghkgBZQMEAgEFADB5Bgor
 # BgEEAYI3AgEEoGswaTA0BgorBgEEAYI3AgEeMCYCAwEAAAQQH8w7YFlLCE63JNLG
-# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCDN1W79JGgRDFHY
-# YMlcQ5ASn7ZRU4CjqQHc7B8nk6a2XKCCFrQwggN2MIICXqADAgECAhBa5MQyEl22
-# qUV1bZluOcpOMA0GCSqGSIb3DQEBCwUAMFMxGjAYBgNVBAsMEUluY2lkZW50IFJl
+# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCCWumogZ+LAYMWv
+# 5X/D7C/d/Or2NkXySm7KWhSjP5cZZ6CCFrQwggN2MIICXqADAgECAhAbL3xr3F9b
+# nkbveZC/LiR8MA0GCSqGSIb3DQEBCwUAMFMxGjAYBgNVBAsMEUluY2lkZW50IFJl
 # c3BvbnNlMRMwEQYDVQQKDApJUiBUb29sa2l0MSAwHgYDVQQDDBdJUiBUb29sa2l0
-# IENvZGUgU2lnbmluZzAeFw0yNjA2MjAwMDU5NDZaFw0zMTA2MjAwMTA5NDZaMFMx
+# IENvZGUgU2lnbmluZzAeFw0yNjA2MjIwNDI0NDVaFw0zMTA2MjIwNDM0NDVaMFMx
 # GjAYBgNVBAsMEUluY2lkZW50IFJlc3BvbnNlMRMwEQYDVQQKDApJUiBUb29sa2l0
 # MSAwHgYDVQQDDBdJUiBUb29sa2l0IENvZGUgU2lnbmluZzCCASIwDQYJKoZIhvcN
-# AQEBBQADggEPADCCAQoCggEBAJ1nFbqBzQLbEhUUTT10Lrva+ooE/uVqzTJbGk5/
-# xh3zYBEAaRil7obceqCWtDg6KSjbDQP8wto42fHUK8tp0FU0NEi2+rkWHfcpeasm
-# z2e+UFQMDlXRcxg7dqe+08OB4pFhwrHSPo0m7HZAgtpHd02POka7jaYVoAnScg7i
-# LuZiRSJ3tJKZu1KCSTntV+LbicnowTlaDEvr7JQzSVs+5BpNadU3n/ujzH088Mgm
-# CoXooQpF12SzbZNCZ+kbgza6bNMbEHNGkLr9S0vHQD95oKPWF7YuOu7jqtkuCOZc
-# KYYi4nOXFwLqXmJ+sqqpR2NrrfMkz4VaALGIZ93o10CHWDkCAwEAAaNGMEQwDgYD
-# VR0PAQH/BAQDAgeAMBMGA1UdJQQMMAoGCCsGAQUFBwMDMB0GA1UdDgQWBBQRXBKC
-# VXuhcK7rCDzb/6SAfPGwvDANBgkqhkiG9w0BAQsFAAOCAQEAlZhDvun+4lQ0yd2C
-# +pAFD3B2/l2N9hArAcHhp6DaO48NSIT3eyyhGrfk8f3lDVhvjEbUDDmb6Oe67rBN
-# 3W7Dp1Y+W8Z96kC3miq7UbmVTGkiQGZFwi0KJ8tw++//vlU3zlW9nhqwFxzm7DfL
-# zECzv6bnd9Ri+1R4zhvkd5BLTuwLjPLkzbOTdsGwbXWWOK2gTTCr82I7G9xcq9Gv
-# qAcoJAHVEiNKt7p7Y+ScDL/AZGBMCBTsN9gcAoIgq22EWBHHV02HmPfuYyddaq1c
-# Lmjot0+5wVoPVl4wNktght1WVHDlk3EpEJF5qc7Yhl3YtniIEHQoO8BkWykpFDhy
-# q5wz7TCCBY0wggR1oAMCAQICEA6bGI750C3n79tQ4ghAGFowDQYJKoZIhvcNAQEM
+# AQEBBQADggEPADCCAQoCggEBAKuTSorzjXf0qc4qX04KtYn2ErVj9RAkn/1f/9YN
+# llrRj0s3urh/LnWmHn4vUjPrDTzHXUx4udOclWNlv52uCMAfXKZR3qD73OCHHQ2l
+# +1s4JqrAdGhr6QPyIhCDwl7wqQUfekQtBep+SqbM0vkbvup3WKgol+c3fIUxvM8E
+# bPLg5CcNWug6Twj+Wn1FJidJihmYARSKT5PFv32BLbffUpuvdWXxzRIRv8c4EE+S
+# bWs3lTiCGrp1X33mXYiMRNAiF5ofrCJwRA7LESh4TCqXWDSvs+KFBi1ZxEnLxmUk
+# 1Wrzq11umlIzoJhnEN0VyBvLK6X40uTF50piU+5kGy9kZlkCAwEAAaNGMEQwDgYD
+# VR0PAQH/BAQDAgeAMBMGA1UdJQQMMAoGCCsGAQUFBwMDMB0GA1UdDgQWBBSpc1pf
+# XTSlgxdtXKDrlumz7H67TjANBgkqhkiG9w0BAQsFAAOCAQEAdPAxdgyk/YzF72lK
+# 4P1I3Lwjice2yAR0aoXSEP5gO/xnAvuqCiAcdPfJhqMrrfq5iFLqTuWSfz+k9irn
+# hjzyWgmo2GUrQ8BVRoNAw7HpTJo7Rw8+FfDzyy+stq9UKWrkflHqwb7oBD+aBs/5
+# ZccFKZi8oeV79CCTGdwXKYgE+xYbV//Twr7rpMbVUqbchEDdZXEzT2GdEUd5B02L
+# bDGJ4Gjz8AtCFcSXWQlLnAQxd5CJVFHDkyfkEs2VvBPtR/MBCF3NiNufb8HgClhS
+# ZHayqVVZhUd+NS7/orBY5M1Ioc0/kGiNO3nlWf1IlAPk/jsILweFZkUO0wBTot/O
+# b18zszCCBY0wggR1oAMCAQICEA6bGI750C3n79tQ4ghAGFowDQYJKoZIhvcNAQEM
 # BQAwZTELMAkGA1UEBhMCVVMxFTATBgNVBAoTDERpZ2lDZXJ0IEluYzEZMBcGA1UE
 # CxMQd3d3LmRpZ2ljZXJ0LmNvbTEkMCIGA1UEAxMbRGlnaUNlcnQgQXNzdXJlZCBJ
 # RCBSb290IENBMB4XDTIyMDgwMTAwMDAwMFoXDTMxMTEwOTIzNTk1OVowYjELMAkG
@@ -294,31 +326,31 @@ Write-Host "  4. Re-run this script after any script changes to update signature
 # y2ueIu9THFVkT+um1vshETaWyQo8gmBto/m3acaP9QsuLj3FNwFlTxq25+T4QwX9
 # xa6ILs84ZPvmpovq90K8eWyG2N01c4IhSOxqt81nMYIFQzCCBT8CAQEwZzBTMRow
 # GAYDVQQLDBFJbmNpZGVudCBSZXNwb25zZTETMBEGA1UECgwKSVIgVG9vbGtpdDEg
-# MB4GA1UEAwwXSVIgVG9vbGtpdCBDb2RlIFNpZ25pbmcCEFrkxDISXbapRXVtmW45
-# yk4wDQYJYIZIAWUDBAIBBQCggYQwGAYKKwYBBAGCNwIBDDEKMAigAoAAoQKAADAZ
+# MB4GA1UEAwwXSVIgVG9vbGtpdCBDb2RlIFNpZ25pbmcCEBsvfGvcX1ueRu95kL8u
+# JHwwDQYJYIZIAWUDBAIBBQCggYQwGAYKKwYBBAGCNwIBDDEKMAigAoAAoQKAADAZ
 # BgkqhkiG9w0BCQMxDAYKKwYBBAGCNwIBBDAcBgorBgEEAYI3AgELMQ4wDAYKKwYB
-# BAGCNwIBFTAvBgkqhkiG9w0BCQQxIgQgcFOnSdosOQuVcE+gJcei8KrIw7PRumQn
-# u757IMtnkkMwDQYJKoZIhvcNAQEBBQAEggEAWj/QtPBt227c1kUiu+Udx1ogmea2
-# U+Wytc94AR0oen9N4ndA12cfUZPwpk560iHtT5A3wQHMqvPuLB8u3xwXjk+P1q7C
-# AN2Py4MFMr0KuhgvDK+fznAaJfX1V+gfn96Q7TIpeDNc+4mJytRJTCGNp/SKzhDS
-# gwL4Yv3rw9kzvpPQwPyUeKdH+siYCHuebFv1Fdri21+NSj9fCE+LnXsUU/h+IXQQ
-# jOVLpNIP/YezRiupGA0ZCYQMDY3R9lmUHxbPCPxRdZwMTgFi805MpkEt/wgMPsB+
-# dUqaAAcPyrc+3bPCQUaEiQ4Bgbj6OacIwS++ykkbo0ALri2Q0aVRPSYl96GCAyYw
+# BAGCNwIBFTAvBgkqhkiG9w0BCQQxIgQgK++ItVbcNVI98oIWf9B6yINfmLvB3J1g
+# kox1j1LslREwDQYJKoZIhvcNAQEBBQAEggEAMhnJ7aZihOfIs0rdyPaBaPEy23y+
+# jsF9nQS6RZmTRtwT7mgaHExWtkklMi2+anAFxcimqyTQvVREikB3WeTsLzH5uanS
+# DybDNz6oL7Jkqk3BQHuiQbtFRFaUpdVFwDA7wbTOSHlEDTp4ko6jY3PoT86fAGz0
+# w00jSgce75HiGXvNo2fzbEI0FPheS1/C//+gAg/RPqT0fymBwIF5tZ2pmvlOF3Cz
+# N/zoodZ3yQmaGp9+NZ7rSoORubld65Ifllbc4ays2VDSTdXALCmhA9IsWFl4IFzQ
+# gbr4FxeWhjzwWIbeeL0gUYOhWiXynjswBgL1zDaNAp2fDlBE9qT6/V0+1KGCAyYw
 # ggMiBgkqhkiG9w0BCQYxggMTMIIDDwIBATB9MGkxCzAJBgNVBAYTAlVTMRcwFQYD
 # VQQKEw5EaWdpQ2VydCwgSW5jLjFBMD8GA1UEAxM4RGlnaUNlcnQgVHJ1c3RlZCBH
 # NCBUaW1lU3RhbXBpbmcgUlNBNDA5NiBTSEEyNTYgMjAyNSBDQTECEAqA7xhLjfEF
 # gtHEdqeVdGgwDQYJYIZIAWUDBAIBBQCgaTAYBgkqhkiG9w0BCQMxCwYJKoZIhvcN
-# AQcBMBwGCSqGSIb3DQEJBTEPFw0yNjA2MjAwMTE0MjhaMC8GCSqGSIb3DQEJBDEi
-# BCDaSKLBdX54KtOSuobnkSBhnVjoiqGtJ3tKP7EsPwnEDTANBgkqhkiG9w0BAQEF
-# AASCAgCEpCvt9QQ7c4PgdIwrOeuXdnhAKxJoXXhTrNh7+sXPXMmN/3Hi5KmijKZ+
-# LbGk/8MD279+vHGfYioQKghNV0Swu6nl41YwIBWtQ+9C1BrHLddPKuF9YxwlOy2m
-# 3pXOK2fNb59RzMV9WDsjJyASsv9xEdFmO30lSh+if8wdj29MiV9MsE+N9LgfgzUZ
-# G2IJoeZc2NK+DhQfiYAFmMsUz2Ze/E+Q25rr4bhyUdpa6QO7yr1cE3yHGnJphi2E
-# dbQTF7guB/h2M2lhBoCFdfVmq6YajLJ6rRSdegqNIYWxLvywYcQW73MEBt3lywdm
-# 1f2KdzyffhOTiAn119HMz8GY8pJKpKBZM2qJB88Hd7K/wNYElkOiugycHP9Of+5T
-# hMMDHobbWxRvc6KLy0BKVFJrLlHpM9b+BL/UA0HeWAwzW943iiMTyNFI0mc9wErq
-# Mb4zvPh7xZKQqFvMYu+2y6URJWuJ4TXAyYP3PGPTkqS3kIKGBaEbFNtwzgy/cNhF
-# ec4/6DfLuvNcXAeM85PoNAJMOdx4iWV6Oni4P93j5cpX7JXJmttVHFggC822nh+F
-# VGGAxxgrFPXe/Ix0PrGe63hKGpag5lugMXJ8cqaocvNfqjpqVGPeQSVvxgxbyN4t
-# JqcHEDuWdJN9tmTjYecBrKQfDO1MKUwGA/QGUZr55D1Wg3aXXw==
+# AQcBMBwGCSqGSIb3DQEJBTEPFw0yNjA2MjIwNDM0NDlaMC8GCSqGSIb3DQEJBDEi
+# BCDYXMnyhIE8DH9yFvvlVOlonLSRa1hwlYo7zXnS3nDHVzANBgkqhkiG9w0BAQEF
+# AASCAgAXufzHFQIIKZQHcehdTfLtm5NXGphklc4LPAlPB0YX0fSLhRWqZ4h6PlQY
+# up4nGf6iPCwGyC8AiBZJloPKMfjtabFFVHSiSDRO1I0f9fgeIP+un86xXxnj77hT
+# ZI3BekSQYxt3IFmWTgq1WVDP+5Xb/bV6XTDHKRPcHOHs/r16LS8hWc1gWJAr2WI2
+# xmr40K0XIjdT7WMrd+iFe/eiSnVzHrsQLzDTFCPsnWRuPq6HOSKY5d1h//6NG+cP
+# Aj8fTGep6cIbShlGRzLk4nXKdcJOCaE65A3/tlbXhfIxSOZ/ewMfuGPSBWoHEN0r
+# 3QYu05nCfaOZncFODO3DxoiQLEiLRYNhy5rxf4eyCp9QAKW4ZjbJXSlmOxFQ2le2
+# f8baHBJTS9Wb7tm50O7k0YjNoSJ0UAD6t3i0gRQXdmwC2/e/lXrNKCSn60Fl/Fjk
+# Q+8cY8v/0BbhxcyZifEwr4G/lf7QvCkvNLkXVJ1KWc9in7NsflOKm7BKmtBhSBlh
+# kDltv1OeXaLRBpm+B5dAKVO/oO27xx3kLg3PaWl6dMCF4atDKSDDdtjVx7DdWLcM
+# rZEP8SSdlQuRqCuzNIGiAyYoAey2pIJaZrVJwNA20OeCvkaA9Xtj4js6N4JeNZCy
+# 2V6bjHbS0bdhf5q4+R4fs1RatkVLNI6gczKI4twQo1HEe2VtBA==
 # SIG # End signature block

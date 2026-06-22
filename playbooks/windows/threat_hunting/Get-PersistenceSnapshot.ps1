@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Pure-PowerShell persistence-breadth + security-config-tamper snapshot. No
     third-party tools - uses only built-in cmdlets and Windows' own binaries
@@ -122,7 +122,7 @@ if (Test-Path $netsh) {
         $displayPath = if ($dllPath) { $dllPath } else { "(unresolved: $helperVal)" }
         $raw.Add("Netsh helper $helperName=$displayPath")
 
-        # Skip Windows-signed helpers — only flag unsigned or unknown-path entries.
+        # Skip Windows-signed helpers - only flag unsigned or unknown-path entries.
         $isSigned = $false
         if ($dllPath -and (Test-Path -LiteralPath $dllPath)) {
             try {
@@ -131,7 +131,7 @@ if (Test-Path $netsh) {
                             $sig.SignerCertificate.Subject -match 'Microsoft'
             } catch {}
         } elseif (-not $dllPath) {
-            # Can't resolve path — flag as indeterminate rather than skipping
+            # Can't resolve path - flag as indeterminate rather than skipping
             $isSigned = $false
         }
 
@@ -211,7 +211,7 @@ try { & auditpol /get /category:* 2>$null | Out-File -LiteralPath (Join-Path $Ar
 # 3e. Defender detection history
 try { Get-MpThreatDetection -ErrorAction SilentlyContinue | Select-Object ThreatID, InitialDetectionTime, ProcessName, Resources |
         Export-Csv -LiteralPath (Join-Path $Art 'defender_detections.csv') -NoTypeInformation -Encoding UTF8 } catch {}
-# 3f. Installed software — query each hive separately (array wildcard paths silently
+# 3f. Installed software - query each hive separately (array wildcard paths silently
 # fail when a hive doesn't exist). HKCU catches per-user installs: RMM tools and
 # stealers often install there to avoid a UAC prompt.
 try {
@@ -253,7 +253,7 @@ try {
         Out-File -LiteralPath (Join-Path $Art 'usn_readjournal.txt') -Encoding UTF8
 } catch {}
 
-# 4b. ShimCache — AppCompatCache binary blob from registry.
+# 4b. ShimCache - AppCompatCache binary blob from registry.
 #     Exported as-is for Invoke-AmcacheParser.ps1 to decode.
 $shimKey = 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\AppCompatCache'
 try {
@@ -263,7 +263,7 @@ try {
     }
 } catch {}
 
-# 4c. Amcache — execution history hive. Amcache.hve is locked by the Application
+# 4c. Amcache - execution history hive. Amcache.hve is locked by the Application
 #     Experience service; use robocopy /B (backup mode) to read the locked file,
 #     then reg load the copy. Requires SeBackupPrivilege (present in admin sessions).
 $amcache = "$env:SystemRoot\AppCompat\Programs\Amcache.hve"
@@ -271,9 +271,11 @@ $amcacheCopy = Join-Path ([System.IO.Path]::GetTempPath()) "IR_Amcache_$PID.hve"
 $hiveKey     = "HKLM\IR_Amcache_$PID"
 $amcacheOk   = $false
 try {
-    # robocopy /B = backup mode (bypasses ACL/lock via SeBackupPrivilege)
+    # robocopy /B = backup mode (bypasses ACL/lock via SeBackupPrivilege).
+    # /R:1 /W:1 = retry once, wait 1s - WITHOUT these, robocopy defaults to
+    # 1,000,000 retries x 30s wait and hangs forever on a locked/unreadable hive.
     & robocopy (Split-Path $amcache) ([System.IO.Path]::GetTempPath()) (Split-Path $amcache -Leaf) `
-        /B /NFL /NDL /NJH /NJS /NC /NS /NP 2>$null | Out-Null
+        /B /R:1 /W:1 /NFL /NDL /NJH /NJS /NC /NS /NP 2>$null | Out-Null
     if (Test-Path -LiteralPath $amcacheCopy) { $amcacheOk = $true }
 } catch {}
 
@@ -319,27 +321,27 @@ $Findings | Group-Object Type | Select-Object @{N='Type';E={$_.Name}}, Count | F
 # SIG # Begin signature block
 # MIIcoQYJKoZIhvcNAQcCoIIckjCCHI4CAQExDzANBglghkgBZQMEAgEFADB5Bgor
 # BgEEAYI3AgEEoGswaTA0BgorBgEEAYI3AgEeMCYCAwEAAAQQH8w7YFlLCE63JNLG
-# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCDsk8Gky5TxWP07
-# UvjlBhfDBOUBhg+63LnZDNE2g0Ei+aCCFrQwggN2MIICXqADAgECAhBa5MQyEl22
-# qUV1bZluOcpOMA0GCSqGSIb3DQEBCwUAMFMxGjAYBgNVBAsMEUluY2lkZW50IFJl
+# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCB9Ufkg2WYapYd4
+# biVdZOwPCrs04if+ONiA0KvwMzpZgqCCFrQwggN2MIICXqADAgECAhAbL3xr3F9b
+# nkbveZC/LiR8MA0GCSqGSIb3DQEBCwUAMFMxGjAYBgNVBAsMEUluY2lkZW50IFJl
 # c3BvbnNlMRMwEQYDVQQKDApJUiBUb29sa2l0MSAwHgYDVQQDDBdJUiBUb29sa2l0
-# IENvZGUgU2lnbmluZzAeFw0yNjA2MjAwMDU5NDZaFw0zMTA2MjAwMTA5NDZaMFMx
+# IENvZGUgU2lnbmluZzAeFw0yNjA2MjIwNDI0NDVaFw0zMTA2MjIwNDM0NDVaMFMx
 # GjAYBgNVBAsMEUluY2lkZW50IFJlc3BvbnNlMRMwEQYDVQQKDApJUiBUb29sa2l0
 # MSAwHgYDVQQDDBdJUiBUb29sa2l0IENvZGUgU2lnbmluZzCCASIwDQYJKoZIhvcN
-# AQEBBQADggEPADCCAQoCggEBAJ1nFbqBzQLbEhUUTT10Lrva+ooE/uVqzTJbGk5/
-# xh3zYBEAaRil7obceqCWtDg6KSjbDQP8wto42fHUK8tp0FU0NEi2+rkWHfcpeasm
-# z2e+UFQMDlXRcxg7dqe+08OB4pFhwrHSPo0m7HZAgtpHd02POka7jaYVoAnScg7i
-# LuZiRSJ3tJKZu1KCSTntV+LbicnowTlaDEvr7JQzSVs+5BpNadU3n/ujzH088Mgm
-# CoXooQpF12SzbZNCZ+kbgza6bNMbEHNGkLr9S0vHQD95oKPWF7YuOu7jqtkuCOZc
-# KYYi4nOXFwLqXmJ+sqqpR2NrrfMkz4VaALGIZ93o10CHWDkCAwEAAaNGMEQwDgYD
-# VR0PAQH/BAQDAgeAMBMGA1UdJQQMMAoGCCsGAQUFBwMDMB0GA1UdDgQWBBQRXBKC
-# VXuhcK7rCDzb/6SAfPGwvDANBgkqhkiG9w0BAQsFAAOCAQEAlZhDvun+4lQ0yd2C
-# +pAFD3B2/l2N9hArAcHhp6DaO48NSIT3eyyhGrfk8f3lDVhvjEbUDDmb6Oe67rBN
-# 3W7Dp1Y+W8Z96kC3miq7UbmVTGkiQGZFwi0KJ8tw++//vlU3zlW9nhqwFxzm7DfL
-# zECzv6bnd9Ri+1R4zhvkd5BLTuwLjPLkzbOTdsGwbXWWOK2gTTCr82I7G9xcq9Gv
-# qAcoJAHVEiNKt7p7Y+ScDL/AZGBMCBTsN9gcAoIgq22EWBHHV02HmPfuYyddaq1c
-# Lmjot0+5wVoPVl4wNktght1WVHDlk3EpEJF5qc7Yhl3YtniIEHQoO8BkWykpFDhy
-# q5wz7TCCBY0wggR1oAMCAQICEA6bGI750C3n79tQ4ghAGFowDQYJKoZIhvcNAQEM
+# AQEBBQADggEPADCCAQoCggEBAKuTSorzjXf0qc4qX04KtYn2ErVj9RAkn/1f/9YN
+# llrRj0s3urh/LnWmHn4vUjPrDTzHXUx4udOclWNlv52uCMAfXKZR3qD73OCHHQ2l
+# +1s4JqrAdGhr6QPyIhCDwl7wqQUfekQtBep+SqbM0vkbvup3WKgol+c3fIUxvM8E
+# bPLg5CcNWug6Twj+Wn1FJidJihmYARSKT5PFv32BLbffUpuvdWXxzRIRv8c4EE+S
+# bWs3lTiCGrp1X33mXYiMRNAiF5ofrCJwRA7LESh4TCqXWDSvs+KFBi1ZxEnLxmUk
+# 1Wrzq11umlIzoJhnEN0VyBvLK6X40uTF50piU+5kGy9kZlkCAwEAAaNGMEQwDgYD
+# VR0PAQH/BAQDAgeAMBMGA1UdJQQMMAoGCCsGAQUFBwMDMB0GA1UdDgQWBBSpc1pf
+# XTSlgxdtXKDrlumz7H67TjANBgkqhkiG9w0BAQsFAAOCAQEAdPAxdgyk/YzF72lK
+# 4P1I3Lwjice2yAR0aoXSEP5gO/xnAvuqCiAcdPfJhqMrrfq5iFLqTuWSfz+k9irn
+# hjzyWgmo2GUrQ8BVRoNAw7HpTJo7Rw8+FfDzyy+stq9UKWrkflHqwb7oBD+aBs/5
+# ZccFKZi8oeV79CCTGdwXKYgE+xYbV//Twr7rpMbVUqbchEDdZXEzT2GdEUd5B02L
+# bDGJ4Gjz8AtCFcSXWQlLnAQxd5CJVFHDkyfkEs2VvBPtR/MBCF3NiNufb8HgClhS
+# ZHayqVVZhUd+NS7/orBY5M1Ioc0/kGiNO3nlWf1IlAPk/jsILweFZkUO0wBTot/O
+# b18zszCCBY0wggR1oAMCAQICEA6bGI750C3n79tQ4ghAGFowDQYJKoZIhvcNAQEM
 # BQAwZTELMAkGA1UEBhMCVVMxFTATBgNVBAoTDERpZ2lDZXJ0IEluYzEZMBcGA1UE
 # CxMQd3d3LmRpZ2ljZXJ0LmNvbTEkMCIGA1UEAxMbRGlnaUNlcnQgQXNzdXJlZCBJ
 # RCBSb290IENBMB4XDTIyMDgwMTAwMDAwMFoXDTMxMTEwOTIzNTk1OVowYjELMAkG
@@ -443,31 +445,31 @@ $Findings | Group-Object Type | Select-Object @{N='Type';E={$_.Name}}, Count | F
 # y2ueIu9THFVkT+um1vshETaWyQo8gmBto/m3acaP9QsuLj3FNwFlTxq25+T4QwX9
 # xa6ILs84ZPvmpovq90K8eWyG2N01c4IhSOxqt81nMYIFQzCCBT8CAQEwZzBTMRow
 # GAYDVQQLDBFJbmNpZGVudCBSZXNwb25zZTETMBEGA1UECgwKSVIgVG9vbGtpdDEg
-# MB4GA1UEAwwXSVIgVG9vbGtpdCBDb2RlIFNpZ25pbmcCEFrkxDISXbapRXVtmW45
-# yk4wDQYJYIZIAWUDBAIBBQCggYQwGAYKKwYBBAGCNwIBDDEKMAigAoAAoQKAADAZ
+# MB4GA1UEAwwXSVIgVG9vbGtpdCBDb2RlIFNpZ25pbmcCEBsvfGvcX1ueRu95kL8u
+# JHwwDQYJYIZIAWUDBAIBBQCggYQwGAYKKwYBBAGCNwIBDDEKMAigAoAAoQKAADAZ
 # BgkqhkiG9w0BCQMxDAYKKwYBBAGCNwIBBDAcBgorBgEEAYI3AgELMQ4wDAYKKwYB
-# BAGCNwIBFTAvBgkqhkiG9w0BCQQxIgQgcQC2R4hmf93opR3QNNqDv9F+jQmYv5sa
-# XDN/Xt9z/DMwDQYJKoZIhvcNAQEBBQAEggEANOvM90mCsWic7vvoRelZZwI8Oddr
-# 8YPr+1c1ugo6ue76mk2wS18CMni5K0Nmhgte9B7m5J8SSnLyHd8uEPH+0GVSyZeY
-# o5eXz18jrNjZBugEQ4WTGoSb8hiKA5JWAsehftYKz4sDJWP6DKvTQAqoRMKTYwY0
-# 34mD8lmlB1bwWLXw/O+FNVLnvpKtucM9Ti2+pB6oGIOmXm9FKaVDkPFcmgNGfxMb
-# pEKQ7t1I8llNAWdHw0mdeGdsThdpJ2oy9B86oSCJN+vQ+iz2P1e4MMAt8OBhmmcm
-# XWembS4YJG+lxyBkiGpYpdlvzG2pgY6AewifOpjpu05IG21OXsbZLKWNQaGCAyYw
+# BAGCNwIBFTAvBgkqhkiG9w0BCQQxIgQgdrT8+mWU8nNAgGYJngdCYttjspmJ8tjz
+# vN0uf6o9rQMwDQYJKoZIhvcNAQEBBQAEggEACnUsn4OfJXx3dIobyYigqP2KuEr7
+# KHmmv4+tze8wjE1Rc6q/yuwwvDshbfa30mp4d29r3Y4ty28WvEM4kYwPHUA0964J
+# 7SnErVxaAGfbrpwE9/eicQfxBLKTclx2E6p+c6BH4szM7FkXMgxiXSk28nYXGmxv
+# CU6rX/TEIAWGVxECOSJ1ff6gy7JCymq0AoxgG9+12ACqWYLogSAZbkSmQwr/y73X
+# CniLKD2Oq6nScHMp5uR629ftxhyTtl7cS9BXmcPAnUhlnhkoqX9kitLvYgXSdLuO
+# M8z/SBMimwdKHCZVNsJJfhXBH/2PWvVE2qTb856hEpxeNmS3iRCmGXxbyaGCAyYw
 # ggMiBgkqhkiG9w0BCQYxggMTMIIDDwIBATB9MGkxCzAJBgNVBAYTAlVTMRcwFQYD
 # VQQKEw5EaWdpQ2VydCwgSW5jLjFBMD8GA1UEAxM4RGlnaUNlcnQgVHJ1c3RlZCBH
 # NCBUaW1lU3RhbXBpbmcgUlNBNDA5NiBTSEEyNTYgMjAyNSBDQTECEAqA7xhLjfEF
 # gtHEdqeVdGgwDQYJYIZIAWUDBAIBBQCgaTAYBgkqhkiG9w0BCQMxCwYJKoZIhvcN
-# AQcBMBwGCSqGSIb3DQEJBTEPFw0yNjA2MjAwMTE0MzJaMC8GCSqGSIb3DQEJBDEi
-# BCCwHFipJBj3jftz06U6xbDnju/NoMC0fH45ctPAEOdJEDANBgkqhkiG9w0BAQEF
-# AASCAgAJY1F+0s3170a4UMa/AeN6D6OvzHsXFsRBQRy9aT08zUrDTRKQLrE0FnfG
-# IDq6LbRPrrSfdjQnY5Pq+Z8BFM6JkP1nwWGG9IT+2+P7YUuIQQxpSByLOEWFz32y
-# PMLCrRhtC7us1qUry+jYFvYNIyGJhB6jK3/HQrJ0QoR1LFbB8Sb2L7cKVHDRnBdU
-# +RRQPQyamRpmasqTe/dQfDSt792u5B1eFp5U8Kqb0x2zMAg1TRi3sjjGhIFIItlS
-# baicfAIKFHCSUHZ1ftljNh7NZf0htnC+nEuP8kFhnBvFvbxVNvlMkusZYomZoN3E
-# Y73UDB/hhKLOekm2xw+SNxEziK+qgBRlcUqOPlUors1dV+FjS1yF5cMQUK8zxBpb
-# SMdr7oBBeAD+XSLAeBlgsMCVIo0XE2q9QY8ivP6j63D1PxuyB8yi8/BUB+e9O2kC
-# fizM2twFqPbnspFXxOtQe84mCG1lsLb0NtLPDxLMCYsR7XHmGJhPTgmScjthtndX
-# tPAIQ4bRlntG7eo56Cyyar7faGsjkT5rRAQREyPNvXmeESpSFJOICDmJjBWOyk+4
-# 4BoyThu9BiG/6SL4YTGezFlluOxH1vFRxP61A10Hywn9xObbt7ar5KeANGCdp54M
-# Oumwv96f49riSppPr3T7+dy8kx43ebxKrNByRlKYqmf6Op+/KA==
+# AQcBMBwGCSqGSIb3DQEJBTEPFw0yNjA2MjIwNDM0NTRaMC8GCSqGSIb3DQEJBDEi
+# BCAZjeAEJicu6R7kHv4CiIFNSSdmizwkcqgeZJuMtDIwqTANBgkqhkiG9w0BAQEF
+# AASCAgB5WA6dg+YOSOUU3N9rXfEIerqerU7zdIrOO3mfEIC1hP//q4jph2LYSlCf
+# zqIyNh2+XWH30+rW5moEpGXPKa/pPTVyVeFqRkhsaTJ2889L3q45BYgF7belZRmb
+# BEIJC6m+qguqfuMQvLCOTZ5ozEH6xTJzHKwKhpwgPTVwk0jl8zZnEtiCvZDTs4T+
+# j8ocXekgJm0fYnZA7D1MVQ+yGmMK8prvyHX/a8C9f7Vpyx8cG0vw7/zktczMSQhQ
+# dhBCSZKLikR3lDUCmddu73rKA41gWorVIWX/IQQsuVEogvF2WfsTiYO59MNofxmp
+# wDpbu2aI15TAKJ6Mu+8RDbEEXGZry+olFlLxbuaw7EMn91coAIy6IktI7XEzhs2s
+# dRbHAa0uYdufO/fOHYs2SzfMgdJTo0212xH2OpzNWcr/09Ghk/whhizZ3J6h3Ufu
+# P0MRgKs+UT+c93skFEkgQ8xx+Pag7t6wkXf8bBReVZ0UOsc9V3l8l/6GLOtX8yR6
+# iqdCJ6BuFOqPJNS5J7/Up4fnDL/PxMhwG1E682cKIww4yfDBAQybO5wX5IkrfwDB
+# NzdH///wgZUuZrrgQkEVkrm9AKJXjuNOVwLt6XZ1czGFlKRrw7wkdlMSVjs6ILX4
+# EuVHarT+ZdvAdKiv0IvKTQacQba+DiAermyANOpwdeHY7j+hmQ==
 # SIG # End signature block

@@ -53,10 +53,10 @@ param(
     [switch]$SkipHunt,
     [switch]$CaptureMemory,                 # needs a staged memory capture tool in tools\
     # Which memory capture tool to use.
-    # go-winpmem : DEFAULT — AFF4 with sparse streams, no MMIO gap padding, signed, ~RAM size output
-    # winpmem    : mini WinPmem — RAW only, pads MMIO gaps (image can be >> physical RAM)
-    # ftk        : FTK Imager CLI — place ftkimager.exe + DLLs in tools\ manually (paid/gated)
-    # magnet     : Magnet RAM Capture — place MRC.exe in tools\ manually (registration required)
+    # go-winpmem : DEFAULT - AFF4 with sparse streams, no MMIO gap padding, signed, ~RAM size output
+    # winpmem    : mini WinPmem - RAW only, pads MMIO gaps (image can be >> physical RAM)
+    # ftk        : FTK Imager CLI - place ftkimager.exe + DLLs in tools\ manually (paid/gated)
+    # magnet     : Magnet RAM Capture - place MRC.exe in tools\ manually (registration required)
     # Stage with: Build-OfflineToolkit.ps1 -IncludeMemory  (stages both go-winpmem + winpmem mini)
     [ValidateSet('go-winpmem','winpmem','ftk','magnet')]
     [string]$MemoryTool = 'go-winpmem',
@@ -70,7 +70,12 @@ param(
     [int[]]$AllowInboundPort = @(),         # management pinhole(s) kept open (e.g. 5985 WinRM)
     [string[]]$AllowInboundRemoteAddress = @(),
     [ValidateSet('Restricted','AllSigned','RemoteSigned')]
-    [string]$PostRunExecutionPolicy = 'RemoteSigned'
+    [string]$PostRunExecutionPolicy = 'RemoteSigned',
+    # Per-phase timeout safety net. A hung sub-step (stuck native tool, locked file)
+    # cannot stall the whole collection: the phase is killed at this limit, marked
+    # 'partial', and every later phase still runs. Default 30 min covers deep file
+    # scans + YARA; raise with -PhaseTimeoutSec for very large -FullScan targets.
+    [int]$PhaseTimeoutSec = 1800
 )
 
 Set-StrictMode -Version Latest
@@ -91,7 +96,7 @@ $RunLog = Join-Path $OutDir "_runtime_$RunStamp.log"
 function Write-Log {
     param([string]$Msg, [string]$Color = 'Gray')
     $line = "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] $Msg"
-    # Cap at Yellow — nothing prints in Red; errors are warnings, not stop conditions.
+    # Cap at Yellow - nothing prints in Red; errors are warnings, not stop conditions.
     if ($Color -eq 'Red') { $Color = 'Yellow' }
     Write-Host $line -ForegroundColor $Color
     [Console]::ResetColor()
@@ -129,6 +134,7 @@ try {
     if (-not $PSExe) { $PSExe = Join-Path $PSHOME 'powershell.exe' }
 
     $ForensicsScript   = Join-Path $PSScriptRoot 'playbooks\windows\00_Collect-Forensics.ps1'
+    $ClockScript       = Join-Path $PSScriptRoot 'playbooks\windows\Get-ClockContext.ps1'
     $FirewallScript    = Join-Path $PSScriptRoot 'playbooks\windows\Enforce-StrictFirewall.ps1'
     $HuntDir           = Join-Path $PSScriptRoot 'playbooks\windows\threat_hunting'
     $EDRScript         = Join-Path $HuntDir 'EDR_Toolkit.ps1'
@@ -144,45 +150,98 @@ try {
 
     $script:PhaseResults = [ordered]@{}
     function Invoke-Phase {
-        param([string]$Name, [string]$ScriptPath, [string[]]$Arguments = @())
+        param(
+            [string]$Name,
+            [string]$ScriptPath,
+            [string[]]$Arguments = @(),
+            [int]$TimeoutSec = $PhaseTimeoutSec   # phase-level safety net (script param)
+        )
         Write-Log "==== PHASE: $Name ====" 'Cyan'
         if (-not (Test-Path -LiteralPath $ScriptPath)) {
             Write-Log "  SKIP - not found: $ScriptPath" 'Yellow'; $script:PhaseResults[$Name]='skipped'; return
         }
         $phaseLog = Join-Path $OutDir ("_{0}_{1}.log" -f ($Name -replace '\W','_'), $RunStamp)
         $argList  = @('-ExecutionPolicy','Bypass','-NoProfile','-File', $ScriptPath) + $Arguments
+
+        # Run the child as a tracked process with stdout/stderr redirected to temp files,
+        # then poll with a deadline so a single hung sub-step (e.g. a stuck native tool)
+        # cannot stall the entire collection. On timeout the process tree is killed and
+        # the phase is marked 'partial' — every later phase still runs (full-capture goal).
+        $outTmp = [System.IO.Path]::GetTempFileName()
+        $errTmp = [System.IO.Path]::GetTempFileName()
         try {
-            # Stream output live: pipe through ForEach-Object so progress messages,
-            # findings, and phase status appear in real-time rather than buffering
-            # until the child process exits (critical for long-running file scans).
-            # ErrorRecord objects (stderr) are written to the log and shown in gray
-            # so they don't look like orchestrator failures.
-            & $PSExe @argList 2>&1 | ForEach-Object {
-                $line = $_
-                if ($line -is [System.Management.Automation.ErrorRecord]) {
-                    $str = "  [stderr] $line"
-                    $str | Out-File -FilePath $phaseLog -Append -Encoding UTF8
-                    Write-Host $str -ForegroundColor Yellow
-                } else {
-                    $str = "  $line"
-                    $str | Out-File -FilePath $phaseLog -Append -Encoding UTF8
-                    Write-Host $str -ForegroundColor Gray
+            $proc = Start-Process -FilePath $PSExe -ArgumentList $argList -PassThru -NoNewWindow `
+                -RedirectStandardOutput $outTmp -RedirectStandardError $errTmp -ErrorAction Stop
+
+            $deadline   = (Get-Date).AddSeconds($TimeoutSec)
+            $lastOutLen = 0; $lastErrLen = 0
+            $timedOut   = $false
+
+            while (-not $proc.HasExited) {
+                Start-Sleep -Milliseconds 750
+                # Tail new stdout/stderr to console + phase log for live visibility
+                try {
+                    $o = Get-Content -LiteralPath $outTmp -Raw -ErrorAction SilentlyContinue
+                    if ($o -and $o.Length -gt $lastOutLen) {
+                        $new = $o.Substring($lastOutLen); $lastOutLen = $o.Length
+                        $new.TrimEnd("`r","`n") -split "`r?`n" | ForEach-Object {
+                            if ($_ -ne '') { Write-Host "  $_" -ForegroundColor Gray; "  $_" | Out-File -FilePath $phaseLog -Append -Encoding UTF8 }
+                        }
+                    }
+                    $e = Get-Content -LiteralPath $errTmp -Raw -ErrorAction SilentlyContinue
+                    if ($e -and $e.Length -gt $lastErrLen) {
+                        $new = $e.Substring($lastErrLen); $lastErrLen = $e.Length
+                        $new.TrimEnd("`r","`n") -split "`r?`n" | ForEach-Object {
+                            if ($_ -ne '') { Write-Host "  [stderr] $_" -ForegroundColor Yellow; "  [stderr] $_" | Out-File -FilePath $phaseLog -Append -Encoding UTF8 }
+                        }
+                    }
+                } catch {}
+
+                if ((Get-Date) -gt $deadline) {
+                    $timedOut = $true
+                    Write-Log "  $Name TIMED OUT after ${TimeoutSec}s - killing phase and continuing (partial capture)." 'Yellow'
+                    try {
+                        # Kill the child and any grandchildren (native tools it spawned)
+                        Get-CimInstance Win32_Process -Filter "ParentProcessId = $($proc.Id)" -ErrorAction SilentlyContinue |
+                            ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+                        Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+                    } catch {}
+                    break
                 }
-                [Console]::ResetColor()
             }
-            $exit = $LASTEXITCODE
-            if ($exit -eq 0 -or $null -eq $exit) {
-                Write-Log "  $Name complete (log: $(Split-Path -Leaf $phaseLog))." 'Green'
-                $script:PhaseResults[$Name] = 'success'
+
+            if (-not $timedOut) {
+                $proc.WaitForExit()
+                # Flush any remaining tail
+                foreach ($pair in @(@($outTmp,'Gray',''),@($errTmp,'Yellow','[stderr] '))) {
+                    $c = Get-Content -LiteralPath $pair[0] -Raw -ErrorAction SilentlyContinue
+                    $seen = if ($pair[0] -eq $outTmp) { $lastOutLen } else { $lastErrLen }
+                    if ($c -and $c.Length -gt $seen) {
+                        $c.Substring($seen).TrimEnd("`r","`n") -split "`r?`n" | ForEach-Object {
+                            if ($_ -ne '') { Write-Host "  $($pair[2])$_" -ForegroundColor $pair[1]; "  $($pair[2])$_" | Out-File -FilePath $phaseLog -Append -Encoding UTF8 }
+                        }
+                    }
+                }
+                $exit = $proc.ExitCode
+                if ($exit -eq 0 -or $null -eq $exit) {
+                    Write-Log "  $Name complete (log: $(Split-Path -Leaf $phaseLog))." 'Green'
+                    $script:PhaseResults[$Name] = 'success'
+                } else {
+                    Write-Log "  $Name ended with exit $exit - security software may have blocked it (log: $(Split-Path -Leaf $phaseLog))." 'Yellow'
+                    Write-Log "  Add '$PSScriptRoot' to your AV Script Protection approved list and re-run." 'Yellow'
+                    $script:PhaseResults[$Name] = 'partial'
+                }
             } else {
-                Write-Log "  $Name ended with exit $exit - security software may have blocked it (log: $(Split-Path -Leaf $phaseLog))." 'Yellow'
-                Write-Log "  Add '$PSScriptRoot' to your AV Script Protection approved list and re-run." 'Yellow'
                 $script:PhaseResults[$Name] = 'partial'
             }
-        } catch { Write-Log "  ERROR in ${Name}: $($_.Exception.Message)" 'Yellow'; $script:PhaseResults[$Name]='failed' }
+        } catch {
+            Write-Log "  ERROR in ${Name}: $($_.Exception.Message)" 'Yellow'; $script:PhaseResults[$Name]='failed'
+        } finally {
+            Remove-Item -LiteralPath $outTmp,$errTmp -Force -ErrorAction SilentlyContinue
+        }
     }
 
-    # ── Pre-flight: Windows Defender automatic exclusion ─────────────────────
+    # -- Pre-flight: Windows Defender automatic exclusion ---------------------
     # If Defender is active, add path + process exclusions now before any phase
     # touches a staged tool or script that Defender would otherwise quarantine.
     # Requires admin (already enforced by #Requires -RunAsAdministrator above).
@@ -199,7 +258,7 @@ try {
     if ($defenderActive -and $tamperOn) {
         Write-Log "Windows Defender TAMPER PROTECTION is ON - launching Invoke-PrepareDefender.ps1 for guided setup..." 'Yellow'
         if (Test-Path -LiteralPath $PrepareDefenderScript) {
-            # Run the guided setup interactively — it opens Windows Security, polls until
+            # Run the guided setup interactively - it opens Windows Security, polls until
             # the user toggles TP off, adds all exclusions, then guides TP back on.
             # Output is streamed live so the user sees every step.
             & $PSExe -ExecutionPolicy Bypass -NoProfile -File $PrepareDefenderScript 2>&1 |
@@ -307,7 +366,7 @@ try {
 
     Start-Sleep -Seconds 1
 
-    # ── Pre-flight: AV/EDR detection ─────────────────────────────────────────
+    # -- Pre-flight: AV/EDR detection -----------------------------------------
     # Two-pass detection: (1) WMI SecurityCenter2 - traditional AV products;
     # (2) process scan - EDR/XDR agents that don't register with Security Center.
     # Neither source alone is complete, so both are checked.
@@ -317,7 +376,7 @@ try {
         -ClassName AntiVirusProduct -ErrorAction SilentlyContinue |
         Select-Object -ExpandProperty displayName)
 
-    # Pass 2 - EDR/XDR process signatures (process name → product label)
+    # Pass 2 - EDR/XDR process signatures (process name -> product label)
     # Format: ProcessName (no extension) = "Display Name"
     $edrProcessMap = [ordered]@{
         # CrowdStrike Falcon
@@ -477,6 +536,19 @@ try {
     Write-Log " output -> $OutDir" 'Green'
     Write-Log "===================================================" 'Green'
 
+    # PHASE -1: Clock context - capture timezone, NTP status, and skew BEFORE any phase.
+    # Cross-host timeline correlation requires every host's UTC offset and NTP sync state.
+    # The responder's own epoch (reference) is passed so skew is measurable.
+    if (Test-Path -LiteralPath $ClockScript) {
+        $refEpoch = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() / 1000.0
+        try {
+            & $PSExe -ExecutionPolicy Bypass -NoProfile -File $ClockScript `
+                -HostFolder $OutDir -IncidentId $IncidentId `
+                -ReferenceEpoch $refEpoch -Quiet *>&1 | Out-Null
+            Write-Log "  Clock context captured -> _clock.json" 'Gray'
+        } catch { Write-Log "  Clock context capture skipped: $($_.Exception.Message)" 'Gray' }
+    }
+
     # PHASE 0: CONTAINMENT - strict Default-Deny inbound firewall FIRST.
     # This neutralises any inbound C2 / lateral-movement landing during the run.
     # The pre-lockdown firewall is exported to a .wfw backup; we record its path in
@@ -553,11 +625,11 @@ try {
         # (IFEO/Winlogon/LSA/AppInit, USN timeline, Amcache, full .evtx, firewall, creds)
         Invoke-Phase -Name 'Persistence' -ScriptPath $PersistScript -Arguments @('-OutputDir', $OutDir)
 
-        # PHASE 1e: event-log CSV → findings (runs on output from Phase 1c)
+        # PHASE 1e: event-log CSV -> findings (runs on output from Phase 1c)
         Invoke-Phase -Name 'EventLogAnalysis' -ScriptPath $EvtLogScript `
             -Arguments @('-InputDir', $OutDir, '-OutputDir', $OutDir)
 
-        # PHASE 1f: Amcache + ShimCache execution history → findings
+        # PHASE 1f: Amcache + ShimCache execution history -> findings
         # Reads amcache_parsed.csv and shimcache.bin from Persistence/ and emits
         # findings for programs executed from suspicious paths. Flows into adjudication.
         $persistenceDir = Join-Path $OutDir 'Persistence'
@@ -569,14 +641,14 @@ try {
         }
 
         # PHASE 1d: OPTIONAL live memory capture. Select tool with -MemoryTool:
-        #   winpmem (default) — auto-staged via Build-OfflineToolkit.ps1 -IncludeMemory
+        #   winpmem (default) - auto-staged via Build-OfflineToolkit.ps1 -IncludeMemory
         #                       RAW format; pads MMIO gaps (image may >> actual RAM)
-        #   ftk               — FTK Imager CLI; place ftkimager.exe + DLLs in tools\ manually
+        #   ftk               - FTK Imager CLI; place ftkimager.exe + DLLs in tools\ manually
         #                       compact output, captures only physical RAM pages
-        #   magnet            — Magnet RAM Capture; place MRC.exe in tools\ manually
+        #   magnet            - Magnet RAM Capture; place MRC.exe in tools\ manually
         #                       RAW format, captures only physical RAM pages
         if ($CaptureMemory) {
-            # Resolve the actual exe path — Magnet ships with version suffix (e.g. MRCv120.exe).
+            # Resolve the actual exe path - Magnet ships with version suffix (e.g. MRCv120.exe).
             $memToolPath = $null
             switch ($MemoryTool) {
                 'go-winpmem' { $memToolPath = Join-Path $PSScriptRoot 'tools\go-winpmem.exe' }
@@ -606,7 +678,7 @@ try {
                 $toolName = [System.IO.Path]::GetFileNameWithoutExtension($memTool)
                 Write-Log "==== PHASE: Memory ($toolName) ====" 'Cyan'
                 # Use -MemoryOutputPath when the output drive lacks space.
-                # WinPmem RAW images pad ALL MMIO gaps — can be far larger than physical RAM.
+                # WinPmem RAW images pad ALL MMIO gaps - can be far larger than physical RAM.
                 # FTK Imager captures only actual RAM pages, producing a more compact image.
                 # Extension: .aff4 for go-winpmem (sparse, compact), .mem for FTK Imager, .raw otherwise.
                 $memExt = switch ($MemoryTool) {
@@ -620,7 +692,7 @@ try {
 
                 # Pre-flight: check free space on the target volume.
                 # Space multiplier by tool:
-                #   go-winpmem: AFF4 sparse streams — only physical RAM pages stored -> 1.25x
+                #   go-winpmem: AFF4 sparse streams - only physical RAM pages stored -> 1.25x
                 #   ftk:        RAM pages only, compact output                       -> 1.25x
                 #   magnet:     RAW, physical RAM only (no MMIO padding)             -> 1.25x
                 #   winpmem:    RAW, pads FULL physical address space (MMIO gaps)    -> 4.0x
@@ -656,7 +728,7 @@ try {
                 # Auto-redirect: capture to C:\ (NTFS) then move to reports/<hostname>/ when done.
                 if ($memFs -eq 'FAT32' -and $ramBytes -gt 0 -and $requiredBytes -gt 4GB) {
                     $needGiB = [math]::Round($requiredBytes / 1GB, 1)
-                    Write-Log "  ${driveLetterOnly}: is FAT32 (4 GiB file size limit) — image needs ~${needGiB} GiB." 'Yellow'
+                    Write-Log "  ${driveLetterOnly}: is FAT32 (4 GiB file size limit) - image needs ~${needGiB} GiB." 'Yellow'
                     Write-Log "  Auto-redirecting capture to C:\ (NTFS); will move to reports after completion." 'Cyan'
                     $memTempPath  = "C:\memory_$HostName$memExt"
                     $memImagePath = $memTempPath
@@ -675,9 +747,9 @@ try {
                     $script:PhaseResults['Memory'] = 'skipped'
                     $preflightOk = $false
                 } elseif ($preflightOk -and $ramBytes -eq 0) {
-                    Write-Log "  WARN: could not determine physical RAM size — skipping pre-flight disk space check." 'Yellow'
+                    Write-Log "  WARN: could not determine physical RAM size - skipping pre-flight disk space check." 'Yellow'
                 } elseif ($preflightOk -and $freeBytes -eq 0) {
-                    Write-Log "  WARN: could not determine free disk space on $memDriveRoot — proceeding without pre-flight check." 'Yellow'
+                    Write-Log "  WARN: could not determine free disk space on $memDriveRoot - proceeding without pre-flight check." 'Yellow'
                 }
 
                 if ($preflightOk) {
@@ -690,7 +762,7 @@ try {
                                 # Nosparse: MMIO gaps zero-padded -> image ~ physical address space.
                                 # Sparse:   MMIO gaps omitted     -> image ~ physical RAM (NTFS only).
                                 if ($memFs -and $memFs -ne 'NTFS') {
-                                    Write-Log "  Filesystem on ${driveLetterOnly}: is '$memFs' — using --nosparse." 'Yellow'
+                                    Write-Log "  Filesystem on ${driveLetterOnly}: is '$memFs' - using --nosparse." 'Yellow'
                                     & $memTool 'acquire' '--nosparse' '--progress' $memImagePath 2>&1 | Tee-Object -FilePath $memLogPath -Append
                                 } else {
                                     & $memTool 'acquire' '--progress' $memImagePath 2>&1 | Tee-Object -FilePath $memLogPath -Append
@@ -702,10 +774,10 @@ try {
                             }
                             'magnet' {
                                 # Magnet RAM Capture v1.2.x: /accepteula bypasses the EULA dialog.
-                                # Output path is selected via a GUI file-save dialog — no CLI flag.
+                                # Output path is selected via a GUI file-save dialog - no CLI flag.
                                 # The application opens; save the capture to: $memImagePath
                                 Write-Log "  Magnet RAM Capture: GUI required to select output path." 'Yellow'
-                                Write-Log "  App opening — save capture to: $memImagePath" 'Yellow'
+                                Write-Log "  App opening - save capture to: $memImagePath" 'Yellow'
                                 Write-Log "  Waiting for Magnet RAM Capture to finish (save and close the app)..." 'Cyan'
                                 $mrcProc = Start-Process -FilePath $memTool -ArgumentList '/accepteula' `
                                     -PassThru -ErrorAction Stop
@@ -745,7 +817,7 @@ try {
                                         $finalPath = $memTempPath
                                     }
                                 } else {
-                                    Write-Log "  Not enough space on ${destRoot}: to move image — leaving at $memTempPath" 'Yellow'
+                                    Write-Log "  Not enough space on ${destRoot}: to move image - leaving at $memTempPath" 'Yellow'
                                     $finalPath = $memTempPath
                                 }
                             }
@@ -753,8 +825,8 @@ try {
                             $script:PhaseResults['Memory'] = 'success'
                         } else {
                             $sizeGiB = [math]::Round($imageSize / 1GB, 2)
-                            Write-Log "  Memory capture FAILED (exit=$exitCode, size=${sizeGiB} GiB) — image is truncated or empty. See _Memory_*.log." 'Yellow'
-                            $spaceNote = if ($MemoryTool -eq 'winpmem') { 'disk full (need RAM * 4x free — WinPmem RAW pads MMIO gaps)' } `
+                            Write-Log "  Memory capture FAILED (exit=$exitCode, size=${sizeGiB} GiB) - image is truncated or empty. See _Memory_*.log." 'Yellow'
+                            $spaceNote = if ($MemoryTool -eq 'winpmem') { 'disk full (need RAM * 4x free - WinPmem RAW pads MMIO gaps)' } `
                                          else { 'disk full (need RAM * 1.25x free)' }
                             Write-Log "  Common causes: $spaceNote, AV blocked $toolName, HVCI/Memory Integrity blocking kernel driver, insufficient privileges." 'Yellow'
                             # Rename to INVALID_ so Analysis/Reporting don't treat it as a complete image.
@@ -817,7 +889,7 @@ try {
 
         # Merge ALL finding sources (EDR + remote-access + persistence) for adjudication
         $allFindings = @()
-        foreach ($pat in 'EDR_Report_*.json','RemoteAccess_Findings_*.json','Persistence_Findings_*.json','findings_evtlog_*.json','findings_amcache_*.json') {
+        foreach ($pat in 'EDR_Report_*.json','RemoteAccess_Findings_*.json','Persistence_Findings_*.json','findings_evtlog_*.json','findings_amcache_*.json','Memory_Findings_*.json') {
             $newest = Get-ChildItem -Path $OutDir -Filter $pat -File -ErrorAction SilentlyContinue |
                       Sort-Object LastWriteTime -Descending | Select-Object -First 1
             if ($newest) { try { $c = Get-Content -LiteralPath $newest.FullName -Raw | ConvertFrom-Json; if ($c) { $allFindings += $c } } catch {} }
@@ -888,6 +960,17 @@ try {
         deep_scan    = [bool]$DeepFileScan
         artifacts    = $artifacts
     } | ConvertTo-Json -Depth 4 | Out-File -FilePath (Join-Path $OutDir "_manifest_$RunStamp.json") -Encoding UTF8
+
+    # Seal evidence custody - chain-of-custody record + manifest SHA256 + optional HMAC.
+    # PS twin of playbooks/reporting/evidence_custody.py.
+    $SealScript = Join-Path $PSScriptRoot 'playbooks\windows\Seal-EvidenceCustody.ps1'
+    if (Test-Path -LiteralPath $SealScript) {
+        try {
+            & $PSExe -ExecutionPolicy Bypass -NoProfile -File $SealScript `
+                -HostFolder $OutDir -IncidentId $IncidentId -Quiet *>&1 | Out-Null
+            Write-Log "  Evidence custody sealed -> _custody_$RunStamp.json" 'Gray'
+        } catch { Write-Log "  Custody seal skipped: $($_.Exception.Message)" 'Gray' }
+    }
 
     # Status contract: uniform _status.json for SOAR gating (matches Linux/cloud).
     $tpCount = 0
@@ -965,7 +1048,7 @@ finally {
         Write-Log "AMSI providers restored ($($amsiSuspended.Count))." 'Green'
     }
 
-    # Remove IR Toolkit code-signing cert from this host — leave no trace.
+    # Remove IR Toolkit code-signing cert from this host - leave no trace.
     # Invoke-PrepareDefender.ps1 imported it; remove unconditionally on exit.
     $irCer = Join-Path $PSScriptRoot 'tools\ir_toolkit.cer'
     if (Test-Path -LiteralPath $irCer) {
@@ -986,31 +1069,55 @@ finally {
     Write-Log "Restoring secure execution policy ($PostRunExecutionPolicy)..."
     Set-EPWithFallback -Policy $PostRunExecutionPolicy | Out-Null
     Write-Log "Runtime log: $RunLog" 'Green'
+
+    # Re-enable Tamper Protection - it was left OFF for the entire scan so AMSI would
+    # not block the phase scripts. Microsoft blocks programmatic re-enable, so this is
+    # the one GUI toggle the user must do; we open Windows Security and wait for it.
+    $tpNow = $null
+    try { $tpNow = (Get-MpComputerStatus -ErrorAction Stop).IsTamperProtected } catch {}
+    if ($tpNow -eq $false) {
+        Write-Log "Re-enabling Tamper Protection (manual GUI step - it must be turned back ON)." 'Cyan'
+        Write-Host ""
+        Write-Host "  Tamper Protection is still OFF. Turn it back ON now:" -ForegroundColor Yellow
+        Write-Host "    1. Windows Security > Virus & threat protection > Manage settings" -ForegroundColor Yellow
+        Write-Host "    2. Toggle Tamper Protection ON and confirm the UAC prompt." -ForegroundColor Yellow
+        try { Start-Process 'windowsdefender://threatsettings' -ErrorAction SilentlyContinue } catch {}
+        $tpDots = 0
+        while (((Get-MpComputerStatus -ErrorAction SilentlyContinue).IsTamperProtected) -eq $false) {
+            Start-Sleep -Seconds 2; $tpDots++
+            if ($tpDots % 5 -eq 0) { Write-Host "    waiting for Tamper Protection to be re-enabled..." -ForegroundColor DarkGray }
+            if ($tpDots -gt 90) { Write-Log "Tamper Protection not re-enabled within 3 min - please enable it manually." 'Yellow'; break }
+        }
+        if (((Get-MpComputerStatus -ErrorAction SilentlyContinue).IsTamperProtected) -eq $true) {
+            Write-Log "Tamper Protection re-enabled." 'Green'
+        }
+    }
 }
+
 # SIG # Begin signature block
 # MIIcoQYJKoZIhvcNAQcCoIIckjCCHI4CAQExDzANBglghkgBZQMEAgEFADB5Bgor
 # BgEEAYI3AgEEoGswaTA0BgorBgEEAYI3AgEeMCYCAwEAAAQQH8w7YFlLCE63JNLG
-# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCCbvXYlEZa9N/GE
-# vAqDp5CNl/IQ5YBY5cJUk4hjrcKfq6CCFrQwggN2MIICXqADAgECAhBa5MQyEl22
-# qUV1bZluOcpOMA0GCSqGSIb3DQEBCwUAMFMxGjAYBgNVBAsMEUluY2lkZW50IFJl
+# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCA00cGApcufORjG
+# YTsWv5ila7oMIb17Mpe70BEnitZSdKCCFrQwggN2MIICXqADAgECAhAbL3xr3F9b
+# nkbveZC/LiR8MA0GCSqGSIb3DQEBCwUAMFMxGjAYBgNVBAsMEUluY2lkZW50IFJl
 # c3BvbnNlMRMwEQYDVQQKDApJUiBUb29sa2l0MSAwHgYDVQQDDBdJUiBUb29sa2l0
-# IENvZGUgU2lnbmluZzAeFw0yNjA2MjAwMDU5NDZaFw0zMTA2MjAwMTA5NDZaMFMx
+# IENvZGUgU2lnbmluZzAeFw0yNjA2MjIwNDI0NDVaFw0zMTA2MjIwNDM0NDVaMFMx
 # GjAYBgNVBAsMEUluY2lkZW50IFJlc3BvbnNlMRMwEQYDVQQKDApJUiBUb29sa2l0
 # MSAwHgYDVQQDDBdJUiBUb29sa2l0IENvZGUgU2lnbmluZzCCASIwDQYJKoZIhvcN
-# AQEBBQADggEPADCCAQoCggEBAJ1nFbqBzQLbEhUUTT10Lrva+ooE/uVqzTJbGk5/
-# xh3zYBEAaRil7obceqCWtDg6KSjbDQP8wto42fHUK8tp0FU0NEi2+rkWHfcpeasm
-# z2e+UFQMDlXRcxg7dqe+08OB4pFhwrHSPo0m7HZAgtpHd02POka7jaYVoAnScg7i
-# LuZiRSJ3tJKZu1KCSTntV+LbicnowTlaDEvr7JQzSVs+5BpNadU3n/ujzH088Mgm
-# CoXooQpF12SzbZNCZ+kbgza6bNMbEHNGkLr9S0vHQD95oKPWF7YuOu7jqtkuCOZc
-# KYYi4nOXFwLqXmJ+sqqpR2NrrfMkz4VaALGIZ93o10CHWDkCAwEAAaNGMEQwDgYD
-# VR0PAQH/BAQDAgeAMBMGA1UdJQQMMAoGCCsGAQUFBwMDMB0GA1UdDgQWBBQRXBKC
-# VXuhcK7rCDzb/6SAfPGwvDANBgkqhkiG9w0BAQsFAAOCAQEAlZhDvun+4lQ0yd2C
-# +pAFD3B2/l2N9hArAcHhp6DaO48NSIT3eyyhGrfk8f3lDVhvjEbUDDmb6Oe67rBN
-# 3W7Dp1Y+W8Z96kC3miq7UbmVTGkiQGZFwi0KJ8tw++//vlU3zlW9nhqwFxzm7DfL
-# zECzv6bnd9Ri+1R4zhvkd5BLTuwLjPLkzbOTdsGwbXWWOK2gTTCr82I7G9xcq9Gv
-# qAcoJAHVEiNKt7p7Y+ScDL/AZGBMCBTsN9gcAoIgq22EWBHHV02HmPfuYyddaq1c
-# Lmjot0+5wVoPVl4wNktght1WVHDlk3EpEJF5qc7Yhl3YtniIEHQoO8BkWykpFDhy
-# q5wz7TCCBY0wggR1oAMCAQICEA6bGI750C3n79tQ4ghAGFowDQYJKoZIhvcNAQEM
+# AQEBBQADggEPADCCAQoCggEBAKuTSorzjXf0qc4qX04KtYn2ErVj9RAkn/1f/9YN
+# llrRj0s3urh/LnWmHn4vUjPrDTzHXUx4udOclWNlv52uCMAfXKZR3qD73OCHHQ2l
+# +1s4JqrAdGhr6QPyIhCDwl7wqQUfekQtBep+SqbM0vkbvup3WKgol+c3fIUxvM8E
+# bPLg5CcNWug6Twj+Wn1FJidJihmYARSKT5PFv32BLbffUpuvdWXxzRIRv8c4EE+S
+# bWs3lTiCGrp1X33mXYiMRNAiF5ofrCJwRA7LESh4TCqXWDSvs+KFBi1ZxEnLxmUk
+# 1Wrzq11umlIzoJhnEN0VyBvLK6X40uTF50piU+5kGy9kZlkCAwEAAaNGMEQwDgYD
+# VR0PAQH/BAQDAgeAMBMGA1UdJQQMMAoGCCsGAQUFBwMDMB0GA1UdDgQWBBSpc1pf
+# XTSlgxdtXKDrlumz7H67TjANBgkqhkiG9w0BAQsFAAOCAQEAdPAxdgyk/YzF72lK
+# 4P1I3Lwjice2yAR0aoXSEP5gO/xnAvuqCiAcdPfJhqMrrfq5iFLqTuWSfz+k9irn
+# hjzyWgmo2GUrQ8BVRoNAw7HpTJo7Rw8+FfDzyy+stq9UKWrkflHqwb7oBD+aBs/5
+# ZccFKZi8oeV79CCTGdwXKYgE+xYbV//Twr7rpMbVUqbchEDdZXEzT2GdEUd5B02L
+# bDGJ4Gjz8AtCFcSXWQlLnAQxd5CJVFHDkyfkEs2VvBPtR/MBCF3NiNufb8HgClhS
+# ZHayqVVZhUd+NS7/orBY5M1Ioc0/kGiNO3nlWf1IlAPk/jsILweFZkUO0wBTot/O
+# b18zszCCBY0wggR1oAMCAQICEA6bGI750C3n79tQ4ghAGFowDQYJKoZIhvcNAQEM
 # BQAwZTELMAkGA1UEBhMCVVMxFTATBgNVBAoTDERpZ2lDZXJ0IEluYzEZMBcGA1UE
 # CxMQd3d3LmRpZ2ljZXJ0LmNvbTEkMCIGA1UEAxMbRGlnaUNlcnQgQXNzdXJlZCBJ
 # RCBSb290IENBMB4XDTIyMDgwMTAwMDAwMFoXDTMxMTEwOTIzNTk1OVowYjELMAkG
@@ -1114,31 +1221,31 @@ finally {
 # y2ueIu9THFVkT+um1vshETaWyQo8gmBto/m3acaP9QsuLj3FNwFlTxq25+T4QwX9
 # xa6ILs84ZPvmpovq90K8eWyG2N01c4IhSOxqt81nMYIFQzCCBT8CAQEwZzBTMRow
 # GAYDVQQLDBFJbmNpZGVudCBSZXNwb25zZTETMBEGA1UECgwKSVIgVG9vbGtpdDEg
-# MB4GA1UEAwwXSVIgVG9vbGtpdCBDb2RlIFNpZ25pbmcCEFrkxDISXbapRXVtmW45
-# yk4wDQYJYIZIAWUDBAIBBQCggYQwGAYKKwYBBAGCNwIBDDEKMAigAoAAoQKAADAZ
+# MB4GA1UEAwwXSVIgVG9vbGtpdCBDb2RlIFNpZ25pbmcCEBsvfGvcX1ueRu95kL8u
+# JHwwDQYJYIZIAWUDBAIBBQCggYQwGAYKKwYBBAGCNwIBDDEKMAigAoAAoQKAADAZ
 # BgkqhkiG9w0BCQMxDAYKKwYBBAGCNwIBBDAcBgorBgEEAYI3AgELMQ4wDAYKKwYB
-# BAGCNwIBFTAvBgkqhkiG9w0BCQQxIgQg7BSUNGEUwaiLbZl8WdJ1zNNXivEsH1lT
-# XVJ8VAKA6LYwDQYJKoZIhvcNAQEBBQAEggEAdbKp8vk3NDLMnRuMoaRVIg5iphEN
-# 6lA3tv1VlQwM4ouq0CMi4V7KfwyHkYSVuquhpPSVgfH0mB7nvECa2H6UxpefVLH0
-# 2zbuZNFJiZ0UAGSBg+X5iLasCAchka06dBC5RPqnS18LmXR8glgJM9QYnbnx9WaL
-# JlJZmZCggN7lqobCl+8HT0f5l3YJoUyy6PnvMFKebzWkMrbNibokSuKHn1B7XPab
-# ZcKdiBxD29nP/8tTFq5ymEDTcRNEjqFBYCPb2kVBE9qeamJwVnyC+MkkLH2iNVqj
-# 2YETgyA6aPveeZb9SsuqDXn7ON8KWBTvnGi3ETe0YVnS+C/AoVCDl5GeOqGCAyYw
+# BAGCNwIBFTAvBgkqhkiG9w0BCQQxIgQg0Z0TJwkWOa/iGbZMK9o5OOGBw1YSvgVh
+# 932nXfY7joowDQYJKoZIhvcNAQEBBQAEggEApG2jXws+QWxddTZn9YkUktHSD80b
+# rhPKQU0vkHVSLi6bx2BHaStULlWnaYbbS6cGw2OuPEwJIbZdNNFiA3HJvM27rBsL
+# ftQ9pWb8Vnrc9Co5Z4kKCAFAFzYYy3cOv+P85TZcIeqSTaajMM2+cI/Q2qs0cAro
+# vFuNBx468rIMWAGX+MZsKdz6RoY5q2rVtgveUsMdOMaqj/vQXQOmF5TakeFPUmZa
+# +5dadVwNmClO5VJ2c0Dye1RRygYVuIEfGcRqUMaKKqbfQBKtmNeOFzZmLBVVAWZA
+# 1IJ2JoAS9pwp9a0bhnwKWGlC9YiwygSn5pTnHJ8A4qdHlOXGqFdWzhvb6qGCAyYw
 # ggMiBgkqhkiG9w0BCQYxggMTMIIDDwIBATB9MGkxCzAJBgNVBAYTAlVTMRcwFQYD
 # VQQKEw5EaWdpQ2VydCwgSW5jLjFBMD8GA1UEAxM4RGlnaUNlcnQgVHJ1c3RlZCBH
 # NCBUaW1lU3RhbXBpbmcgUlNBNDA5NiBTSEEyNTYgMjAyNSBDQTECEAqA7xhLjfEF
 # gtHEdqeVdGgwDQYJYIZIAWUDBAIBBQCgaTAYBgkqhkiG9w0BCQMxCwYJKoZIhvcN
-# AQcBMBwGCSqGSIb3DQEJBTEPFw0yNjA2MjAwMTE0MjdaMC8GCSqGSIb3DQEJBDEi
-# BCCe10102Qpe9plzE0G3Y1q0i4+5HapYlmYkrEFCyG+5UjANBgkqhkiG9w0BAQEF
-# AASCAgBDQDnd3c0vIgGAAcpTOmo8QxHnt7tizVm8mdQyKgXMDBSYmcXxuMP7Gnvc
-# IwCMNMKDjRyTOpX/Y/9BaOzmMNIaluXlvyFL4CNkta2ARan8lTxq6lQrMEFf6ZJS
-# vkQIajDBrBU5nAaaEtW29TUVrdmC3M29ziZPoqClTJ2DiHf/Ry0Ox2Lxate6nPvU
-# 1v64rrYyxbK2wm3RFgwrAGtzdCKbW03ZFYdkSs41VQNuPEkoQX+1sCV0Doeuon/7
-# QIkaojZ2IXxAZ7EPS4lmao6E/ybNJSt416h8WjCaj2CAYvg9fo2x7g9HQFzNM0py
-# CRjuzQ8KtJmlRYU0CPnmtSD/XtWsWaz6SLtJl8JCFm0eKxcUFW2ImLpg9O1MKEbW
-# 0h+LT1cnopEEF/Oek26OMjXQyJHufRtCp2/4nCzHHf/7JFQ4R5ylxWi0IR0pTRQ6
-# 2fNgVR5tUuYGyOF7NjWS0RJf4eV7+klHONALlUnP1J5xh86RWKjZs2TbITEyX2h6
-# b4jA5jck/kT00h8XepfrpYd7g98o8CoB55D/xHEfpoORJkokyxCi5ek/Qr1PcRj0
-# G1g0fM2Lsiv7ZDQDbsIxlx07qWO9AaHK7ToR1OWY/56jZuhvYyteSZiV8zYP6eOP
-# 6kbgY4vfoj7XVzSKFxZjGwTuctUEZVrjis38klXgnbsIwzR13Q==
+# AQcBMBwGCSqGSIb3DQEJBTEPFw0yNjA2MjIwNDM0NDlaMC8GCSqGSIb3DQEJBDEi
+# BCB0wUdWc4A76J+sak/NjiCHuBatihoBK3oHseJR11GDgzANBgkqhkiG9w0BAQEF
+# AASCAgCpPPHPtU8w2zpzUsyzx5jhn1pShcc5MYQ9dGuHUhkhba7F31jYq2AfQfHU
+# FPtMYIA7mON341QecsT2UwIEZPJcGEfK2dsiuoBdvU7HMxK5kTl8KLrZcP9MQDQc
+# dqAOnKhU+1I3BEI1fQOo0g8lLd3p1qU1aTBYYWsss1YJ3XSRyu58UfkAVMmqdC+M
+# JLFCeUQuS4DXyZ96J1jPoJqNGlpq83L9Cq928NgIJmhnhnhVguRpgz5Yp/ZyoNAB
+# maKZPV7PlG9pvP1BQ7qiTODwtkGNJBZ7U37qxNn7GiNTTnzN+Dia73I9qH2+fdMH
+# kWx/TDDEIZO4SZSJL8qEtVU3zLXBNNpv5ujEhR3+ped8AtLVkqiQFIPmHibS7w1P
+# /vbRV+cia0LYuvK7jhWXuHbJN6eDCX/qRRz49r8SO8k8GoYGl42fDP68zNptgJfw
+# 4pRDyi/V62YPQ191M59pJYcs3WyLu1uf3O3pU9opMkKReT1JVZq+FQ7p5/jR08PE
+# dOMj7bDHOV2ufdtDCtLf5UynjS4TjqW/Buqy6z8nmQr8LMZpCLx8f1t3gEOzYxDN
+# vCKeeIhGMbfOKzI093Xgw+BM8ZXx5dkwnrGnEHzxqGBvAx6wb8TFOuN/0XyYh6gH
+# /GCTAeF+cKx4BGCIV8Q0gh0ZdnvIpD0y9GyMOibkRMxvYEFm6g==
 # SIG # End signature block

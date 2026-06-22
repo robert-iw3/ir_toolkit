@@ -1,163 +1,106 @@
-﻿# ==============================================================================
-# IR Playbook 04 - Windows C2 Blocking
-# Adds host-level blocks for all identified C2 infrastructure:
-#   * Windows Firewall outbound rules for all C2 IPs
-#   * %SystemRoot%\System32\drivers\etc\hosts sinkhole for C2 domains
-#   * Windows Defender network block (Add-MpPreference)
-#   * Null route via persistent route addition
-#   * DNS Client cache flush
-# Idempotent - safe to re-run with extended IOC lists.
-# ==============================================================================
-#Requires -RunAsAdministrator
+﻿<#
+.SYNOPSIS
+    Capture host clock / timezone context and write _clock.json.
+
+.DESCRIPTION
+    Closes the collection gap: timelines mix local and UTC timestamps, and per-host
+    clock skew is never captured - cross-host correlation silently misaligns.
+
+    Captures at collection time:
+      - Host timezone + UTC offset
+      - NTP synchronization status (via w32tm)
+      - Measured skew against a trusted reference epoch (optional)
+
+    Writes _clock.json to -HostFolder. Read-only; never fails the calling script.
+    PS twin of playbooks/reporting/clock_context.py.
+
+.PARAMETER HostFolder       Output directory (reports\<HOST>\). Default: current dir.
+.PARAMETER ReferenceEpoch   Trusted UTC Unix epoch seconds from the responder's NTP-
+                             synced clock. Enables skew measurement.
+.PARAMETER IncidentId       Optional incident ID to embed in the output.
+.PARAMETER Quiet            Suppress console output.
+
+.EXAMPLE
+    .\Get-ClockContext.ps1 -HostFolder .\reports\HOST -ReferenceEpoch ([DateTimeOffset]::UtcNow.ToUnixTimeSeconds())
+#>
+
+#Requires -Version 5.1
 [CmdletBinding()]
 param(
-    [string]$OutputDir  = '',
-    [string]$IncidentId = '',
-    [string[]]$C2IPs    = @(),
-    [string[]]$C2Domains= @(),
-    [switch]$Apply   # dry-run by default; -Apply to write firewall rules / hosts file
+    [string]$HostFolder      = (Get-Location).Path,
+    [double]$ReferenceEpoch  = 0,
+    [string]$IncidentId      = '',
+    [switch]$Quiet
 )
+
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Continue'
 
-if (-not $IncidentId) { $IncidentId = ($env:IR_INCIDENT_ID -replace '[^\w\-]','') }
-if (-not $C2IPs)      { $C2IPs    = ($env:IR_C2_IPS    -split ',') | ForEach-Object { $_.Trim() } | Where-Object { $_ } }
-if (-not $C2Domains)  { $C2Domains= ($env:IR_C2_DOMAINS -split ',') | ForEach-Object { $_.Trim() } | Where-Object { $_ } }
+New-Item -ItemType Directory -Path $HostFolder -Force | Out-Null
 
-$mode     = if ($Apply) { 'APPLY' } else { 'DRY-RUN' }
-$IRDir    = if ($OutputDir) { $OutputDir } else { 'C:\ProgramData\IRToolkit' }
-$HostsFile= "$env:SystemRoot\System32\drivers\etc\hosts"
-$BlockTag = "# IR-BLOCK-$IncidentId"
-New-Item -ItemType Directory -Path $IRDir -Force | Out-Null
+$now         = Get-Date
+$nowUtc      = $now.ToUniversalTime()
+$hostEpoch   = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() / 1000.0
+$tzInfo      = [System.TimeZoneInfo]::Local
+$offset      = $tzInfo.GetUtcOffset($now)
+$offsetSec   = [int]$offset.TotalSeconds
+$sign      = if ($offsetSec -ge 0) { '+' } else { '-' }
+$offsetStr = ('{0}{1:D2}:{2:D2}' -f $sign, [math]::Abs([int]$offset.Hours), [math]::Abs($offset.Minutes))
 
-function Write-IRLog {
-    param([string]$Msg)
-    $entry = "[$(Get-Date -Format 'HH:mm:ssZ')] [$mode] $Msg"
-    Write-Output $entry
-    $entry | Out-File "$IRDir\playbook.log" -Append -Encoding UTF8
-}
+# NTP synchronization status via w32tm
+$ntpSynced = $null
+try {
+    $w32 = & w32tm /query /status 2>&1 | Out-String
+    if ($w32 -match 'Leap Indicator\s*:\s*0') { $ntpSynced = $true }
+    elseif ($w32 -match 'Source\s*:\s*Local CMOS Clock') { $ntpSynced = $false }
+    else { $ntpSynced = $true }   # assume synced if w32tm responds
+} catch { $ntpSynced = $null }
 
-# RFC-1918 / link-local addresses - never block
-function Test-IsPrivateIP {
-    param([string]$IP)
-    $IP -match '^(10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[0-1])\.|127\.|169\.254\.|::1|fe80:)'
-}
-
-$BlockedIPs     = [System.Collections.Generic.List[string]]::new()
-$BlockedDomains = [System.Collections.Generic.List[string]]::new()
-$Errors         = [System.Collections.Generic.List[string]]::new()
-
-Write-IRLog "C2-BLOCK: Starting C2 infrastructure blocking for $IncidentId"
-
-# -- Firewall rules for C2 IPs -------------------------------------------------
-foreach ($C2IP in $C2IPs) {
-    if (Test-IsPrivateIP $C2IP) {
-        Write-IRLog "C2-BLOCK: Skipping private IP $C2IP"
-        continue
-    }
-
-    # Outbound block
-    $OutRuleName = "IR-C2-BLOCK-OUT-$C2IP-$IncidentId"
-    $InRuleName  = "IR-C2-BLOCK-IN-$C2IP-$IncidentId"
-
-    try {
-        if (-not (Get-NetFirewallRule -DisplayName $OutRuleName -ErrorAction SilentlyContinue)) {
-            New-NetFirewallRule `
-                -DisplayName $OutRuleName `
-                -Direction Outbound `
-                -Action Block `
-                -RemoteAddress $C2IP `
-                -Protocol Any `
-                -Description "IR C2 block - incident $IncidentId" | Out-Null
-            Write-IRLog "C2-BLOCK: Firewall OUTBOUND block -> $C2IP"
-        }
-
-        if (-not (Get-NetFirewallRule -DisplayName $InRuleName -ErrorAction SilentlyContinue)) {
-            New-NetFirewallRule `
-                -DisplayName $InRuleName `
-                -Direction Inbound `
-                -Action Block `
-                -RemoteAddress $C2IP `
-                -Protocol Any `
-                -Description "IR C2 block - incident $IncidentId" | Out-Null
-        }
-        $BlockedIPs.Add($C2IP)
-    } catch {
-        $Errors.Add("firewall_failed:$C2IP"); Write-IRLog "C2-BLOCK: Firewall error for $C2IP : $_"
-    }
-
-    # Belt-and-suspenders: persistent null route
-    try {
-        route add $C2IP mask 255.255.255.255 0.0.0.0 -p 2>$null | Out-Null
-    } catch {}
-
-    # Windows Defender Network Block (MAPS / NIS integration)
-    try {
-        Add-MpPreference -ThreatIDDefaultAction_Ids 0 -ThreatIDDefaultAction_Actions Block `
-            -ErrorAction SilentlyContinue
-    } catch {}
-}
-
-# -- /etc/hosts sinkhole for C2 domains ----------------------------------------
-# Remove any existing IR blocks first (idempotent)
-if (Test-Path $HostsFile) {
-    $HostsContent = Get-Content $HostsFile -Encoding ASCII
-    $CleanHosts   = $HostsContent | Where-Object { $_ -notlike "*IR-BLOCK-*" }
-    Set-Content $HostsFile -Value $CleanHosts -Encoding ASCII -Force
-}
-
-foreach ($Domain in $C2Domains) {
-    try {
-        $Entries = @(
-            "0.0.0.0 $Domain $BlockTag",
-            "0.0.0.0 www.$Domain $BlockTag",
-            ":: $Domain $BlockTag"
-        )
-        Add-Content -Path $HostsFile -Value $Entries -Encoding ASCII
-        $BlockedDomains.Add($Domain)
-        Write-IRLog "C2-BLOCK: Sinkholes $Domain -> 0.0.0.0 in hosts file"
-    } catch {
-        $Errors.Add("hosts_failed:$Domain"); Write-IRLog "C2-BLOCK: Hosts error for $Domain : $_"
+# Skew calculation
+$skewSec  = $null
+$skewNote = 'no trusted reference supplied - skew unmeasured'
+if ($ReferenceEpoch -gt 0) {
+    $skewSec = [math]::Round($hostEpoch - $ReferenceEpoch, 3)
+    if ([math]::Abs($skewSec) -le 2) {
+        $skewNote = 'host clock within 2s of reference'
+    } else {
+        $direction = if ($skewSec -gt 0) { 'ahead of' } else { 'behind' }
+        $skewNote  = "host clock is $([math]::Abs($skewSec).ToString('F1'))s $direction the reference - adjust this host's timestamps before cross-host correlation"
     }
 }
 
-# -- Flush DNS Client cache ----------------------------------------------------
-try {
-    Clear-DnsClientCache -ErrorAction SilentlyContinue
-    Write-IRLog "C2-BLOCK: DNS client cache flushed"
-} catch {}
+# Pre-compute formatted ISO 8601 UTC strings. Use format operator to avoid any
+# encoding or locale ambiguity with Get-Date -Format on different systems.
+$capturedUtcStr  = $nowUtc.ToString('s') + 'Z'   # 's' = sortable, culture-invariant yyyy-MM-ddTHH:mm:ss
+$hostClockUtcStr = $capturedUtcStr
 
-# -- Windows Defender ASR - block suspicious network destinations --------------
-try {
-    # ASR Rule: Block all Office applications from creating child processes (ID 26190899)
-    # and network connections to specific external destinations - belt-and-suspenders
-    Set-MpPreference -PUAProtection Enabled -ErrorAction SilentlyContinue
-    Set-MpPreference -EnableNetworkProtection Enabled -ErrorAction SilentlyContinue
-    Write-IRLog "C2-BLOCK: Windows Defender Network Protection enabled"
-} catch {}
+$rec = [ordered]@{
+    type               = 'clock_context'
+    captured_utc       = $capturedUtcStr
+    timezone           = $tzInfo.Id
+    timezone_display   = $tzInfo.DisplayName
+    utc_offset_seconds = $offsetSec
+    utc_offset         = $offsetStr
+    host_clock_utc     = $hostClockUtcStr
+    ntp_synchronized   = $ntpSynced
+    skew_seconds       = $skewSec
+    skew_note          = $skewNote
+}
+if ($IncidentId) { $rec['incident_id'] = $IncidentId }
 
-# -- Restart DNS Client service to apply hosts changes -------------------------
-try {
-    Restart-Service -Name Dnscache -Force -ErrorAction SilentlyContinue
-    Write-IRLog "C2-BLOCK: DNS client restarted"
-} catch {}
+$outPath = Join-Path $HostFolder '_clock.json'
+$rec | ConvertTo-Json -Depth 3 | Out-File -FilePath $outPath -Encoding UTF8
 
-Write-IRLog "C2-BLOCK: Complete. IPs blocked: $($BlockedIPs.Count), domains: $($BlockedDomains.Count), errors: $($Errors.Count)"
-
-@{
-    phase           = 'c2_blocking'
-    status          = 'success'
-    blocked_ips     = $BlockedIPs.Count
-    blocked_domains = $BlockedDomains.Count
-    errors          = $Errors.Count
-    incident_id     = $IncidentId
-} | ConvertTo-Json -Compress | Write-Output
+if (-not $Quiet) {
+    $skewDisplay = if ($null -ne $skewSec) { "$($skewSec.ToString('F1'))s" } else { 'n/a' }
+    Write-Host "[clock] tz=$($tzInfo.Id) offset=$offsetStr ntp=$ntpSynced skew=$skewDisplay -> $outPath" -ForegroundColor Gray
+}
 
 # SIG # Begin signature block
 # MIIcoQYJKoZIhvcNAQcCoIIckjCCHI4CAQExDzANBglghkgBZQMEAgEFADB5Bgor
 # BgEEAYI3AgEEoGswaTA0BgorBgEEAYI3AgEeMCYCAwEAAAQQH8w7YFlLCE63JNLG
-# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCBbudcuReBHQWwt
-# tdZUoJ4PphQGGx9rYuyplNOcW4Q4JaCCFrQwggN2MIICXqADAgECAhAbL3xr3F9b
+# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCBkE+OMWcBG/hH5
+# 2mLQWYRf3L5ZEtgCLyUvcqdduit5a6CCFrQwggN2MIICXqADAgECAhAbL3xr3F9b
 # nkbveZC/LiR8MA0GCSqGSIb3DQEBCwUAMFMxGjAYBgNVBAsMEUluY2lkZW50IFJl
 # c3BvbnNlMRMwEQYDVQQKDApJUiBUb29sa2l0MSAwHgYDVQQDDBdJUiBUb29sa2l0
 # IENvZGUgU2lnbmluZzAeFw0yNjA2MjIwNDI0NDVaFw0zMTA2MjIwNDM0NDVaMFMx
@@ -283,28 +226,28 @@ Write-IRLog "C2-BLOCK: Complete. IPs blocked: $($BlockedIPs.Count), domains: $($
 # MB4GA1UEAwwXSVIgVG9vbGtpdCBDb2RlIFNpZ25pbmcCEBsvfGvcX1ueRu95kL8u
 # JHwwDQYJYIZIAWUDBAIBBQCggYQwGAYKKwYBBAGCNwIBDDEKMAigAoAAoQKAADAZ
 # BgkqhkiG9w0BCQMxDAYKKwYBBAGCNwIBBDAcBgorBgEEAYI3AgELMQ4wDAYKKwYB
-# BAGCNwIBFTAvBgkqhkiG9w0BCQQxIgQgLJ5sVUjL9caxrvySwPmUAy17N9HcsBr9
-# ibJ+W77w45swDQYJKoZIhvcNAQEBBQAEggEASNCtIBvzXK+9GVr+2XCMQXAkDw48
-# xEgxoYUI/HCYDRg0F8q1mSBFA+QfYiaeZIMZlbqdRo3rpxdqMUAq57TkMFH3sX6Y
-# kBRgWMnErbJynVOZuaoK/gjZ4DVwVm5NOTSOqd9y2mZdYvbdGirLSilkICCTZvr2
-# 3750cR27p5qjca13KrRKC8znST5LamMM4MDyzzQDlgFFIexWeyAUcIt3ZZQubq25
-# qZdJRlRlf2Rxc0iKgiwAWrmNiAALxCqFEwMgT+nhPk6KZ4AE+y9ElOSQbuHJ6mZ8
-# crwG+OVgi95/VRx4Zduo+5uiQmG/j/wflBc2HWL4B/G6wVFa0R5j7v6+aqGCAyYw
+# BAGCNwIBFTAvBgkqhkiG9w0BCQQxIgQg5kXwMUI+WslmwRoFSSFPiX67Blmq/9Uk
+# zPcY1ssUK68wDQYJKoZIhvcNAQEBBQAEggEAKC46iKvOzdRfOrGBsMFQqDZx5wqS
+# 9wi3Tkyd1fRUhcCLiybC0XGiQjIuQiijHA+hqO+Wy9ZWlrwRGjMquZ9vtbRVb1FK
+# Ce/bD2xNNKZfMQuosMbTAM4vLitiHIraLV7tLXtuFflbKWJTXWIufLU4O8AWlGTK
+# avbpADjyiDZPcsx9FkTgMYtC4Zdpq2SaM89J6s2C7Nyv+AN6LzOOcr62P6FklWj/
+# zpf33VHi2bvIVTm30dnBFUK8Ws0HtVhhYXDzvHt3hH/SpN/6JVn20+EP6GQPGF9Q
+# R4moD5UPqIq8RACvWwnWVI8AAcjzzBXTu6dXykkuKPdk70MpqSXHawmOTaGCAyYw
 # ggMiBgkqhkiG9w0BCQYxggMTMIIDDwIBATB9MGkxCzAJBgNVBAYTAlVTMRcwFQYD
 # VQQKEw5EaWdpQ2VydCwgSW5jLjFBMD8GA1UEAxM4RGlnaUNlcnQgVHJ1c3RlZCBH
 # NCBUaW1lU3RhbXBpbmcgUlNBNDA5NiBTSEEyNTYgMjAyNSBDQTECEAqA7xhLjfEF
 # gtHEdqeVdGgwDQYJYIZIAWUDBAIBBQCgaTAYBgkqhkiG9w0BCQMxCwYJKoZIhvcN
-# AQcBMBwGCSqGSIb3DQEJBTEPFw0yNjA2MjIwNDM0NTJaMC8GCSqGSIb3DQEJBDEi
-# BCBQEC1oPLIdGs3U15lalZWPmZ6ssvYLbiwBYMwzgfYQrjANBgkqhkiG9w0BAQEF
-# AASCAgDG+71LXcAK17fbVO6/oPQi1lpRyxQmYIrFmRo9p3O/4bd46K46+ffSnhqP
-# qT5q2SyRRXEkkg3EtnxVq+cZMGFDUmEt5e/ZbxDeG3sXvB3wf7Gls5VRrwXv9451
-# U+fS1uBGE9OsOD5UQFv/2G/P098jCcm7QHCdKiwclDowQKk4mEx8Y5c6oXDSFNgX
-# YYX5zpgB2kYZFaffw7lfjwzy1krtdzt/AQHf19wsycwpLU81xWCbQ5d8yLi9hUex
-# Mrpk+6l4p31PiQp34bRTz6uoy0uSLLs8YNmebZAXFJPke03zhLINTo0jSYUk2+PI
-# LMiaR3gzLV8JBW0e7w/tnb1MHZRk5JG+1z+9Bq1UYSq71e2iI+S5XWfmc+FliTdJ
-# YWbgobSgLJX4UD33DydekUsX70XFUmAFsMtMD3PPbgxoqYiHUJSsxRsYoXnsyo2t
-# ABioXTJJ0QGk7Iy/mOZnkAtGKgV0/7jghL5I+e7DmCT5oinYRPTLorDtkw3zx14k
-# qTlVIwv2Syp6d8nQoFP4L+nCdlZd90Egfga6NE/Wq0ZhWOL3eHcEbPP/b9G3yr03
-# 761MHBCJLEmQqn9mDTAEp/1a6257JD7Oxe/n+Lbr3s0LV7w00Qn6WmexY+O50h/a
-# h2V+8OCPgBc7wuGZKqVFXl/0T9+0+5y84uPNfYasR4b4m1NORg==
+# AQcBMBwGCSqGSIb3DQEJBTEPFw0yNjA2MjIwNDM0NTNaMC8GCSqGSIb3DQEJBDEi
+# BCDRBHySwIGZ9GI7uM7WMQKs946xJWYe1oIbJqf9CPduNzANBgkqhkiG9w0BAQEF
+# AASCAgC/s7wyB7YVrjbkRyOAD6inXMdUPUbf/wb9CCklEkwRlF3Q4jx3HLtUw/Cq
+# 7yFTq/xxVfb7vGFp5gex1jHfg/CTXPWUOIpaKL+FhVtFuMIU64gGr3HIlmBM0oZz
+# iqdAE7M9vcWr9OumBa+sNCNZN80CIBAW86s0zC7XrA3mbhajPEyGGdbsnuRwRxKm
+# m++A00K96XW69hFqNCtoNeM/857lufrxLyC6Nv9ka3QKA0/1W8akPpS+lFInVYuw
+# i9kya+/vzw4rjuPNAX/ZVokWNw8Za9uuQpP2XQLLyFEfrcdujS+xZv8dzDimNCPG
+# axwmtWuUFCD5r7+TiWfuy9PxXAO0LamvZwLOBX7I0odS7diuQAvfeO+KrL8oqd5j
+# iGRyeOHkcAysZe2qKArnZQhyPOC/aRRi1HQ6kTsSLHe/bLt/TUITSpVMfDNLE+8z
+# WauRoTfX3cE6yi1pT+B9TxfzkBE+Uvx8zl4TCStX6hKhe/BCHP8+SFq2Q8whhz+G
+# qDne2Un2Fi3QYTeyMLgBJy9Eqcdgh8SC+muOK8mL3TWvSVd8voSv/x/bwvpPjGqO
+# X5DvnY89GjkCcvJPWVrFF5mGyrxA2+pPyb2u8oZDlPafwgdTIWzkynRy8J6r8uJY
+# oOMOW1bwVLYuaeeyflT1JH68dIu+0+nqAn0oAwx4xvVxLop1hg==
 # SIG # End signature block

@@ -1,17 +1,25 @@
-# ==============================================================================
+﻿# ==============================================================================
 # IR Playbook 01 - Windows Network Containment
 # Isolates the host via Windows Firewall, blocks all interfaces except the
 # management network, and disables wireless adapters. Preserves the current
 # WinRM/SSH session. Idempotent - safe to re-run.
 # ==============================================================================
 #Requires -RunAsAdministrator
+[CmdletBinding()]
+param(
+    [string]$OutputDir  = '',   # reports\<HOST>\ - passed by Invoke-IRCollection.ps1 / Invoke-Eradication.ps1
+    [string]$IncidentId = '',   # e.g. HOST_20260621_160000
+    [string]$MgmtIPList = ''    # comma-separated management IPs to keep open (overrides IR_MGMT_IPS)
+)
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Continue'
 
-$IncidentId = $env:IR_INCIDENT_ID -replace '[^\w\-]',''
+# Parameter -> env var fallback
+if (-not $IncidentId) { $IncidentId = ($env:IR_INCIDENT_ID -replace '[^\w\-]','') }
 if (-not $IncidentId) { $IncidentId = 'UNKNOWN' }
-$MgmtIPs    = ($env:IR_MGMT_IPS -split ',') | ForEach-Object { $_.Trim() } | Where-Object { $_ }
-$IRDir   = 'C:\ProgramData\IRToolkit'
+$rawMgmt    = if ($MgmtIPList) { $MgmtIPList } else { $env:IR_MGMT_IPS }
+$MgmtIPs    = ($rawMgmt -split ',') | ForEach-Object { $_.Trim() } | Where-Object { $_ }
+$IRDir      = if ($OutputDir) { $OutputDir } else { 'C:\ProgramData\IRToolkit' }
 New-Item -ItemType Directory -Path $IRDir -Force | Out-Null
 
 function Write-IRLog {
@@ -160,27 +168,27 @@ Write-IRLog "CONTAIN: Host isolation complete for $IncidentId"
 # SIG # Begin signature block
 # MIIcoQYJKoZIhvcNAQcCoIIckjCCHI4CAQExDzANBglghkgBZQMEAgEFADB5Bgor
 # BgEEAYI3AgEEoGswaTA0BgorBgEEAYI3AgEeMCYCAwEAAAQQH8w7YFlLCE63JNLG
-# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCAfsjFrfZfrW+R7
-# EgOXshvfpc96aWHu7peEHktuSDkYx6CCFrQwggN2MIICXqADAgECAhBa5MQyEl22
-# qUV1bZluOcpOMA0GCSqGSIb3DQEBCwUAMFMxGjAYBgNVBAsMEUluY2lkZW50IFJl
+# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCDiaDrVGd+GMmNV
+# uEh31rIrgPJCZVBaA2cV7MgOaQyVR6CCFrQwggN2MIICXqADAgECAhAbL3xr3F9b
+# nkbveZC/LiR8MA0GCSqGSIb3DQEBCwUAMFMxGjAYBgNVBAsMEUluY2lkZW50IFJl
 # c3BvbnNlMRMwEQYDVQQKDApJUiBUb29sa2l0MSAwHgYDVQQDDBdJUiBUb29sa2l0
-# IENvZGUgU2lnbmluZzAeFw0yNjA2MjAwMDU5NDZaFw0zMTA2MjAwMTA5NDZaMFMx
+# IENvZGUgU2lnbmluZzAeFw0yNjA2MjIwNDI0NDVaFw0zMTA2MjIwNDM0NDVaMFMx
 # GjAYBgNVBAsMEUluY2lkZW50IFJlc3BvbnNlMRMwEQYDVQQKDApJUiBUb29sa2l0
 # MSAwHgYDVQQDDBdJUiBUb29sa2l0IENvZGUgU2lnbmluZzCCASIwDQYJKoZIhvcN
-# AQEBBQADggEPADCCAQoCggEBAJ1nFbqBzQLbEhUUTT10Lrva+ooE/uVqzTJbGk5/
-# xh3zYBEAaRil7obceqCWtDg6KSjbDQP8wto42fHUK8tp0FU0NEi2+rkWHfcpeasm
-# z2e+UFQMDlXRcxg7dqe+08OB4pFhwrHSPo0m7HZAgtpHd02POka7jaYVoAnScg7i
-# LuZiRSJ3tJKZu1KCSTntV+LbicnowTlaDEvr7JQzSVs+5BpNadU3n/ujzH088Mgm
-# CoXooQpF12SzbZNCZ+kbgza6bNMbEHNGkLr9S0vHQD95oKPWF7YuOu7jqtkuCOZc
-# KYYi4nOXFwLqXmJ+sqqpR2NrrfMkz4VaALGIZ93o10CHWDkCAwEAAaNGMEQwDgYD
-# VR0PAQH/BAQDAgeAMBMGA1UdJQQMMAoGCCsGAQUFBwMDMB0GA1UdDgQWBBQRXBKC
-# VXuhcK7rCDzb/6SAfPGwvDANBgkqhkiG9w0BAQsFAAOCAQEAlZhDvun+4lQ0yd2C
-# +pAFD3B2/l2N9hArAcHhp6DaO48NSIT3eyyhGrfk8f3lDVhvjEbUDDmb6Oe67rBN
-# 3W7Dp1Y+W8Z96kC3miq7UbmVTGkiQGZFwi0KJ8tw++//vlU3zlW9nhqwFxzm7DfL
-# zECzv6bnd9Ri+1R4zhvkd5BLTuwLjPLkzbOTdsGwbXWWOK2gTTCr82I7G9xcq9Gv
-# qAcoJAHVEiNKt7p7Y+ScDL/AZGBMCBTsN9gcAoIgq22EWBHHV02HmPfuYyddaq1c
-# Lmjot0+5wVoPVl4wNktght1WVHDlk3EpEJF5qc7Yhl3YtniIEHQoO8BkWykpFDhy
-# q5wz7TCCBY0wggR1oAMCAQICEA6bGI750C3n79tQ4ghAGFowDQYJKoZIhvcNAQEM
+# AQEBBQADggEPADCCAQoCggEBAKuTSorzjXf0qc4qX04KtYn2ErVj9RAkn/1f/9YN
+# llrRj0s3urh/LnWmHn4vUjPrDTzHXUx4udOclWNlv52uCMAfXKZR3qD73OCHHQ2l
+# +1s4JqrAdGhr6QPyIhCDwl7wqQUfekQtBep+SqbM0vkbvup3WKgol+c3fIUxvM8E
+# bPLg5CcNWug6Twj+Wn1FJidJihmYARSKT5PFv32BLbffUpuvdWXxzRIRv8c4EE+S
+# bWs3lTiCGrp1X33mXYiMRNAiF5ofrCJwRA7LESh4TCqXWDSvs+KFBi1ZxEnLxmUk
+# 1Wrzq11umlIzoJhnEN0VyBvLK6X40uTF50piU+5kGy9kZlkCAwEAAaNGMEQwDgYD
+# VR0PAQH/BAQDAgeAMBMGA1UdJQQMMAoGCCsGAQUFBwMDMB0GA1UdDgQWBBSpc1pf
+# XTSlgxdtXKDrlumz7H67TjANBgkqhkiG9w0BAQsFAAOCAQEAdPAxdgyk/YzF72lK
+# 4P1I3Lwjice2yAR0aoXSEP5gO/xnAvuqCiAcdPfJhqMrrfq5iFLqTuWSfz+k9irn
+# hjzyWgmo2GUrQ8BVRoNAw7HpTJo7Rw8+FfDzyy+stq9UKWrkflHqwb7oBD+aBs/5
+# ZccFKZi8oeV79CCTGdwXKYgE+xYbV//Twr7rpMbVUqbchEDdZXEzT2GdEUd5B02L
+# bDGJ4Gjz8AtCFcSXWQlLnAQxd5CJVFHDkyfkEs2VvBPtR/MBCF3NiNufb8HgClhS
+# ZHayqVVZhUd+NS7/orBY5M1Ioc0/kGiNO3nlWf1IlAPk/jsILweFZkUO0wBTot/O
+# b18zszCCBY0wggR1oAMCAQICEA6bGI750C3n79tQ4ghAGFowDQYJKoZIhvcNAQEM
 # BQAwZTELMAkGA1UEBhMCVVMxFTATBgNVBAoTDERpZ2lDZXJ0IEluYzEZMBcGA1UE
 # CxMQd3d3LmRpZ2ljZXJ0LmNvbTEkMCIGA1UEAxMbRGlnaUNlcnQgQXNzdXJlZCBJ
 # RCBSb290IENBMB4XDTIyMDgwMTAwMDAwMFoXDTMxMTEwOTIzNTk1OVowYjELMAkG
@@ -284,31 +292,31 @@ Write-IRLog "CONTAIN: Host isolation complete for $IncidentId"
 # y2ueIu9THFVkT+um1vshETaWyQo8gmBto/m3acaP9QsuLj3FNwFlTxq25+T4QwX9
 # xa6ILs84ZPvmpovq90K8eWyG2N01c4IhSOxqt81nMYIFQzCCBT8CAQEwZzBTMRow
 # GAYDVQQLDBFJbmNpZGVudCBSZXNwb25zZTETMBEGA1UECgwKSVIgVG9vbGtpdDEg
-# MB4GA1UEAwwXSVIgVG9vbGtpdCBDb2RlIFNpZ25pbmcCEFrkxDISXbapRXVtmW45
-# yk4wDQYJYIZIAWUDBAIBBQCggYQwGAYKKwYBBAGCNwIBDDEKMAigAoAAoQKAADAZ
+# MB4GA1UEAwwXSVIgVG9vbGtpdCBDb2RlIFNpZ25pbmcCEBsvfGvcX1ueRu95kL8u
+# JHwwDQYJYIZIAWUDBAIBBQCggYQwGAYKKwYBBAGCNwIBDDEKMAigAoAAoQKAADAZ
 # BgkqhkiG9w0BCQMxDAYKKwYBBAGCNwIBBDAcBgorBgEEAYI3AgELMQ4wDAYKKwYB
-# BAGCNwIBFTAvBgkqhkiG9w0BCQQxIgQgTn3whFgwmvlNZ7E77nM/0ChWO+AQDYwE
-# MZL+VieZJS0wDQYJKoZIhvcNAQEBBQAEggEAIE08qxMBHnBdTi0t4J0+oteeVsxh
-# MJesRRELLWio+L5IJMTJm7TCNNCOxZDG+p5/kLcZuAOQdIx2Bc/fBkTLCwNBVUto
-# tzzwuux7+g/Dk5F7yAaE1ApaCGft6LQjYhM8CE4etPgnou+o5hYi2w5H7EFk+ToF
-# FfnDsPdhi0+J19zcKs21vDa7srNHZW+nUFA+b5GSkJtLYZRgKrzgvOP2p+8ecoI3
-# B1snf82cmqorYyZlD6Max6sOuikMYwouMzJRUJiN1DZ7MEK0DwyN2atcx08MWXMH
-# 7ac3Gxn0F6mLGRcCRDW2qfmF6/mhZ3KKS07BhoVTP/FJkMibFcmNmvvOWaGCAyYw
+# BAGCNwIBFTAvBgkqhkiG9w0BCQQxIgQgNkz4DYC1wcViO9/giq8/ONmepAzsI/lq
+# n4szelKPEI4wDQYJKoZIhvcNAQEBBQAEggEARaCssoyYQEVJD6y/vOPADq6vJnza
+# hdV2WVEkzIpg1KIdk6lTNT8/vElhIUHoimrNynuq7KeDH42huL4j9ny3c9Zr2qpi
+# rT5fQrf3wZVmJIcsrNVBTTSy7NFVW7gkUrPMpiS0uN4ndsKUzSUkiz1yiBKbBsrV
+# 9GTknGchnBbBJuNpTppLPPMozDIq57TAQoF0XB1xQYcN9N5Pkc/TtkeyDH0uhaE5
+# EfjR1JQTwyooGv3NuT8ONCf0i/6PG6lSmpso+oQFjZnDtWkhjao+kcHeVWiLT/NV
+# 8lFw1Ez3JqWdMx5NEG385TMDKhX8OTtiI+49FogyYY55HN5whKKyp5KtgqGCAyYw
 # ggMiBgkqhkiG9w0BCQYxggMTMIIDDwIBATB9MGkxCzAJBgNVBAYTAlVTMRcwFQYD
 # VQQKEw5EaWdpQ2VydCwgSW5jLjFBMD8GA1UEAxM4RGlnaUNlcnQgVHJ1c3RlZCBH
 # NCBUaW1lU3RhbXBpbmcgUlNBNDA5NiBTSEEyNTYgMjAyNSBDQTECEAqA7xhLjfEF
 # gtHEdqeVdGgwDQYJYIZIAWUDBAIBBQCgaTAYBgkqhkiG9w0BCQMxCwYJKoZIhvcN
-# AQcBMBwGCSqGSIb3DQEJBTEPFw0yNjA2MjAwMTE0MjlaMC8GCSqGSIb3DQEJBDEi
-# BCAYflT10jw/yS8N9nEBdowA2d4Fg0VW9cTZvNS2bAfNwTANBgkqhkiG9w0BAQEF
-# AASCAgBgZt4rdbpt5BuEv4gYjT4JHXkOGeyt+6ATsD/qCXivO6uFtdEHa7MOXoXh
-# Vmy4GNvVUkiPZ3oCaMz+tl9Xxg37hnZjETZ8l75Z2sQKOp/TWeBI2DEeRSn31Un4
-# LnWb0uuBmHrb2gxxn8IkKR0bqFZNK/Aey20GJ0B7GtvEiopIQTd3LqDqXO4NJyqi
-# k6QyelDrH3uNWmQhHbSROfSp2aINBjB2IDbWwNfTPDfHNQoudwrlrWthM2AqgMhp
-# WmLZ+mySBC81bDTqYT+WH5MxBO3Y0PMlVwQ6N6M7vtToKLJp6ZO31E85URHcU6hA
-# Gl8b2buHH9P+NZ6PbdqSQa2WrjXpgzPuMhERFwL1K4rLhgoBH1PN1Dcn4Ngu25vY
-# n/U8ejp2xMkm8OB/xsDdSAuCr/1fVYKVl+GadKh/GYcGnz3SxwuIJhvnknuo4rRi
-# xJW2xNuZ+S6FOZ3yHSxjVsYlObKAsuDZ0PDJXUv0ZEUZCWWOR2rIvCqTtTZS4Mm8
-# Gzt3FWV874vsdnl9XgH7oAb8QwJF0WC3bAb6dTVGyw7F+8qgN6UKFDKqMBpMiw4W
-# aIYdy2V2lKKMkFcK84Ly7yfuKftnj7J4cqhkyf2XCi6OyRK9tMGgHMRbTqkTXCnX
-# ZpZaZPj5ezFHkdS6DPbjHiLIyFGx+emC+/6ofqV7q6t9MJL/bQ==
+# AQcBMBwGCSqGSIb3DQEJBTEPFw0yNjA2MjIwNDM0NTBaMC8GCSqGSIb3DQEJBDEi
+# BCAOjX/xgWALiik06t0Qkqceh2dxWlcRb7j2nWPLhv6nezANBgkqhkiG9w0BAQEF
+# AASCAgBjZmS4PIhNosb8La9ZVpzhdo0bOrah7uzGH12wyRxVi917UyHh5SSi9DL5
+# P4sj0H43U/GzcXYJuJEcUDVnQKISjGFVpkQ47SrctSPOYr78Mj8a6Jm/zQiKFjVm
+# kqh/7Pnoy/bCxqK3vL4b4UvqKCKPGQTR3STAgsNsNH1vY6bGCNpx04o9ZEYQyvJ9
+# /ECkAE5QYJUEKZ6pXYBmApBHEv74P+kr5Wkt1k9U58XVkMWOOu+eibpqH/PEbi06
+# 1JNEYLdtiirVToBAOtDoGwXtK8MU2fVqCl09/kOcnswq/Qdf2c3rT4cYjy9wJEp4
+# ztmaegUqX6ICLBoEsqSU6cuHEYMoaiXDabwODpPatyQeofI17NRyG1eCv/eodyLn
+# V3GdwzErHdpsBFkLEqTLKQiD57aRyVaSlGEijoVPKYRmTuvZlTGRrSIfRj2lI3WP
+# yoLBoixAeDwF+is8vEWVMlBi/IVhxu2uFE088cfLjXpeFaS0ly2wdExJ2dKQfvtq
+# //kHmr/HzTGyrTxqpxe8Jjt/m2XLKleTDt8mtF3Tv6JVrajXQyad5efjVbc96H+F
+# 0JZ1Gw7N/+h5dsQjsJMvEB38lkdoQOeHKPElimrsK0Yi6uYDliL8k+y4y2tNBlOC
+# FWVuhDniA0l2rKh+9kNoIGnsfM1xuOfysM0uCnJjtWsNtId2Gg==
 # SIG # End signature block

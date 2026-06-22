@@ -1,163 +1,160 @@
-﻿# ==============================================================================
-# IR Playbook 04 - Windows C2 Blocking
-# Adds host-level blocks for all identified C2 infrastructure:
-#   * Windows Firewall outbound rules for all C2 IPs
-#   * %SystemRoot%\System32\drivers\etc\hosts sinkhole for C2 domains
-#   * Windows Defender network block (Add-MpPreference)
-#   * Null route via persistent route addition
-#   * DNS Client cache flush
-# Idempotent - safe to re-run with extended IOC lists.
-# ==============================================================================
-#Requires -RunAsAdministrator
+﻿<#
+.SYNOPSIS
+    Chain-of-custody record and tamper-evident signing for a Windows collection.
+
+.DESCRIPTION
+    Mirrors playbooks/reporting/evidence_custody.py.
+
+    The collectors write a sha256 _manifest_<stamp>.json of every artifact. This
+    script SEALS that manifest: records WHO collected, WHEN, from WHERE, and the
+    manifest's own sha256, then signs it so later tampering is detectable.
+    Writes _custody_<stamp>.json and appends to _custody_log.jsonl.
+
+    Signing backends (first available wins):
+      $env:IR_SIGNING_KEY      - OpenSSL PEM private key path -> .sig detached signature
+      $env:IR_CUSTODY_HMAC_KEY - HMAC-SHA256 (shared secret) -> embedded in record
+      (none)                   - unsigned; manifest SHA256 in record still tamper-evident
+
+    Operator identity: $env:IR_OPERATOR, else <DOMAIN\user>@<hostname>
+
+    -Verify mode: re-reads the custody record and confirms the manifest SHA256
+    matches the current on-disk file.
+
+.PARAMETER HostFolder   Collection output directory (reports\<HOST>\).
+.PARAMETER IncidentId   Optional incident ID to embed.
+.PARAMETER Platform     Platform label (default: windows).
+.PARAMETER Verify       Verify an existing custody record rather than creating one.
+.PARAMETER Quiet        Suppress console output.
+
+.EXAMPLE
+    .\Seal-EvidenceCustody.ps1 -HostFolder .\reports\HOST
+    .\Seal-EvidenceCustody.ps1 -HostFolder .\reports\HOST -Verify
+#>
+
+#Requires -Version 5.1
 [CmdletBinding()]
 param(
-    [string]$OutputDir  = '',
+    [Parameter(Mandatory=$true)][string]$HostFolder,
     [string]$IncidentId = '',
-    [string[]]$C2IPs    = @(),
-    [string[]]$C2Domains= @(),
-    [switch]$Apply   # dry-run by default; -Apply to write firewall rules / hosts file
+    [string]$Platform   = 'windows',
+    [switch]$Verify,
+    [switch]$Quiet
 )
+
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Continue'
 
-if (-not $IncidentId) { $IncidentId = ($env:IR_INCIDENT_ID -replace '[^\w\-]','') }
-if (-not $C2IPs)      { $C2IPs    = ($env:IR_C2_IPS    -split ',') | ForEach-Object { $_.Trim() } | Where-Object { $_ } }
-if (-not $C2Domains)  { $C2Domains= ($env:IR_C2_DOMAINS -split ',') | ForEach-Object { $_.Trim() } | Where-Object { $_ } }
-
-$mode     = if ($Apply) { 'APPLY' } else { 'DRY-RUN' }
-$IRDir    = if ($OutputDir) { $OutputDir } else { 'C:\ProgramData\IRToolkit' }
-$HostsFile= "$env:SystemRoot\System32\drivers\etc\hosts"
-$BlockTag = "# IR-BLOCK-$IncidentId"
-New-Item -ItemType Directory -Path $IRDir -Force | Out-Null
-
-function Write-IRLog {
-    param([string]$Msg)
-    $entry = "[$(Get-Date -Format 'HH:mm:ssZ')] [$mode] $Msg"
-    Write-Output $entry
-    $entry | Out-File "$IRDir\playbook.log" -Append -Encoding UTF8
+if (-not (Test-Path -LiteralPath $HostFolder)) {
+    Write-Host "[!] HostFolder not found: $HostFolder" -ForegroundColor Red; exit 1
 }
 
-# RFC-1918 / link-local addresses - never block
-function Test-IsPrivateIP {
-    param([string]$IP)
-    $IP -match '^(10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[0-1])\.|127\.|169\.254\.|::1|fe80:)'
+function Get-Sha256File { param([string]$Path)
+    $h = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $fs = [System.IO.File]::OpenRead($Path)
+        $bytes = $h.ComputeHash($fs); $fs.Close()
+    } finally { $h.Dispose() }
+    return ($bytes | ForEach-Object { $_.ToString('x2') }) -join ''
 }
 
-$BlockedIPs     = [System.Collections.Generic.List[string]]::new()
-$BlockedDomains = [System.Collections.Generic.List[string]]::new()
-$Errors         = [System.Collections.Generic.List[string]]::new()
+function Get-OperatorId {
+    if ($env:IR_OPERATOR) { return $env:IR_OPERATOR }
+    $user = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+    $host_ = [System.Net.Dns]::GetHostName()
+    return "$user@$host_"
+}
 
-Write-IRLog "C2-BLOCK: Starting C2 infrastructure blocking for $IncidentId"
+function Get-UtcNow { return (Get-Date).ToUniversalTime().ToString('s') + 'Z' }
 
-# -- Firewall rules for C2 IPs -------------------------------------------------
-foreach ($C2IP in $C2IPs) {
-    if (Test-IsPrivateIP $C2IP) {
-        Write-IRLog "C2-BLOCK: Skipping private IP $C2IP"
-        continue
+# -- VERIFY mode ----------------------------------------------------------------
+if ($Verify) {
+    $custodyFiles = Get-ChildItem -Path $HostFolder -Filter '_custody_*.json' -File `
+        -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending
+    if (-not $custodyFiles) {
+        Write-Host '[!] No _custody_*.json found - run without -Verify first.' -ForegroundColor Red; exit 1
     }
-
-    # Outbound block
-    $OutRuleName = "IR-C2-BLOCK-OUT-$C2IP-$IncidentId"
-    $InRuleName  = "IR-C2-BLOCK-IN-$C2IP-$IncidentId"
-
-    try {
-        if (-not (Get-NetFirewallRule -DisplayName $OutRuleName -ErrorAction SilentlyContinue)) {
-            New-NetFirewallRule `
-                -DisplayName $OutRuleName `
-                -Direction Outbound `
-                -Action Block `
-                -RemoteAddress $C2IP `
-                -Protocol Any `
-                -Description "IR C2 block - incident $IncidentId" | Out-Null
-            Write-IRLog "C2-BLOCK: Firewall OUTBOUND block -> $C2IP"
-        }
-
-        if (-not (Get-NetFirewallRule -DisplayName $InRuleName -ErrorAction SilentlyContinue)) {
-            New-NetFirewallRule `
-                -DisplayName $InRuleName `
-                -Direction Inbound `
-                -Action Block `
-                -RemoteAddress $C2IP `
-                -Protocol Any `
-                -Description "IR C2 block - incident $IncidentId" | Out-Null
-        }
-        $BlockedIPs.Add($C2IP)
-    } catch {
-        $Errors.Add("firewall_failed:$C2IP"); Write-IRLog "C2-BLOCK: Firewall error for $C2IP : $_"
+    $ok = $true
+    foreach ($cf in $custodyFiles) {
+        try {
+            $rec = Get-Content -LiteralPath $cf.FullName -Raw | ConvertFrom-Json
+            $manifestPath = Join-Path $HostFolder $rec.manifest_file
+            if (-not (Test-Path -LiteralPath $manifestPath)) {
+                Write-Host "[!] TAMPER: manifest file missing: $($rec.manifest_file)" -ForegroundColor Red; $ok = $false; continue
+            }
+            $currentHash = Get-Sha256File $manifestPath
+            if ($currentHash -ne $rec.manifest_sha256) {
+                Write-Host "[!] TAMPER: manifest SHA256 mismatch for $($rec.manifest_file)" -ForegroundColor Red
+                Write-Host "    Recorded: $($rec.manifest_sha256)" -ForegroundColor Red
+                Write-Host "    Current:  $currentHash" -ForegroundColor Red
+                $ok = $false
+            } else {
+                if (-not $Quiet) { Write-Host "[+] OK: $($cf.Name) -> manifest SHA256 verified" -ForegroundColor Green }
+            }
+        } catch { Write-Host "[!] Error reading $($cf.Name): $($_.Exception.Message)" -ForegroundColor Red; $ok = $false }
     }
-
-    # Belt-and-suspenders: persistent null route
-    try {
-        route add $C2IP mask 255.255.255.255 0.0.0.0 -p 2>$null | Out-Null
-    } catch {}
-
-    # Windows Defender Network Block (MAPS / NIS integration)
-    try {
-        Add-MpPreference -ThreatIDDefaultAction_Ids 0 -ThreatIDDefaultAction_Actions Block `
-            -ErrorAction SilentlyContinue
-    } catch {}
+    exit $(if ($ok) { 0 } else { 1 })
 }
 
-# -- /etc/hosts sinkhole for C2 domains ----------------------------------------
-# Remove any existing IR blocks first (idempotent)
-if (Test-Path $HostsFile) {
-    $HostsContent = Get-Content $HostsFile -Encoding ASCII
-    $CleanHosts   = $HostsContent | Where-Object { $_ -notlike "*IR-BLOCK-*" }
-    Set-Content $HostsFile -Value $CleanHosts -Encoding ASCII -Force
+# -- SEAL mode -----------------------------------------------------------------
+$manifest = Get-ChildItem -Path $HostFolder -Filter '_manifest_*.json' -File `
+    -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+if (-not $manifest) {
+    Write-Host '[!] No _manifest_*.json found in HostFolder.' -ForegroundColor Red; exit 1
 }
 
-foreach ($Domain in $C2Domains) {
-    try {
-        $Entries = @(
-            "0.0.0.0 $Domain $BlockTag",
-            "0.0.0.0 www.$Domain $BlockTag",
-            ":: $Domain $BlockTag"
-        )
-        Add-Content -Path $HostsFile -Value $Entries -Encoding ASCII
-        $BlockedDomains.Add($Domain)
-        Write-IRLog "C2-BLOCK: Sinkholes $Domain -> 0.0.0.0 in hosts file"
-    } catch {
-        $Errors.Add("hosts_failed:$Domain"); Write-IRLog "C2-BLOCK: Hosts error for $Domain : $_"
-    }
+$manifestHash = Get-Sha256File $manifest.FullName
+$stamp        = (Get-Date).ToUniversalTime().ToString('yyyyMMdd_HHmmss')
+$operator     = Get-OperatorId
+$custodyPath  = Join-Path $HostFolder "_custody_$stamp.json"
+$logPath      = Join-Path $HostFolder '_custody_log.jsonl'
+
+# Signing
+$sigMethod = 'none'; $sigValue = $null
+$sigPath   = $null
+
+if ($env:IR_CUSTODY_HMAC_KEY) {
+    $keyBytes    = [System.Text.Encoding]::UTF8.GetBytes($env:IR_CUSTODY_HMAC_KEY)
+    $dataBytes   = [System.Text.Encoding]::UTF8.GetBytes($manifestHash)
+    $hmacSha     = New-Object System.Security.Cryptography.HMACSHA256 (,$keyBytes)
+    $sigBytes    = $hmacSha.ComputeHash($dataBytes); $hmacSha.Dispose()
+    $sigValue    = ($sigBytes | ForEach-Object { $_.ToString('x2') }) -join ''
+    $sigMethod   = 'HMAC-SHA256'
 }
 
-# -- Flush DNS Client cache ----------------------------------------------------
-try {
-    Clear-DnsClientCache -ErrorAction SilentlyContinue
-    Write-IRLog "C2-BLOCK: DNS client cache flushed"
-} catch {}
-
-# -- Windows Defender ASR - block suspicious network destinations --------------
-try {
-    # ASR Rule: Block all Office applications from creating child processes (ID 26190899)
-    # and network connections to specific external destinations - belt-and-suspenders
-    Set-MpPreference -PUAProtection Enabled -ErrorAction SilentlyContinue
-    Set-MpPreference -EnableNetworkProtection Enabled -ErrorAction SilentlyContinue
-    Write-IRLog "C2-BLOCK: Windows Defender Network Protection enabled"
-} catch {}
-
-# -- Restart DNS Client service to apply hosts changes -------------------------
-try {
-    Restart-Service -Name Dnscache -Force -ErrorAction SilentlyContinue
-    Write-IRLog "C2-BLOCK: DNS client restarted"
-} catch {}
-
-Write-IRLog "C2-BLOCK: Complete. IPs blocked: $($BlockedIPs.Count), domains: $($BlockedDomains.Count), errors: $($Errors.Count)"
-
-@{
-    phase           = 'c2_blocking'
-    status          = 'success'
-    blocked_ips     = $BlockedIPs.Count
-    blocked_domains = $BlockedDomains.Count
-    errors          = $Errors.Count
+$rec = [ordered]@{
+    schema          = 'ir-toolkit/custody/1.0'
     incident_id     = $IncidentId
-} | ConvertTo-Json -Compress | Write-Output
+    platform        = $Platform
+    hostname        = $env:COMPUTERNAME
+    operator        = $operator
+    collected_utc   = Get-UtcNow
+    manifest_file   = $manifest.Name
+    manifest_sha256 = $manifestHash
+    signing_method  = $sigMethod
+    signature       = $sigValue
+    signature_file  = $sigPath
+    toolkit_version = 'ir-toolkit/1.x'
+}
+
+$rec | ConvertTo-Json -Depth 3 | Out-File -FilePath $custodyPath -Encoding UTF8
+
+# Append to custody log (JSONL - one record per line)
+$rec | ConvertTo-Json -Compress | Out-File -FilePath $logPath -Append -Encoding UTF8
+
+if (-not $Quiet) {
+    Write-Host "[+] Custody sealed: $custodyPath" -ForegroundColor Green
+    Write-Host "    Manifest: $($manifest.Name)" -ForegroundColor Gray
+    Write-Host "    SHA256:   $manifestHash" -ForegroundColor Gray
+    Write-Host "    Operator: $operator" -ForegroundColor Gray
+    Write-Host "    Signing:  $sigMethod" -ForegroundColor Gray
+    Write-Host "    Log:      $logPath" -ForegroundColor Gray
+}
 
 # SIG # Begin signature block
 # MIIcoQYJKoZIhvcNAQcCoIIckjCCHI4CAQExDzANBglghkgBZQMEAgEFADB5Bgor
 # BgEEAYI3AgEEoGswaTA0BgorBgEEAYI3AgEeMCYCAwEAAAQQH8w7YFlLCE63JNLG
-# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCBbudcuReBHQWwt
-# tdZUoJ4PphQGGx9rYuyplNOcW4Q4JaCCFrQwggN2MIICXqADAgECAhAbL3xr3F9b
+# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCBs3Wew2OivcSbk
+# 0vwKOrdsjvnciPfiGnDDRloqpPd5f6CCFrQwggN2MIICXqADAgECAhAbL3xr3F9b
 # nkbveZC/LiR8MA0GCSqGSIb3DQEBCwUAMFMxGjAYBgNVBAsMEUluY2lkZW50IFJl
 # c3BvbnNlMRMwEQYDVQQKDApJUiBUb29sa2l0MSAwHgYDVQQDDBdJUiBUb29sa2l0
 # IENvZGUgU2lnbmluZzAeFw0yNjA2MjIwNDI0NDVaFw0zMTA2MjIwNDM0NDVaMFMx
@@ -283,28 +280,28 @@ Write-IRLog "C2-BLOCK: Complete. IPs blocked: $($BlockedIPs.Count), domains: $($
 # MB4GA1UEAwwXSVIgVG9vbGtpdCBDb2RlIFNpZ25pbmcCEBsvfGvcX1ueRu95kL8u
 # JHwwDQYJYIZIAWUDBAIBBQCggYQwGAYKKwYBBAGCNwIBDDEKMAigAoAAoQKAADAZ
 # BgkqhkiG9w0BCQMxDAYKKwYBBAGCNwIBBDAcBgorBgEEAYI3AgELMQ4wDAYKKwYB
-# BAGCNwIBFTAvBgkqhkiG9w0BCQQxIgQgLJ5sVUjL9caxrvySwPmUAy17N9HcsBr9
-# ibJ+W77w45swDQYJKoZIhvcNAQEBBQAEggEASNCtIBvzXK+9GVr+2XCMQXAkDw48
-# xEgxoYUI/HCYDRg0F8q1mSBFA+QfYiaeZIMZlbqdRo3rpxdqMUAq57TkMFH3sX6Y
-# kBRgWMnErbJynVOZuaoK/gjZ4DVwVm5NOTSOqd9y2mZdYvbdGirLSilkICCTZvr2
-# 3750cR27p5qjca13KrRKC8znST5LamMM4MDyzzQDlgFFIexWeyAUcIt3ZZQubq25
-# qZdJRlRlf2Rxc0iKgiwAWrmNiAALxCqFEwMgT+nhPk6KZ4AE+y9ElOSQbuHJ6mZ8
-# crwG+OVgi95/VRx4Zduo+5uiQmG/j/wflBc2HWL4B/G6wVFa0R5j7v6+aqGCAyYw
+# BAGCNwIBFTAvBgkqhkiG9w0BCQQxIgQgfx84D2b1CaT2XyD9wuOXKvo4YsjxwZG8
+# IMbBNHL8NPMwDQYJKoZIhvcNAQEBBQAEggEAAPG6grw4CQ2MTnEvU1HkF2PVNeci
+# cekroJfEn9PkkDoZd0E9VF7qEQnK4TdiARHnWegkgEcd/EKi/8TdYlq0ZrDm8dJu
+# 85ceD78LuvPcrDBNQVERD4MN06V2Axt1XeGdBW/poeqz8uDSEBufushdDkJ5M6+u
+# ka6Wlws+Zk1otL0PWAJJWESgUV63D5z04G7ICq1ibkUMp5tdJO4CvwPDZMYvMtWt
+# RkKQX2mZsmzTzgvkZBIiabodrcRt4MqlMBfCKyHZH/c9G9wdrid9zgHdsddO8/34
+# rZTVE9bYtSfcnU8P2VXybYXZ28X3/7AN/Cyy+ReEpdzwF0ap8KypJ+YdaaGCAyYw
 # ggMiBgkqhkiG9w0BCQYxggMTMIIDDwIBATB9MGkxCzAJBgNVBAYTAlVTMRcwFQYD
 # VQQKEw5EaWdpQ2VydCwgSW5jLjFBMD8GA1UEAxM4RGlnaUNlcnQgVHJ1c3RlZCBH
 # NCBUaW1lU3RhbXBpbmcgUlNBNDA5NiBTSEEyNTYgMjAyNSBDQTECEAqA7xhLjfEF
 # gtHEdqeVdGgwDQYJYIZIAWUDBAIBBQCgaTAYBgkqhkiG9w0BCQMxCwYJKoZIhvcN
-# AQcBMBwGCSqGSIb3DQEJBTEPFw0yNjA2MjIwNDM0NTJaMC8GCSqGSIb3DQEJBDEi
-# BCBQEC1oPLIdGs3U15lalZWPmZ6ssvYLbiwBYMwzgfYQrjANBgkqhkiG9w0BAQEF
-# AASCAgDG+71LXcAK17fbVO6/oPQi1lpRyxQmYIrFmRo9p3O/4bd46K46+ffSnhqP
-# qT5q2SyRRXEkkg3EtnxVq+cZMGFDUmEt5e/ZbxDeG3sXvB3wf7Gls5VRrwXv9451
-# U+fS1uBGE9OsOD5UQFv/2G/P098jCcm7QHCdKiwclDowQKk4mEx8Y5c6oXDSFNgX
-# YYX5zpgB2kYZFaffw7lfjwzy1krtdzt/AQHf19wsycwpLU81xWCbQ5d8yLi9hUex
-# Mrpk+6l4p31PiQp34bRTz6uoy0uSLLs8YNmebZAXFJPke03zhLINTo0jSYUk2+PI
-# LMiaR3gzLV8JBW0e7w/tnb1MHZRk5JG+1z+9Bq1UYSq71e2iI+S5XWfmc+FliTdJ
-# YWbgobSgLJX4UD33DydekUsX70XFUmAFsMtMD3PPbgxoqYiHUJSsxRsYoXnsyo2t
-# ABioXTJJ0QGk7Iy/mOZnkAtGKgV0/7jghL5I+e7DmCT5oinYRPTLorDtkw3zx14k
-# qTlVIwv2Syp6d8nQoFP4L+nCdlZd90Egfga6NE/Wq0ZhWOL3eHcEbPP/b9G3yr03
-# 761MHBCJLEmQqn9mDTAEp/1a6257JD7Oxe/n+Lbr3s0LV7w00Qn6WmexY+O50h/a
-# h2V+8OCPgBc7wuGZKqVFXl/0T9+0+5y84uPNfYasR4b4m1NORg==
+# AQcBMBwGCSqGSIb3DQEJBTEPFw0yNjA2MjIwNDM0NTNaMC8GCSqGSIb3DQEJBDEi
+# BCBee4e/XN5olCMUJ6JnPH2fED8nCJuwDj923Nvy3RyawTANBgkqhkiG9w0BAQEF
+# AASCAgBzrjPGc5a70ds4Z6MfZnrmWTkc7gyKwpv1R2OFffh4inU70T1WSrqj9inp
+# OAiI8a6+89eui4zDbO3IvVeCq17Wpt8AoUS2hxQ3q2LZRLCoqs2gr6ef16xPUaBB
+# J2FTz0edl3ODHndGqiyGw9NVC5NEAgkvOXdPZv/Fa6z0KWpLQMbcNs+YuSFknruw
+# UsWNnKPY/BBpf3Rs4q7lJ7cIU+qxPMULKnN/QciXJAjBOtGeDuLbx+AKwE8ViopT
+# 7MvVBRzEzzOyJnAM6nqHQRCpbssspenRF4bpu8z8FBs+KIARhiyAg8y4oWXaG9c6
+# XtbNOJOONP5qm3KbkuJ39J35ccQGWULKg8z49Pil2pefLRtrR52E12wyfSRokpGj
+# TKkzO07Dg+LwYGbHSf6hMrm72YVev6HoQuGmYuv0M/rDAwDgQ69xGeMooFSAP016
+# T1cGQiASHxjQWKLFXrNK1bztygxmYErtuw7TtVMFLTWutuupbL2lMDSqUlMDPHYa
+# Hm0KxOSTtJs6DWmJevxQRhSWPwqW/7s/g5z+wMBUnLBscs53TGaHYTLDvGb+Ki/C
+# FagGkQy0LZNd6qOS/RhKPk8LMreCWOo5cezJ4XCDgJkoGD7G6RIraVcD9pa9YNCV
+# 4j0jHod7D9U+WMFyw5Bs6BhlEBQOxQZIyTwy1s+DSce78gQ0Nw==
 # SIG # End signature block

@@ -63,10 +63,10 @@ function Read-EventCsv {
 
 Write-Host "[*] Event log analysis starting on: $InputDir" -ForegroundColor Cyan
 
-# ── 4688 - Process creation ──────────────────────────────────────────────────
+# -- 4688 - Process creation --------------------------------------------------
 $procs = @(Read-EventCsv 'events_4688.csv')
 $lolbinPattern = 'certutil|bitsadmin|mshta|regsvr32|rundll32|msbuild|wmic|cmstp|installutil|forfiles|pcalua|syncappvpublishingserver'
-# Strings are split to avoid AV content-scanning false-positives — these patterns match event log DATA.
+# Strings are split to avoid AV content-scanning false-positives - these patterns match event log DATA.
 $encPattern    = '-enc|-encodedcommand|-w hi' + 'dden|-windowstyle hi' + 'dden|IE' + 'X|Invoke-' + `
                  'Expression|Down' + 'loadString|Down' + 'loadFile|WebClient'
 foreach ($ev in $procs) {
@@ -85,7 +85,7 @@ foreach ($ev in $procs) {
 }
 Write-Host "    4688 (process creation): $($procs.Count) events -> $($Findings.Count) findings" -ForegroundColor Gray
 
-# ── 4625 - Failed logon / brute-force ────────────────────────────────────────
+# -- 4625 - Failed logon / brute-force ----------------------------------------
 $prevCount = $Findings.Count
 $failedLogons = @(Read-EventCsv 'events_4625.csv')
 if ($failedLogons.Count -ge $BruteForceThreshold) {
@@ -110,7 +110,7 @@ if ($failedLogons.Count -ge $BruteForceThreshold) {
 }
 Write-Host "    4625 (failed logon): $($failedLogons.Count) events -> $(($Findings.Count - $prevCount)) findings" -ForegroundColor Gray
 
-# ── 4648 - Explicit credential use (pass-the-hash indicator) ─────────────────
+# -- 4648 - Explicit credential use (pass-the-hash indicator) -----------------
 $prevCount = $Findings.Count
 $explicit = @(Read-EventCsv 'events_4648.csv')
 foreach ($ev in $explicit) {
@@ -125,7 +125,7 @@ foreach ($ev in $explicit) {
 }
 Write-Host "    4648 (explicit creds): $($explicit.Count) events -> $(($Findings.Count - $prevCount)) findings" -ForegroundColor Gray
 
-# ── 4698/4702 - Scheduled task created/modified ──────────────────────────────
+# -- 4698/4702 - Scheduled task created/modified ------------------------------
 $prevCount = $Findings.Count
 foreach ($eid in @('events_4698.csv','events_4702.csv')) {
     foreach ($ev in @(Read-EventCsv $eid)) {
@@ -141,7 +141,7 @@ foreach ($eid in @('events_4698.csv','events_4702.csv')) {
 }
 Write-Host "    4698/4702 (tasks): -> $(($Findings.Count - $prevCount)) findings" -ForegroundColor Gray
 
-# ── 4720 - New account created ───────────────────────────────────────────────
+# -- 4720 - New account created -----------------------------------------------
 $prevCount = $Findings.Count
 foreach ($ev in @(Read-EventCsv 'events_4720.csv')) {
     Add-EvtFinding -Severity 'High' -Type 'New Account Created' `
@@ -151,7 +151,7 @@ foreach ($ev in @(Read-EventCsv 'events_4720.csv')) {
 }
 Write-Host "    4720 (account create): -> $(($Findings.Count - $prevCount)) findings" -ForegroundColor Gray
 
-# ── 1102 - Security log cleared ──────────────────────────────────────────────
+# -- 1102 - Security log cleared ----------------------------------------------
 $prevCount = $Findings.Count
 foreach ($ev in @(Read-EventCsv 'events_1102.csv')) {
     Add-EvtFinding -Severity 'Critical' -Type 'Security Log Cleared' `
@@ -161,7 +161,7 @@ foreach ($ev in @(Read-EventCsv 'events_1102.csv')) {
 }
 Write-Host "    1102 (log cleared):  -> $(($Findings.Count - $prevCount)) findings" -ForegroundColor Gray
 
-# ── System 7045 - New service installed ──────────────────────────────────────
+# -- System 7045 - New service installed --------------------------------------
 $prevCount = $Findings.Count
 foreach ($ev in @(Read-EventCsv 'events_system_critical.csv')) {
     $msg = [string]$ev.Message
@@ -181,7 +181,7 @@ foreach ($ev in @(Read-EventCsv 'events_system_critical.csv')) {
 }
 Write-Host "    7045/104 (service/log): -> $(($Findings.Count - $prevCount)) findings" -ForegroundColor Gray
 
-# ── PowerShell 4104 - Script block logging ───────────────────────────────────
+# -- PowerShell 4104 - Script block logging -----------------------------------
 $prevCount = $Findings.Count
 # Strings are split to avoid AV content-scanning false-positives on this script.
 # These are patterns we LOOK FOR in event log data, not actions we take.
@@ -203,7 +203,7 @@ foreach ($ev in @(Read-EventCsv 'events_ps_scriptblock.csv')) {
 }
 Write-Host "    4104 (PS script block): -> $(($Findings.Count - $prevCount)) findings" -ForegroundColor Gray
 
-# ── 4624 - Successful logon (type 10 = RDP, type 3 = network) ────────────────
+# -- 4624 - Successful logon (type 10 = RDP, type 3 = network) ----------------
 $prevCount = $Findings.Count
 foreach ($ev in @(Read-EventCsv 'events_4624.csv')) {
     $msg = [string]$ev.Message
@@ -218,7 +218,7 @@ foreach ($ev in @(Read-EventCsv 'events_4624.csv')) {
 }
 Write-Host "    4624 (logon): -> $(($Findings.Count - $prevCount)) findings" -ForegroundColor Gray
 
-# ── Output ────────────────────────────────────────────────────────────────────
+# -- Output --------------------------------------------------------------------
 $stamp = (Get-Date -Format 'yyyyMMdd_HHmmss')
 if ($Findings.Count -gt 0) {
     $jsonPath = Join-Path $OutputDir "findings_evtlog_$stamp.json"
@@ -245,27 +245,27 @@ $Findings | Group-Object Severity | Sort-Object @{E={@('Critical','High','Medium
 # SIG # Begin signature block
 # MIIcoQYJKoZIhvcNAQcCoIIckjCCHI4CAQExDzANBglghkgBZQMEAgEFADB5Bgor
 # BgEEAYI3AgEEoGswaTA0BgorBgEEAYI3AgEeMCYCAwEAAAQQH8w7YFlLCE63JNLG
-# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCCQqnqE2im3rDXA
-# TKgFMy0PJ2CrTogA7ksSK94CssqW2qCCFrQwggN2MIICXqADAgECAhBa5MQyEl22
-# qUV1bZluOcpOMA0GCSqGSIb3DQEBCwUAMFMxGjAYBgNVBAsMEUluY2lkZW50IFJl
+# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCANBTkSCLhy5+/m
+# 4gpogll5iNet1OFmkSW0FPYa0sDic6CCFrQwggN2MIICXqADAgECAhAbL3xr3F9b
+# nkbveZC/LiR8MA0GCSqGSIb3DQEBCwUAMFMxGjAYBgNVBAsMEUluY2lkZW50IFJl
 # c3BvbnNlMRMwEQYDVQQKDApJUiBUb29sa2l0MSAwHgYDVQQDDBdJUiBUb29sa2l0
-# IENvZGUgU2lnbmluZzAeFw0yNjA2MjAwMDU5NDZaFw0zMTA2MjAwMTA5NDZaMFMx
+# IENvZGUgU2lnbmluZzAeFw0yNjA2MjIwNDI0NDVaFw0zMTA2MjIwNDM0NDVaMFMx
 # GjAYBgNVBAsMEUluY2lkZW50IFJlc3BvbnNlMRMwEQYDVQQKDApJUiBUb29sa2l0
 # MSAwHgYDVQQDDBdJUiBUb29sa2l0IENvZGUgU2lnbmluZzCCASIwDQYJKoZIhvcN
-# AQEBBQADggEPADCCAQoCggEBAJ1nFbqBzQLbEhUUTT10Lrva+ooE/uVqzTJbGk5/
-# xh3zYBEAaRil7obceqCWtDg6KSjbDQP8wto42fHUK8tp0FU0NEi2+rkWHfcpeasm
-# z2e+UFQMDlXRcxg7dqe+08OB4pFhwrHSPo0m7HZAgtpHd02POka7jaYVoAnScg7i
-# LuZiRSJ3tJKZu1KCSTntV+LbicnowTlaDEvr7JQzSVs+5BpNadU3n/ujzH088Mgm
-# CoXooQpF12SzbZNCZ+kbgza6bNMbEHNGkLr9S0vHQD95oKPWF7YuOu7jqtkuCOZc
-# KYYi4nOXFwLqXmJ+sqqpR2NrrfMkz4VaALGIZ93o10CHWDkCAwEAAaNGMEQwDgYD
-# VR0PAQH/BAQDAgeAMBMGA1UdJQQMMAoGCCsGAQUFBwMDMB0GA1UdDgQWBBQRXBKC
-# VXuhcK7rCDzb/6SAfPGwvDANBgkqhkiG9w0BAQsFAAOCAQEAlZhDvun+4lQ0yd2C
-# +pAFD3B2/l2N9hArAcHhp6DaO48NSIT3eyyhGrfk8f3lDVhvjEbUDDmb6Oe67rBN
-# 3W7Dp1Y+W8Z96kC3miq7UbmVTGkiQGZFwi0KJ8tw++//vlU3zlW9nhqwFxzm7DfL
-# zECzv6bnd9Ri+1R4zhvkd5BLTuwLjPLkzbOTdsGwbXWWOK2gTTCr82I7G9xcq9Gv
-# qAcoJAHVEiNKt7p7Y+ScDL/AZGBMCBTsN9gcAoIgq22EWBHHV02HmPfuYyddaq1c
-# Lmjot0+5wVoPVl4wNktght1WVHDlk3EpEJF5qc7Yhl3YtniIEHQoO8BkWykpFDhy
-# q5wz7TCCBY0wggR1oAMCAQICEA6bGI750C3n79tQ4ghAGFowDQYJKoZIhvcNAQEM
+# AQEBBQADggEPADCCAQoCggEBAKuTSorzjXf0qc4qX04KtYn2ErVj9RAkn/1f/9YN
+# llrRj0s3urh/LnWmHn4vUjPrDTzHXUx4udOclWNlv52uCMAfXKZR3qD73OCHHQ2l
+# +1s4JqrAdGhr6QPyIhCDwl7wqQUfekQtBep+SqbM0vkbvup3WKgol+c3fIUxvM8E
+# bPLg5CcNWug6Twj+Wn1FJidJihmYARSKT5PFv32BLbffUpuvdWXxzRIRv8c4EE+S
+# bWs3lTiCGrp1X33mXYiMRNAiF5ofrCJwRA7LESh4TCqXWDSvs+KFBi1ZxEnLxmUk
+# 1Wrzq11umlIzoJhnEN0VyBvLK6X40uTF50piU+5kGy9kZlkCAwEAAaNGMEQwDgYD
+# VR0PAQH/BAQDAgeAMBMGA1UdJQQMMAoGCCsGAQUFBwMDMB0GA1UdDgQWBBSpc1pf
+# XTSlgxdtXKDrlumz7H67TjANBgkqhkiG9w0BAQsFAAOCAQEAdPAxdgyk/YzF72lK
+# 4P1I3Lwjice2yAR0aoXSEP5gO/xnAvuqCiAcdPfJhqMrrfq5iFLqTuWSfz+k9irn
+# hjzyWgmo2GUrQ8BVRoNAw7HpTJo7Rw8+FfDzyy+stq9UKWrkflHqwb7oBD+aBs/5
+# ZccFKZi8oeV79CCTGdwXKYgE+xYbV//Twr7rpMbVUqbchEDdZXEzT2GdEUd5B02L
+# bDGJ4Gjz8AtCFcSXWQlLnAQxd5CJVFHDkyfkEs2VvBPtR/MBCF3NiNufb8HgClhS
+# ZHayqVVZhUd+NS7/orBY5M1Ioc0/kGiNO3nlWf1IlAPk/jsILweFZkUO0wBTot/O
+# b18zszCCBY0wggR1oAMCAQICEA6bGI750C3n79tQ4ghAGFowDQYJKoZIhvcNAQEM
 # BQAwZTELMAkGA1UEBhMCVVMxFTATBgNVBAoTDERpZ2lDZXJ0IEluYzEZMBcGA1UE
 # CxMQd3d3LmRpZ2ljZXJ0LmNvbTEkMCIGA1UEAxMbRGlnaUNlcnQgQXNzdXJlZCBJ
 # RCBSb290IENBMB4XDTIyMDgwMTAwMDAwMFoXDTMxMTEwOTIzNTk1OVowYjELMAkG
@@ -369,31 +369,31 @@ $Findings | Group-Object Severity | Sort-Object @{E={@('Critical','High','Medium
 # y2ueIu9THFVkT+um1vshETaWyQo8gmBto/m3acaP9QsuLj3FNwFlTxq25+T4QwX9
 # xa6ILs84ZPvmpovq90K8eWyG2N01c4IhSOxqt81nMYIFQzCCBT8CAQEwZzBTMRow
 # GAYDVQQLDBFJbmNpZGVudCBSZXNwb25zZTETMBEGA1UECgwKSVIgVG9vbGtpdDEg
-# MB4GA1UEAwwXSVIgVG9vbGtpdCBDb2RlIFNpZ25pbmcCEFrkxDISXbapRXVtmW45
-# yk4wDQYJYIZIAWUDBAIBBQCggYQwGAYKKwYBBAGCNwIBDDEKMAigAoAAoQKAADAZ
+# MB4GA1UEAwwXSVIgVG9vbGtpdCBDb2RlIFNpZ25pbmcCEBsvfGvcX1ueRu95kL8u
+# JHwwDQYJYIZIAWUDBAIBBQCggYQwGAYKKwYBBAGCNwIBDDEKMAigAoAAoQKAADAZ
 # BgkqhkiG9w0BCQMxDAYKKwYBBAGCNwIBBDAcBgorBgEEAYI3AgELMQ4wDAYKKwYB
-# BAGCNwIBFTAvBgkqhkiG9w0BCQQxIgQgXGUdSWq0dNRegjSs9qnRnScEwbrDbcZr
-# NJ4KULL9itgwDQYJKoZIhvcNAQEBBQAEggEAadC1PmkxOs8qQIvHYiAPr6a6mHMw
-# sF3/LbyCCbqPIJqF3S2bDvQ7zut9+vt3/qqGy8ymHR9YCawbVuFZ4G8tSi30tZjA
-# 0A1Ul1TIoxtuNxSg5p9I+qv3/bxpnt/ayLl8iUZ3offQgaei1PsDFllAgYu0X1r9
-# sULmncNYXejfVqC2emo/J1sS1EB0EOb5ShNh1xYH8hfXucrkId/HuCrFMqSrqPqf
-# EQHBeIuGNr+V+u0UWI84vvov1yhikVgChNMFbmJ5/qRMkLUg6F1U37wWtjVyXe6/
-# VIJjp/l6jUgPNv3Brb330F9oDMdkaTBWH7AT5cVaP+iP00yExCQ8eutgaaGCAyYw
+# BAGCNwIBFTAvBgkqhkiG9w0BCQQxIgQg72AKOWQ433YlTemybUsRdWejqiACUNPi
+# gAzVkKhp/LowDQYJKoZIhvcNAQEBBQAEggEAafwSCZ971+UOUjL/OgCh9ONIuJit
+# qC+lqlLJxejqCeO8yZOiY4nVmuwxpBN26kli2DpaRZi98YytELpCXk5XQ1JzjD5b
+# a11etbDpwX/5iACyoUpirDf/muac969BSGdeeK0ChqyORJNXW8g1KRGQoxpOBhqn
+# QHr/W0lgOfvtHNvq/zBDrNdgVY9pyPhbdXT0ZfN8/NjzqBrXJv/qsINs4tgkOnmS
+# KgK5RdiM1MxIEccK6gdUnNlycucXTEqri4WxBYmRAIsA/DY/zXohrGpmEHPYzQvx
+# 10qt4hzWWxFoNjm2Ub1ik+bvu9XgVga0liJCag5WzrawriI+SMZfVZqLtaGCAyYw
 # ggMiBgkqhkiG9w0BCQYxggMTMIIDDwIBATB9MGkxCzAJBgNVBAYTAlVTMRcwFQYD
 # VQQKEw5EaWdpQ2VydCwgSW5jLjFBMD8GA1UEAxM4RGlnaUNlcnQgVHJ1c3RlZCBH
 # NCBUaW1lU3RhbXBpbmcgUlNBNDA5NiBTSEEyNTYgMjAyNSBDQTECEAqA7xhLjfEF
 # gtHEdqeVdGgwDQYJYIZIAWUDBAIBBQCgaTAYBgkqhkiG9w0BCQMxCwYJKoZIhvcN
-# AQcBMBwGCSqGSIb3DQEJBTEPFw0yNjA2MjAwMTE0MzNaMC8GCSqGSIb3DQEJBDEi
-# BCC17fsmEh56DUDPRLp2n3jD4pD2F5ZG/R3gjLkUJbd0rDANBgkqhkiG9w0BAQEF
-# AASCAgCY8si3yWpi/k3oGLfRYGPREl7G11ZapczWMGJdQb3V7eRKy7kNWi4PeNEg
-# IjNo50r8B5/3o9vo/G8jjFRwNsdmryVTbEe3HoJd1oG/SXtGlChrayzmCH9X2u0L
-# e2ecQSUR3/MlVRL1cY4MHELev2KAQdyPW5NTnXjnjZHlHB0AxznsIGGqlbvXYKDA
-# wIEHpv4gYjgGGfUpfTzfqu1sJK0DXeKUMEly7e/VNYGlfCy4hO460EfW9kE6Zosl
-# /Ly1HDd+avrXIdJvakt3OgZZOFLxVedSHBhTLUZXiNVkIYaChaRNpRDlanIgQjmr
-# 7uOu70zKt+KlYRIdTdjMs6hyEQcuMqVWZ2C6CEljggdDvtxWNHU/iolVm3TOzm+r
-# qOahKGNiAkDZLQSUiuiXFT5zulXwtoRs93k8vM52mNRHPuhfdcy0iNHnscWJbmsN
-# t/VKB9S4wz07DonRhceMByWdqdzsBLR/7GtZyPEo+lAYArNCjONnATMwSydjsQIA
-# YZb67DLB5zg5V3Rq05/i79nfk8bIM6cOp/i0cnk80+WiTQbUsf9hrKfjFvA4cH9o
-# qZPIS/E6tDj1LnALcaQAJTVe6HTzV8m9aAiYBzR8touSvBznqAIOyvAjgTgiy4Tp
-# MlPe5SnibOyTxpcwMJfGfxFUiFM3cdr24c5mK+p8bt5L5AbBaQ==
+# AQcBMBwGCSqGSIb3DQEJBTEPFw0yNjA2MjIwNDM0NTVaMC8GCSqGSIb3DQEJBDEi
+# BCBUp85xC2h3pIGc3IVh5083Om5rnET7dUir+lcAlFOQ3zANBgkqhkiG9w0BAQEF
+# AASCAgB3cCiOdUB2kedqVQrNV3zn7Ng+oocW+GBc0ivZhLxu47WNk8zHRnbc4YN5
+# Y8eJ4ypcpa01o6HCsnWx3ltudJtfTh999xRrppHixh009MYjW3RAT3V+bfU8PH/s
+# 0kNSnEr0tImCTZYCdH8h03i0APylWcjH+hWJbuxs5Gp+rFfLPSt2S8zYPssVaXa6
+# s4k6mzeOCx0tWX9Zi0bTkkdBo7F5hOlR5F5D0at5XlEjJF2CDVmqBijVWzSpQNMM
+# PGCsyfm0BPumdOJxTxAAN6yHAnkH8HPFBP1v2YrxBqzMQ1sCEZ3Dj1wphoD+yNFR
+# zsx89GFoB8SXp6soeAGol1T81+z8AsRFDcY+d3roccI9zUN0j9MzRHNBdBJPoWkn
+# xt5Nt1jXCr9WYwjIqCcJ2IUe3aH2s5lwYvqJq47DXktCh6f1cMP48q5QUMiYxf42
+# x7sGb+A18JwitgqKSleYC7gQYicen5jrOtIru0tQw2ugOj9WRyVFXyQiIzn751PQ
+# XUP9tU2m5iK9XsyAUFyuXje/Sym7X+VG5LUCkWIWxS8R9Ox65Q9n8YfBUvcIgPqD
+# cbbmdgmPJF6/KsxvH4h0I2KLDFAoxqd7mmbPO50dC74sUqZ143F0XKeREa478M+r
+# hPQoO+pNahoE1EuaGhfvka8ei0burdGiYK2Yj2nR86O91jCuwQ==
 # SIG # End signature block

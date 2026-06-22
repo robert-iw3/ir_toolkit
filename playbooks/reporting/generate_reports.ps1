@@ -82,13 +82,13 @@ $ProtectedAccounts = @('system','local service','network service','administrator
     'defaultaccount','wdagutilityaccount','trustedinstaller','root','daemon','nobody')
 
 # Finding types that directly implicate an account in malicious activity.
-# Process/file/registry findings do NOT warrant auto-revoking the owner account —
+# Process/file/registry findings do NOT warrant auto-revoking the owner account -
 # they may belong to the machine itself. Require an explicit account-centric signal.
 $AccountCentricTypes = @(
-    'Explicit Credential Use',       # 4648 — someone used creds explicitly (pass-the-hash, runas)
+    'Explicit Credential Use',       # 4648 - someone used creds explicitly (pass-the-hash, runas)
     'Brute Force Attempt',           # 4625 repeated failures
-    'New Account Created',           # 4720 — attacker created a backdoor account
-    'Security Log Cleared',          # 1102 — attacker covered tracks
+    'New Account Created',           # 4720 - attacker created a backdoor account
+    'Security Log Cleared',          # 1102 - attacker covered tracks
     'Suspicious Task Created',       # scheduled task with user context
     'Suspicious Task Modified',
     'Remote Access Tool',            # RMM / RAT with user session
@@ -126,7 +126,7 @@ function Get-ImplicatedPrincipals($tpFindings, $HostName) {
             $shouldRevoke    = (-not $protected) -and $accountCentric
             $reason = if ($protected)      { 'built-in/system account - review only' }
                       elseif ($accountCentric) { "implicated by $ftype finding" }
-                      else                { "process/file finding — review before revoking (finding: $ftype)" }
+                      else                { "process/file finding - review before revoking (finding: $ftype)" }
             $out += [ordered]@{ name=$name; domain=$dom; type=$ptype; source=$ftype
                 auto_revoke=$shouldRevoke
                 reason=$reason }
@@ -176,9 +176,12 @@ $adjPath = Get-NewestJson $HostFolder 'Adjudication_*.json'
 $comPath = Get-NewestJson $HostFolder 'Combined_Findings_*.json'
 $raPath  = Get-NewestJson $HostFolder 'RemoteAccess_Findings_*.json'
 
-$findings = if ($adjPath) { Read-Findings $adjPath } elseif ($comPath) { Read-Findings $comPath } else { @() }
-$remote   = if ($raPath) { Read-Findings $raPath } else { @() }
-if (-not $remote.Count -and $comPath) {
+# @(...) forces an array: an if-block that returns an empty @() otherwise collapses to
+# $null, which makes .Count throw under StrictMode on a minimal/zero-finding folder
+# (e.g. the analyst-box memory-only rollup).
+$findings = @(if ($adjPath) { Read-Findings $adjPath } elseif ($comPath) { Read-Findings $comPath })
+$remote   = @(if ($raPath) { Read-Findings $raPath })
+if ($remote.Count -eq 0 -and $comPath) {
     $remote = Read-Findings $comPath | Where-Object { (Field $_ @('Type')) -in @('Remote Access Tool','Defender Disabled','LOLBin Execution','Browser Artifact') }
 }
 
@@ -235,6 +238,43 @@ $c2 = foreach ($r in $relays) {
     defender_realtime_disabled=$defenderOff
 } | ConvertTo-Json -Depth 5 | Out-File -FilePath (Join-Path $HostFolder 'IOCs.json') -Encoding UTF8
 
+# -- ATT&CK Navigator layer (attck_navigator_layer.json) ----------------------
+# Exports a Navigator v4.9 compatible JSON layer for the techniques observed.
+# Open at https://mitre-attack.github.io/attack-navigator/ to visualise coverage.
+$navTechniques = @($techniques.Keys | ForEach-Object {
+    $tid = $_
+    [ordered]@{
+        techniqueID = $tid
+        tactic      = $null          # Navigator resolves tactic from technique ID
+        score       = 1              # 1 = observed
+        color       = ''
+        comment     = "Observed in $IncidentId"
+        enabled     = $true
+        metadata    = @()
+        links       = @()
+        showSubtechniques = $false
+    }
+})
+[ordered]@{
+    name        = "IR Toolkit - $IncidentId"
+    versions    = [ordered]@{ attack = '14'; navigator = '4.9'; layer = '4.5' }
+    domain      = 'enterprise-attack'
+    description = "ATT&CK techniques observed during $IncidentId on $HostName. Generated $(((Get-Date).ToUniversalTime().ToString('s')) + 'Z')."
+    filters     = [ordered]@{ platforms = @('Windows','Linux','macOS','Cloud') }
+    sorting     = 0
+    layout      = [ordered]@{ layout = 'side'; aggregateFunction = 'average'; showID = $true; showName = $true; showAggregateScores = $false; countUnscored = $false }
+    hideDisabled = $false
+    techniques  = $navTechniques
+    gradient    = [ordered]@{ colors = @('#ff6666','#ffe766','#8ec843'); minValue = 0; maxValue = 1 }
+    legendItems = @()
+    metadata    = @()
+    links       = @()
+    showTacticRowBackground = $false
+    tacticRowBackground     = '#dddddd'
+    selectTechniquesAcrossTactics = $false
+    selectSubtechniquesWithParent = $false
+} | ConvertTo-Json -Depth 6 | Out-File -FilePath (Join-Path $HostFolder 'attck_navigator_layer.json') -Encoding UTF8
+
 # -- Principals.json (implicated accounts to revoke at eradication) ------------
 $principals = Get-ImplicatedPrincipals $tp $HostName
 [ordered]@{
@@ -286,6 +326,31 @@ if ($tp.Count) {
     }
 } else { $md.Add("No true-positive-class findings. **No eradication required.**") }
 $md.Add(""); $md.Add("---"); $md.Add("")
+
+# -- Memory YARA matches, clustered per process (count + rules per PID) --------
+# A process can match several rules; collapse to one row per PID so the report
+# stays readable (e.g. a host with 100+ matches across processes).
+$yaraMem = @($findings | Where-Object { (Field $_ @('Type')) -eq 'YARA Match (Memory)' })
+if ($yaraMem.Count) {
+    $clusters = [ordered]@{}
+    foreach ($f in $yaraMem) {
+        $tgt = Field $f @('Target')                       # "PID 1234 (proc.exe)"
+        if (-not $clusters.Contains($tgt)) {
+            $clusters[$tgt] = [System.Collections.Generic.List[string]]::new()
+        }
+        $m = [regex]::Match((Field $f @('Details')), 'Rule:\s*([^|]+?)(?:\s*\||$)')
+        if ($m.Success) { [void]$clusters[$tgt].Add($m.Groups[1].Value.Trim()) }
+    }
+    $md.Add("## YARA matches by process (memory)"); $md.Add("")
+    $md.Add("$($yaraMem.Count) match(es) across $($clusters.Count) process(es), clustered per PID."); $md.Add("")
+    $md.Add("| Process (PID) | Hits | Rules |"); $md.Add("|---|---:|---|")
+    foreach ($k in ($clusters.Keys | Sort-Object { $clusters[$_].Count } -Descending)) {
+        $rules = ($clusters[$k] | Select-Object -Unique) -join ', '
+        $md.Add("| $k | $($clusters[$k].Count) | $rules |")
+    }
+    $md.Add(""); $md.Add("---"); $md.Add("")
+}
+
 $md.Add("## 4. Adjudication funnel"); $md.Add(""); $md.Add("| Verdict | Count |"); $md.Add("|---|---:|")
 foreach ($v in $VerdictOrder) { if ($funnel[$v]) { $md.Add("| $v | $($funnel[$v]) |") } }
 foreach ($v in $funnel.Keys) { if ($VerdictOrder -notcontains $v) { $md.Add("| $v | $($funnel[$v]) |") } }
@@ -339,34 +404,20 @@ $graphPriorityTypes = @(
     'Suspicious Task Created','Suspicious Task Modified','Suspicious Service Install',
     'High Entropy File','Timestomped File','Alternate Data Stream','YARA Match'
 )
-# Paths that generate known-benign findings - skip these clusters
+# Attack graph cluster exclusions - ONLY paths that are impossible attack vectors.
+# PRINCIPLE (tuning review 2026-06-21): supply chain paths (node_modules, site-packages,
+# NuGet, $Recycle.Bin, .cargo, .nuget, chocolatey), GPU vendor dirs, IDE extension caches,
+# and package manager trees are NOT filtered here - these are all real attack surfaces.
+# Attackers actively use them for staging, supply-chain compromise, and LOLBin hijacking.
+# The full finding set is always in Incident_Report.md; this filter only affects graph layout.
 $noisePathPattern = '(?i)(' +
-    # Windows system update pipelines — build timestamps predate install by design
-    'Windows.Defender.Platform|Windows\\Installer|Windows\\assembly|' +
-    'ProgramData\\Microsoft\\|' +
-    # Language / runtime toolchains
-    '\\\.cargo\\|\\\.nuget\\|\\\.rustup\\|' +
-    '\\lib\\net(?:standard)?\d|\\ref\\net(?:standard)?\d|\\runtimes\\|' +
-    '\\dotnet\\shared\\|\\dotnet\\sdk\\|' +
-    # Versioned framework locale subdirs: \10.0.8\zh-Hans, \4.8.1\de, etc.
-    '\\\d+\.\d+[\.\d]*\\[a-z]{2}(-[A-Za-z]{2,6})?$|' +
-    # C++ package managers
-    'x64-windows\\|x86-windows\\|arm64-windows\\|\\vcpkg\\|\\\.conan\\|' +
-    # Python / Ruby / Go / Node toolchains
-    'site-packages\\|gem\\gems\\|go\\pkg\\mod\\|node_modules\\|__pycache__\\|' +
-    # IDE caches — VS Code, JetBrains, Visual Studio
-    'AppData\\Roaming\\Code\\|AppData\\Local\\Microsoft\\|' +
-    'AppData\\Roaming\\JetBrains\\|AppData\\Local\\JetBrains\\|' +
-    'AppData\\Local\\Programs\\Microsoft VS Code\\|' +
-    # Package / delivery caches
-    'NuGet\\packages|ProgramData\\Package.Cache|' +
-    'AppData\\Local\\Temp\\chocolatey|' +
-    # Recycle Bin and Windows Installer GUID patch cache
-    '\\\$Recycle\.Bin\\|\\[0-9A-Fa-f]{32}\\|' +
-    # GPU vendor app directories (NVIDIA, AMD, Intel GPU apps)
-    '\\NvApp\\|\\NVIDIA\\|NvContainer|NvApp\.MessageBus|' +
-    # VS Code extension compiled node binaries (in non-Roaming paths)
-    'cloudformation-languageserver|language-server.*win32-x64-node)'
+    # .NET SDK/runtime library trees - build-pipeline timestamps by design; CLR-managed
+    '\\lib\\net(?:standard)?\d|\\ref\\net(?:standard)?\d|\\runtimes\\win|' +
+    '\\dotnet\\shared\\|\\dotnet\\sdk\\|\\dotnet\\packs\\|' +
+    # .NET Global Assembly Cache - CLR-managed; requires kernel-level access to tamper
+    'Windows\\assembly\\|' +
+    # Versioned framework locale subdirs: \4.8.1\de, \10.0.8\zh-Hans - locale resource DLLs
+    '\\\d+\.\d+[\.\d]*\\[a-z]{2}(-[A-Za-z]{2,6})?$)'
 
 # Score a cluster for analyst interest
 function Get-ClusterScore {
@@ -486,7 +537,7 @@ foreach ($cl in $topClusters) {
     # Distinct finding types in this cluster
     $types = @($items | ForEach-Object { Field $_ @('Type') } | Select-Object -Unique)
 
-    # Human-readable display label — full key used for noise matching, shortened here
+    # Human-readable display label - full key used for noise matching, shortened here
     $keyLabel = Format-ClusterLabel -Key $key
 
     # MITRE from most-represented type
@@ -663,32 +714,32 @@ $rt -join "`n" | Out-File -FilePath (Join-Path $HostFolder 'Retrospective.md') -
 Write-Host "[+] Incident_Report.md  ($($findings.Count) findings, $($tp.Count) true-positive-class)" -ForegroundColor Green
 Write-Host "[+] Attack_Graph.md" -ForegroundColor Green
 Write-Host "[+] Retrospective.md" -ForegroundColor Green
-Write-Host "[+] IOCs.json  ($($relays.Count) C2 relay(s))" -ForegroundColor Green
+Write-Host "[+] IOCs.json  ($($relays.Count) C2 relay(s))" -ForegroundColor Gree
 
 # SIG # Begin signature block
 # MIIcoQYJKoZIhvcNAQcCoIIckjCCHI4CAQExDzANBglghkgBZQMEAgEFADB5Bgor
 # BgEEAYI3AgEEoGswaTA0BgorBgEEAYI3AgEeMCYCAwEAAAQQH8w7YFlLCE63JNLG
-# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCAR8nbFvart/xjl
-# C432AHJQcLdrt2nY3/m5H40qU9Bo+6CCFrQwggN2MIICXqADAgECAhBa5MQyEl22
-# qUV1bZluOcpOMA0GCSqGSIb3DQEBCwUAMFMxGjAYBgNVBAsMEUluY2lkZW50IFJl
+# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCDQvxlwByuBCsqx
+# X4zu7KqduAhInhcWOjMt8tlJ8ZmS1aCCFrQwggN2MIICXqADAgECAhAbL3xr3F9b
+# nkbveZC/LiR8MA0GCSqGSIb3DQEBCwUAMFMxGjAYBgNVBAsMEUluY2lkZW50IFJl
 # c3BvbnNlMRMwEQYDVQQKDApJUiBUb29sa2l0MSAwHgYDVQQDDBdJUiBUb29sa2l0
-# IENvZGUgU2lnbmluZzAeFw0yNjA2MjAwMDU5NDZaFw0zMTA2MjAwMTA5NDZaMFMx
+# IENvZGUgU2lnbmluZzAeFw0yNjA2MjIwNDI0NDVaFw0zMTA2MjIwNDM0NDVaMFMx
 # GjAYBgNVBAsMEUluY2lkZW50IFJlc3BvbnNlMRMwEQYDVQQKDApJUiBUb29sa2l0
 # MSAwHgYDVQQDDBdJUiBUb29sa2l0IENvZGUgU2lnbmluZzCCASIwDQYJKoZIhvcN
-# AQEBBQADggEPADCCAQoCggEBAJ1nFbqBzQLbEhUUTT10Lrva+ooE/uVqzTJbGk5/
-# xh3zYBEAaRil7obceqCWtDg6KSjbDQP8wto42fHUK8tp0FU0NEi2+rkWHfcpeasm
-# z2e+UFQMDlXRcxg7dqe+08OB4pFhwrHSPo0m7HZAgtpHd02POka7jaYVoAnScg7i
-# LuZiRSJ3tJKZu1KCSTntV+LbicnowTlaDEvr7JQzSVs+5BpNadU3n/ujzH088Mgm
-# CoXooQpF12SzbZNCZ+kbgza6bNMbEHNGkLr9S0vHQD95oKPWF7YuOu7jqtkuCOZc
-# KYYi4nOXFwLqXmJ+sqqpR2NrrfMkz4VaALGIZ93o10CHWDkCAwEAAaNGMEQwDgYD
-# VR0PAQH/BAQDAgeAMBMGA1UdJQQMMAoGCCsGAQUFBwMDMB0GA1UdDgQWBBQRXBKC
-# VXuhcK7rCDzb/6SAfPGwvDANBgkqhkiG9w0BAQsFAAOCAQEAlZhDvun+4lQ0yd2C
-# +pAFD3B2/l2N9hArAcHhp6DaO48NSIT3eyyhGrfk8f3lDVhvjEbUDDmb6Oe67rBN
-# 3W7Dp1Y+W8Z96kC3miq7UbmVTGkiQGZFwi0KJ8tw++//vlU3zlW9nhqwFxzm7DfL
-# zECzv6bnd9Ri+1R4zhvkd5BLTuwLjPLkzbOTdsGwbXWWOK2gTTCr82I7G9xcq9Gv
-# qAcoJAHVEiNKt7p7Y+ScDL/AZGBMCBTsN9gcAoIgq22EWBHHV02HmPfuYyddaq1c
-# Lmjot0+5wVoPVl4wNktght1WVHDlk3EpEJF5qc7Yhl3YtniIEHQoO8BkWykpFDhy
-# q5wz7TCCBY0wggR1oAMCAQICEA6bGI750C3n79tQ4ghAGFowDQYJKoZIhvcNAQEM
+# AQEBBQADggEPADCCAQoCggEBAKuTSorzjXf0qc4qX04KtYn2ErVj9RAkn/1f/9YN
+# llrRj0s3urh/LnWmHn4vUjPrDTzHXUx4udOclWNlv52uCMAfXKZR3qD73OCHHQ2l
+# +1s4JqrAdGhr6QPyIhCDwl7wqQUfekQtBep+SqbM0vkbvup3WKgol+c3fIUxvM8E
+# bPLg5CcNWug6Twj+Wn1FJidJihmYARSKT5PFv32BLbffUpuvdWXxzRIRv8c4EE+S
+# bWs3lTiCGrp1X33mXYiMRNAiF5ofrCJwRA7LESh4TCqXWDSvs+KFBi1ZxEnLxmUk
+# 1Wrzq11umlIzoJhnEN0VyBvLK6X40uTF50piU+5kGy9kZlkCAwEAAaNGMEQwDgYD
+# VR0PAQH/BAQDAgeAMBMGA1UdJQQMMAoGCCsGAQUFBwMDMB0GA1UdDgQWBBSpc1pf
+# XTSlgxdtXKDrlumz7H67TjANBgkqhkiG9w0BAQsFAAOCAQEAdPAxdgyk/YzF72lK
+# 4P1I3Lwjice2yAR0aoXSEP5gO/xnAvuqCiAcdPfJhqMrrfq5iFLqTuWSfz+k9irn
+# hjzyWgmo2GUrQ8BVRoNAw7HpTJo7Rw8+FfDzyy+stq9UKWrkflHqwb7oBD+aBs/5
+# ZccFKZi8oeV79CCTGdwXKYgE+xYbV//Twr7rpMbVUqbchEDdZXEzT2GdEUd5B02L
+# bDGJ4Gjz8AtCFcSXWQlLnAQxd5CJVFHDkyfkEs2VvBPtR/MBCF3NiNufb8HgClhS
+# ZHayqVVZhUd+NS7/orBY5M1Ioc0/kGiNO3nlWf1IlAPk/jsILweFZkUO0wBTot/O
+# b18zszCCBY0wggR1oAMCAQICEA6bGI750C3n79tQ4ghAGFowDQYJKoZIhvcNAQEM
 # BQAwZTELMAkGA1UEBhMCVVMxFTATBgNVBAoTDERpZ2lDZXJ0IEluYzEZMBcGA1UE
 # CxMQd3d3LmRpZ2ljZXJ0LmNvbTEkMCIGA1UEAxMbRGlnaUNlcnQgQXNzdXJlZCBJ
 # RCBSb290IENBMB4XDTIyMDgwMTAwMDAwMFoXDTMxMTEwOTIzNTk1OVowYjELMAkG
@@ -792,31 +843,31 @@ Write-Host "[+] IOCs.json  ($($relays.Count) C2 relay(s))" -ForegroundColor Gree
 # y2ueIu9THFVkT+um1vshETaWyQo8gmBto/m3acaP9QsuLj3FNwFlTxq25+T4QwX9
 # xa6ILs84ZPvmpovq90K8eWyG2N01c4IhSOxqt81nMYIFQzCCBT8CAQEwZzBTMRow
 # GAYDVQQLDBFJbmNpZGVudCBSZXNwb25zZTETMBEGA1UECgwKSVIgVG9vbGtpdDEg
-# MB4GA1UEAwwXSVIgVG9vbGtpdCBDb2RlIFNpZ25pbmcCEFrkxDISXbapRXVtmW45
-# yk4wDQYJYIZIAWUDBAIBBQCggYQwGAYKKwYBBAGCNwIBDDEKMAigAoAAoQKAADAZ
+# MB4GA1UEAwwXSVIgVG9vbGtpdCBDb2RlIFNpZ25pbmcCEBsvfGvcX1ueRu95kL8u
+# JHwwDQYJYIZIAWUDBAIBBQCggYQwGAYKKwYBBAGCNwIBDDEKMAigAoAAoQKAADAZ
 # BgkqhkiG9w0BCQMxDAYKKwYBBAGCNwIBBDAcBgorBgEEAYI3AgELMQ4wDAYKKwYB
-# BAGCNwIBFTAvBgkqhkiG9w0BCQQxIgQghIW+PAcPpIpopPlLOAm/mpOfyqiP3hRj
-# /NJVKu9Is/owDQYJKoZIhvcNAQEBBQAEggEAGqsIQIFl6HX7HL41yqldJV1EJycq
-# zHrVbj0M8vhOHg7uUH8H9EugHUsHQAsPjg+ON1jXqx3CcRiQqyjVb5VqoONNa5u9
-# pbCWUL+0vOrQ6sE6yNsAA5GMBuL4DEFR9HTK3/XycZYyhVurReaSGUl964TmDEzU
-# ujfTZ37ld4zSmNSN/6NsdjWx5UKG1iINZA53VNCLHO5K/11F5a0Dw0NEHTZ/2mKS
-# WSe4dwKvZn+SovCEF6sas1e9zSdUaFjFSQBjwgY1dGPUiPHYp/VROe0X6NEBO5ag
-# f9NTEUz99hfoxY6U0FVj101/2SY578qei7mkcy0idkDqkcQ/QlXEwG9ZK6GCAyYw
+# BAGCNwIBFTAvBgkqhkiG9w0BCQQxIgQgZpntMxo4VrYYA5uyYkKwFKZj047MtoHJ
+# 3T4g9z7Zd7QwDQYJKoZIhvcNAQEBBQAEggEAidwqLro5pZeVm8pNbngy2uXby4Xu
+# TpkauX1ZBluUfrTN0LnutWyv1kf5vcTqAcONB/H6ZjxkAQ5hEszDacKcMclMji/C
+# zTmWQaRiPsenmKP6COW7qk0OsTrJpSEZ21F9dZViJ1AWj7iM8R7PzfZPCLUUvVwz
+# c9VZIuFsiQFUaLQtzRq8OCM57JVhYIxt8nTm3GAXiTlg4xlQ04myiYmlDkR5tPj1
+# gbjlpe6bDPEqXaTT54A9xBz2kEp2kkAMMjqykJN4NBxM+asZFmWlMjheOeSHG2tW
+# Xrk1E4NK5Z4sTdmxLlk3U1fimq1PalRywYG6wdhwMywbh2Vtc8i9LeWboKGCAyYw
 # ggMiBgkqhkiG9w0BCQYxggMTMIIDDwIBATB9MGkxCzAJBgNVBAYTAlVTMRcwFQYD
 # VQQKEw5EaWdpQ2VydCwgSW5jLjFBMD8GA1UEAxM4RGlnaUNlcnQgVHJ1c3RlZCBH
 # NCBUaW1lU3RhbXBpbmcgUlNBNDA5NiBTSEEyNTYgMjAyNSBDQTECEAqA7xhLjfEF
 # gtHEdqeVdGgwDQYJYIZIAWUDBAIBBQCgaTAYBgkqhkiG9w0BCQMxCwYJKoZIhvcN
-# AQcBMBwGCSqGSIb3DQEJBTEPFw0yNjA2MjAwMTE0MjhaMC8GCSqGSIb3DQEJBDEi
-# BCA7MPTxyk5xoTNc1ULLmphNhy1ePF3wdq5XW68GkLzWHjANBgkqhkiG9w0BAQEF
-# AASCAgA0XrORDZV8JNUcytcBWE+vEJ7Ni2G0V8EgPSwdan6pIQ2uJQZRafJshV2r
-# M3XUTvGG+Fz7TAXYzfvmY3Jk1Y2SsFUqTluEO6B2TFOC7sO17MeDDr88A4fyHZ/U
-# p1h0ErOXF6i5+w8txsbiSZjLC/WDv3kq0dRqrfkoMMobVAkcbTG0I+eO6hMepLHc
-# m7U1ziT7z+/rBnneW0rvM9NvgtaG7cW1gF4hP0KkOaspmHh7fhyNDTyF9ktB10x6
-# GiN4Rz8W20deJBJBMDO//nYv5Ollv4DZWLPfiCcLwjQWJk+yqTuklMH/rpX9Tm/s
-# d+/G6Ek1kpuzeMza9jJiwj7EdmpbpGLO04GdbLpPocjq0p4tYkcNtG+awsAXKD6n
-# cqawo//mzJbEDWfiEZJjYrzYWj98hVfml3jsssYXJLyTT+BfWLDz/dobiUqWnV3O
-# q1of2VUaTgUwssCFhJJdsrfHKPrmKQh4Yrr2lGPCGiAbdtvVTNDuNcsCgKWqpqY+
-# 7jTIcjYYeHTdoNQvKtsg2V7oVrt8YzslZyypA9IIRzCGsrUu2PkjETYcKsaVFgkL
-# R43J0B+C2I/jt4osN/bwEbphKfcf7moj01fFytAcjTP81NSk/whrNm2CkdphjDLQ
-# P9O1hIjuveXBqzUN6222RoemJumEG+UGifK1GMMvIEFLAJJAaQ==
+# AQcBMBwGCSqGSIb3DQEJBTEPFw0yNjA2MjIwNDM0NTBaMC8GCSqGSIb3DQEJBDEi
+# BCDfOKX8jcDTf888UZNePAFLI8DHL4u+jpL93ZNMHSWqPDANBgkqhkiG9w0BAQEF
+# AASCAgAXptZKtBCS39J2dLsbMW5Xq0Y/b6qKxYU9q0CPce1XavsU2jgKmOSQwN9l
+# egZED3k5zQBCchjNsVIu8tyJ7fYRDfjzMfAlBuXgns5yz1764NXVQ8cgDeZb/iGE
+# BmPXJbhaVYYQYFIi72mrwoiaGxkyLteLxsbyPgJR+/i1PycQ+yQLdijxq0XSZtZo
+# oSURmcjNxgAbg/jdI254HRzUGUzYqG83vhp5dIdYMFfRXYgL2kH63TiCDKRSixPt
+# TCF54spzxRuoj5Oe8MckFaJkcFI3K0oKZ7k+06GYgvG3SzL5d4r5sV2+l/FKK8cd
+# eDXQZET4VKtLzxtbDERZBhTQ+ytuxc++kFwruUjh6PS9kfPauLF277Df/onpGraH
+# cY6wyRsYXwFGtkQ2sPc0akxSissFjrXGEX+f5c2XOOkfI4tnDsCsk3dKzdT97xEv
+# 3wWec/ZI41M+EMT3HieziUS/uK5h7NeIiH21jKGp2Vy9g2838P2bnsxIVaROBoC8
+# 1pRMG6d2jYbfr2GGJ5+a6OO3G14BAGg7f8tipMBP13A8hFH1n6DDsihkf9GvtrqE
+# kZtyA6Vv09v/uPZYWBGdz5O9oOufJQ8jR1YyYbt7f9e6QkigInGczapuWFgNFMCo
+# refRTJhcclfmSP80Vhm3c9pwdr77FSgZrLtmvdXW5ME5NBGIlg==
 # SIG # End signature block

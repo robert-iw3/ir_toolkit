@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Definitive adjudication layer for EDR collection results.
 
@@ -110,7 +110,10 @@ function Get-Indicators { param([string]$Text)
     foreach ($m in [regex]::Matches($Text,'(?i)(?:[a-z]:|%[^%]+%)\\[^"|<>\r\n]+?\.[a-z0-9]{1,5}')) { $i.Path += $m.Value.Trim() }
     foreach ($m in [regex]::Matches($Text,'(?i)\b[\w.\-]+\.(?:dll|exe|sys|cmd|bat|ps1|scr|vbs|js)\b')) { $i.FileName += $m.Value }
     foreach ($m in [regex]::Matches($Text,'\b[0-9a-fA-F]{64}\b'))                      { $i.Sha256 += $m.Value }
-    foreach ($m in [regex]::Matches($Text,'\b\d{1,3}(?:\.\d{1,3}){3}\b'))              { $i.Ipv4 += $m.Value }
+    # Reject dotted-quads embedded in a path or version token (e.g. ...\3.0.0.18\...):
+    # negative lookarounds drop matches preceded/followed by a backslash, digit, or dot
+    # so only standalone IPs (in command lines / network details) are treated as real.
+    foreach ($m in [regex]::Matches($Text,'(?<![\d.\\])\d{1,3}(?:\.\d{1,3}){3}(?![\d.\\])')) { $i.Ipv4 += $m.Value }
     foreach ($m in [regex]::Matches($Text,'\{[0-9A-Fa-f]{8}(?:-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12}\}')) { $i.Clsid += $m.Value }
     if ($Text -match '(?i)Task:\s*([^|]+?)\s*(?:\||$)') { $i.Task += $Matches[1].Trim() }
     foreach ($k in @($i.Keys)) { $i[$k] = @($i[$k] | Select-Object -Unique) }
@@ -306,9 +309,21 @@ $results = foreach ($f in $findings) {
     if ($ind.Sha256.Count -and -not $file.Sha256) { $file.Sha256 = $ind.Sha256[0] }
     foreach ($ip in $ind.Ipv4) { if (Test-PublicIP $ip) { $publicNet = $true } }
 
+    # ----- IR Toolkit self-recognition (impossible attack vector) ----------------
+    # The responder's own staged tools (yara64, autorunsc, winpmem, procdump, ...) run
+    # during collection and surface in ShimCache/Amcache/entropy scans on EVERY host.
+    # A binary inside an IR_Toolkit\tools\ folder is our own kit - clear it outright.
+    $leaf = if ($subjectPath) { Split-Path -Leaf $subjectPath } else { '' }
+    $ownToolName = '(?i)^(autorunsc(64)?|yarac?64|yara|go-winpmem|winpmem|procdump(64)?|sigcheck(64)?|handle(64)?|strings(64)?|listdlls(64)?|tcpvcon(64)?|pslist(64)?|psservice(64)?|psloggedon(64)?|ftkimager|vol|memprocfs|sqlite3|MRC.*)\.exe$'
+    $isOwnTool = ($subjectPath -match '(?i)\\IR[_-]?Toolkit\\tools\\') -or `
+                 ($leaf -match $ownToolName -and $subjectPath -match '(?i)\\tools\\')
+
     # ----- definitive verdict from proof -----
     $valid    = ($file.SigStatus -eq 'Valid')
-    $badSig   = ($file.SigStatus -and $file.SigStatus -ne 'Valid' -and $file.SigStatus -ne 'UnknownError')
+    # A "bad signature" is a genuinely INVALID one (tampered/revoked/untrusted) - a
+    # strong malicious signal. 'NotSigned' is NOT bad: countless legit tools (sqlite3,
+    # utilities, vendor helpers) ship unsigned, so it is only a weak/neutral signal.
+    $badSig   = ($file.SigStatus -and $file.SigStatus -notin @('Valid','UnknownError','NotSigned'))
     $trusted  = ($file.Trust -eq 'Trusted-Location')
     $writable = ($file.Trust -eq 'User-Writable')
     $missing  = ($Live -and $file.Exists -eq $false -and $subjectPath)
@@ -317,10 +332,10 @@ $results = foreach ($f in $findings) {
     $verdict='Indeterminate'; $conf='Low'
     if ($Live -and $file.Exists) {
         # False Positive ONLY when validly signed AND in a system/vendor-installed trusted location.
-        # A valid signature in a user-writable path (Temp, AppData) is NOT a clearance —
+        # A valid signature in a user-writable path (Temp, AppData) is NOT a clearance -
         # signed malware, stolen certs, and living-off-the-land tools all have valid sigs.
         if ($valid -and $trusted)        { $verdict='False Positive';        $conf='High' }
-        elseif ($valid -and $writable)   { $verdict='Indeterminate';         $conf='Medium'; $notes.Add('signed but in user-writable path — valid cert does not clear staging in Temp/AppData') }
+        elseif ($valid -and $writable)   { $verdict='Indeterminate';         $conf='Medium'; $notes.Add('signed but in user-writable path - valid cert does not clear staging in Temp/AppData') }
         elseif ($valid)                  { $verdict='Likely False Positive'; $conf='Medium' }
         elseif ($badSig -and ($writable -or $publicNet)) { $verdict='True Positive'; $conf='High' }
         elseif ($badSig)                 { $verdict='Likely True Positive';  $conf='Medium' }
@@ -328,7 +343,7 @@ $results = foreach ($f in $findings) {
     }
     elseif ($missing)                    { $verdict='Likely True Positive';  $conf='Medium'; $notes.Add('referenced binary not on disk (staged/removed?)') }
     else {
-        # No live proof — fall back to collected context (capped at "Likely").
+        # No live proof - fall back to collected context (capped at "Likely").
         # Trusted-location + company name = Likely FP only; writable path stays Indeterminate.
         if ($trusted -and $hasCo)        { $verdict='Likely False Positive'; $conf='Medium' }
         elseif ($trusted)                { $verdict='Likely False Positive'; $conf='Low' }
@@ -341,12 +356,12 @@ $results = foreach ($f in $findings) {
     # ----- path-confidence adjustment for known high-FP library paths --------
     # Security sensor tools (C2Sensor, DeepSensor, etc.) ship .NET assemblies with
     # build-pipeline timestamps, causing Timestomped findings at High confidence.
-    # These paths are legitimately timestomped — reduce to Low so they don't inflate TP count.
+    # These paths are legitimately timestomped - reduce to Low so they don't inflate TP count.
     $LIB_NET_PATTERN = '(?i)(\\lib\\net(462|471|472|48|standard|core)|\\bin\\Release\\|\\bin\\Debug\\|\\ref\\net|\\runtimes\\win)'
     if ($f.Type -eq 'Timestomped File' -and $f.Target -match $LIB_NET_PATTERN) {
         if ($conf -ne 'Low') {
             $conf = 'Low'
-            $notes.Add('ADJUSTED: Timestomped .NET library assembly path — build-pipeline timestamps are expected here; verify if path is unexpected')
+            $notes.Add('ADJUSTED: Timestomped .NET library assembly path - build-pipeline timestamps are expected here; verify if path is unexpected')
         }
     }
 
@@ -356,12 +371,60 @@ $results = foreach ($f in $findings) {
     $rmmPat   = '(?i)(anydesk|teamviewer|screenconnect|connectwise|splashtop|rustdesk|client32|ateraagent|action1|logmein|lmiguardian|gotoassist|zohoassist|za_connect|winvnc|tvnserver|vncserver|uvnc|remoting_host|dwagent|supremo|meshagent|quickassist)'
     $lolPat   = '(?i)^(mshta|rundll32|regsvr32|certutil|bitsadmin|wscript|cscript|installutil|msbuild)\.exe$'
     $isRmmType = ($f.Type -match '(?i)Remote Access|ClickFix|RunMRU|LOLBin')
+    # Script hosts (powershell/pwsh/cmd) run constantly for legit reasons (VS Code,
+    # automation, the toolkit itself). They are abuse ONLY when the command line shows
+    # it - encoded/hidden/download/base64/etc. Without that, a bare shell is not proof.
+    # Detect a script host from the resolved binary OR the finding text (the binary is
+    # often unresolved for historical/exited shells, leaving subjName empty).
+    $shellHost = ($subjName -match '(?i)^(powershell|pwsh|cmd)\.exe$') -or
+                 (("$($f.Target) $($f.Details)") -match '(?i)\b(powershell|pwsh|cmd)\.exe\b')
+    # Genuine abuse indicators only. Deliberately NOT matching bare 'http://' or 'hidden'
+    # (they appear in legit banners/paths) - require a real download cradle / encoding /
+    # explicit hidden-window switch.
+    $abusePat  = '(?i)(-enc\b|encodedcommand|\bIEX\b|Invoke-Expression|Download(String|File|Data)|FromBase64String|Net\.WebClient|Start-BitsTransfer|-w(indowstyle)?\s+hidden|\bbitsadmin\b|\bcertutil\b)'
+    $lolAbuse  = (("$($f.Details) $cmdLine") -match $abusePat)
     if ($isRmmType -or ($subjName -match $rmmPat) -or ($subjName -match $lolPat)) {
-        if ($verdict -in 'False Positive','Likely False Positive','Indeterminate') {
+        if ($shellHost -and -not $lolAbuse) {
+            # Normal interactive/automation shell - do not elevate; cap if something
+            # else raised it. Stays a pivot lead (review the command line if unexpected).
+            if ($verdict -in 'Likely True Positive','True Positive') {
+                $verdict = 'Indeterminate'; $conf = 'Low'
+                $notes.Add('CAPPED: script-host (powershell/cmd) with no abuse indicators in command line - normal shell, pivot lead only')
+            }
+        }
+        elseif ($verdict -in 'False Positive','Likely False Positive','Indeterminate') {
             $verdict = 'Likely True Positive'
             if ($conf -eq 'Low') { $conf = 'Medium' }
             $notes.Add('OVERRIDE: remote-access/LOLBin abuse class - signature does not clear it; verify connection logs / command line (T1219/T1218)')
         }
+    }
+
+    # ----- clearance: IR Toolkit's own staged tools are known-good ---------------
+    # Authoritative - overrides everything above (it is literally our kit, not an
+    # attack artifact). Generalizes to any host this toolkit is run from.
+    if ($isOwnTool) {
+        $verdict = 'False Positive'; $conf = 'High'
+        $notes.Add("CLEARED: IR Toolkit's own staged tool (executed during collection) - not an attack artifact")
+    }
+
+    # ----- weak-standalone-signal cap -------------------------------------------
+    # ShimCache/Amcache are HISTORICAL execution records and high entropy is a
+    # by-design property of countless legit files (installers, compiled DLLs,
+    # compressed assets). On their own these are PIVOT LEADS, not proof. Unless a
+    # strong signal already corroborated them (bad signature, external egress, or
+    # the RMM/LOLBin override), cap at Indeterminate so the final report holds only
+    # beyond-doubt anomalies. They remain in the full adjudication output + the
+    # separate pivot-leads log - nothing is dropped, investigations are not blinded.
+    # A real UNC network-path execution stays strong; a \\?\ or \\.\ device-path form
+    # is a LOCAL path mislabeled as network (older collections), so treat it as weak.
+    $fakeNetPath = ($f.Target -match '^\\\\[?.]\\')
+    $weakType  = ($f.Type -match '(?i)^(High Entropy File|ShimCache|Amcache|Timestomped)') -and
+                 (($f.Type -notmatch '(?i)Network Path') -or $fakeNetPath)
+    $hasStrong = $badSig -or $publicNet -or (($notes -join ' ') -match 'OVERRIDE')
+    if ($weakType -and -not $hasStrong -and $verdict -eq 'Likely True Positive') {
+        $verdict = 'Indeterminate'
+        $conf    = if ($conf -eq 'High') { 'Medium' } else { 'Low' }
+        $notes.Add('CAPPED: weak standalone signal (historical execution / entropy) with no corroboration - pivot lead, review only if path is unexpected')
     }
 
     # ----- acquire evidence for anything not cleared as a false positive -----
@@ -397,21 +460,109 @@ $results = foreach ($f in $findings) {
 }
 
 # -- Outputs into the host folder ----------------------------------------------
+$order   = @{ 'True Positive'=0; 'Likely True Positive'=1; 'Indeterminate'=2; 'Likely False Positive'=3; 'False Positive'=4 }
 $stamp   = Get-Date -Format 'yyyyMMdd_HHmmss'
 $jsonOut = Join-Path $HostFolder "Adjudication_$stamp.json"
 $csvOut  = Join-Path $HostFolder "Adjudication_$stamp.csv"
 $mdOut   = Join-Path $HostFolder "Adjudication_$stamp.md"
+# Full record: every finding with its verdict (complete, nothing dropped).
 $results | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $jsonOut -Encoding UTF8
 $results | Export-Csv -LiteralPath $csvOut -NoTypeInformation -Encoding UTF8
 
-$order = @{ 'True Positive'=0; 'Likely True Positive'=1; 'Indeterminate'=2; 'Likely False Positive'=3; 'False Positive'=4 }
+# Split: beyond-doubt anomalies vs. lower-confidence pivot leads. The final .md
+# report (and the incident report / attack graph downstream) hold only the former;
+# the leads are written to their OWN log so the investigation is never blinded.
+$TpClass  = @('True Positive','Likely True Positive')
+$leads    = @($results | Where-Object { $_.Verdict -notin $TpClass })
+$leadsOut = Join-Path $HostFolder "Adjudication_PivotLeads_$stamp.csv"
+if ($leads.Count) {
+    $leads | Sort-Object @{E={$order[$_.Verdict]}}, Type |
+        Export-Csv -LiteralPath $leadsOut -NoTypeInformation -Encoding UTF8
+}
+
+# -- Run-to-run delta ----------------------------------------------------------
+# Compare current findings against the most recent PREVIOUS Adjudication JSON.
+# Identifies: NEW (first seen), RESOLVED (gone), CHANGED_VERDICT (verdict flipped).
+# Analysts use this to track remediation progress across repeated collections.
+$prevAdjFile = Get-ChildItem -Path $HostFolder -Filter 'Adjudication_*.json' -File `
+    -ErrorAction SilentlyContinue | Where-Object { $_.FullName -ne $jsonOut } |
+    Sort-Object LastWriteTime -Descending | Select-Object -First 1
+if ($prevAdjFile) {
+    try {
+        $prevFindings = Get-Content -LiteralPath $prevAdjFile.FullName -Raw | ConvertFrom-Json
+
+        # Build lookup: (Type+Target) -> verdict
+        $prevIndex = @{}
+        foreach ($pf in @($prevFindings)) { $prevIndex["$($pf.Type)|$($pf.Target)"] = $pf.Verdict }
+        $currIndex = @{}
+        foreach ($cf in $results) { $currIndex["$($cf.Type)|$($cf.Target)"] = $cf.Verdict }
+
+        $delta = [System.Collections.Generic.List[object]]::new()
+        # New findings
+        foreach ($cf in $results) {
+            $k = "$($cf.Type)|$($cf.Target)"
+            $status = if (-not $prevIndex.ContainsKey($k)) { 'NEW' }
+                      elseif ($prevIndex[$k] -ne $cf.Verdict) { 'CHANGED_VERDICT' }
+                      else { 'UNCHANGED' }
+            if ($status -in 'NEW','CHANGED_VERDICT') {
+                $delta.Add([PSCustomObject][ordered]@{
+                    Status    = $status
+                    Verdict   = $cf.Verdict
+                    PrevVerdict = if ($prevIndex.ContainsKey($k)) { $prevIndex[$k] } else { $null }
+                    Type      = $cf.Type
+                    Target    = $cf.Target
+                    RunStamp  = $stamp
+                    PrevRun   = [System.IO.Path]::GetFileNameWithoutExtension($prevAdjFile.Name)
+                })
+            }
+        }
+        # Resolved (in previous, not in current)
+        foreach ($k in $prevIndex.Keys) {
+            if (-not $currIndex.ContainsKey($k)) {
+                $parts = $k -split '\|', 2
+                $delta.Add([PSCustomObject][ordered]@{
+                    Status    = 'RESOLVED'
+                    Verdict   = $null
+                    PrevVerdict = $prevIndex[$k]
+                    Type      = $parts[0]
+                    Target    = if ($parts.Count -gt 1) { $parts[1] } else { '' }
+                    RunStamp  = $stamp
+                    PrevRun   = [System.IO.Path]::GetFileNameWithoutExtension($prevAdjFile.Name)
+                })
+            }
+        }
+        if ($delta.Count -gt 0) {
+            $deltaOut = Join-Path $HostFolder "Delta_$stamp.json"
+            $delta | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath $deltaOut -Encoding UTF8
+            Write-Host "[delta] $($delta.Count) change(s) vs $($prevAdjFile.Name) -> $(Split-Path -Leaf $deltaOut)" -ForegroundColor Cyan
+        } else {
+            Write-Host "[delta] No changes vs previous run ($($prevAdjFile.Name))" -ForegroundColor Gray
+        }
+    } catch {
+        Write-Host "[delta] Could not compute delta: $($_.Exception.Message)" -ForegroundColor Gray
+    }
+}
+
 $md = [System.Collections.Generic.List[string]]::new()
 $md.Add("# Adjudication - $(Split-Path -Leaf $HostFolder)")
 $md.Add(""); $md.Add("Source: ``$(Split-Path -Leaf $ReportPath)`` - $($results.Count) finding(s). Live proof: $([bool]$Live)")
 $md.Add(""); $md.Add("## Verdicts")
 foreach ($g in $results | Group-Object Verdict | Sort-Object { $order[$_.Name] }) { $md.Add("- **$($g.Name)**: $($g.Count)") }
 $md.Add("")
-foreach ($e in $results | Sort-Object @{E={$order[$_.Verdict]}}, Type) {
+# Final report = beyond-doubt anomalies only (true-positive class). Lower-confidence
+# pivot leads are NOT detailed here - they live in the separate PivotLeads log.
+$tpResults = @($results | Where-Object { $_.Verdict -in $TpClass })
+$md.Add("## Highly-suspicious findings (investigate)")
+$md.Add("")
+if (-not $tpResults.Count) {
+    $md.Add("_No true-positive-class anomalies. $($leads.Count) lower-confidence pivot lead(s) recorded in_ ``$(Split-Path -Leaf $leadsOut)`` _for optional review._")
+    $md.Add("")
+}
+else {
+    $md.Add("**$($tpResults.Count)** finding(s) require investigation. The remaining **$($leads.Count)** lower-confidence pivot lead(s) are in ``$(Split-Path -Leaf $leadsOut)`` - review only if they corroborate one of the below.")
+    $md.Add("")
+}
+foreach ($e in $tpResults | Sort-Object @{E={$order[$_.Verdict]}}, Type) {
     $md.Add("### [$($e.Verdict)/$($e.Confidence)] $($e.Type) - $($e.Target)")
     $md.Add("- Details: $($e.Details)")
     if ($e.SubjectPath){ $md.Add("- Subject: ``$($e.SubjectPath)`` ($($e.PathTrust); exists=$($e.FileExists))") }
@@ -432,7 +583,7 @@ if ($rawDir -and (Test-Path $rawDir)) { Remove-Item $rawDir -Recurse -Force -Err
 Write-Host "`n=== Adjudication summary ===" -ForegroundColor Green
 $results | Group-Object Verdict | Sort-Object { $order[$_.Name] } |
     Select-Object @{N='Verdict';E={$_.Name}}, Count | Format-Table -AutoSize
-$evCount = ($results | Where-Object { $_.EvidenceDir }).Count
+$evCount = @($results | Where-Object { $_.EvidenceDir }).Count
 Write-Host "[+] $jsonOut" -ForegroundColor Green
 Write-Host "[+] $csvOut"  -ForegroundColor Green
 Write-Host "[+] $mdOut"   -ForegroundColor Green
@@ -441,27 +592,27 @@ if ($evCount) { Write-Host "[+] Evidence bundles for $evCount finding(s): $Evide
 # SIG # Begin signature block
 # MIIcoQYJKoZIhvcNAQcCoIIckjCCHI4CAQExDzANBglghkgBZQMEAgEFADB5Bgor
 # BgEEAYI3AgEEoGswaTA0BgorBgEEAYI3AgEeMCYCAwEAAAQQH8w7YFlLCE63JNLG
-# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCB9OybtD7oxHRuH
-# DNwe6F6Ba8D+IAzmPtqmjveth1X5LqCCFrQwggN2MIICXqADAgECAhBa5MQyEl22
-# qUV1bZluOcpOMA0GCSqGSIb3DQEBCwUAMFMxGjAYBgNVBAsMEUluY2lkZW50IFJl
+# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCACJnA3+tt1rfEj
+# vLH/Eqjl5XSYh3SEdsFjD5Z5Z0q9Y6CCFrQwggN2MIICXqADAgECAhAbL3xr3F9b
+# nkbveZC/LiR8MA0GCSqGSIb3DQEBCwUAMFMxGjAYBgNVBAsMEUluY2lkZW50IFJl
 # c3BvbnNlMRMwEQYDVQQKDApJUiBUb29sa2l0MSAwHgYDVQQDDBdJUiBUb29sa2l0
-# IENvZGUgU2lnbmluZzAeFw0yNjA2MjAwMDU5NDZaFw0zMTA2MjAwMTA5NDZaMFMx
+# IENvZGUgU2lnbmluZzAeFw0yNjA2MjIwNDI0NDVaFw0zMTA2MjIwNDM0NDVaMFMx
 # GjAYBgNVBAsMEUluY2lkZW50IFJlc3BvbnNlMRMwEQYDVQQKDApJUiBUb29sa2l0
 # MSAwHgYDVQQDDBdJUiBUb29sa2l0IENvZGUgU2lnbmluZzCCASIwDQYJKoZIhvcN
-# AQEBBQADggEPADCCAQoCggEBAJ1nFbqBzQLbEhUUTT10Lrva+ooE/uVqzTJbGk5/
-# xh3zYBEAaRil7obceqCWtDg6KSjbDQP8wto42fHUK8tp0FU0NEi2+rkWHfcpeasm
-# z2e+UFQMDlXRcxg7dqe+08OB4pFhwrHSPo0m7HZAgtpHd02POka7jaYVoAnScg7i
-# LuZiRSJ3tJKZu1KCSTntV+LbicnowTlaDEvr7JQzSVs+5BpNadU3n/ujzH088Mgm
-# CoXooQpF12SzbZNCZ+kbgza6bNMbEHNGkLr9S0vHQD95oKPWF7YuOu7jqtkuCOZc
-# KYYi4nOXFwLqXmJ+sqqpR2NrrfMkz4VaALGIZ93o10CHWDkCAwEAAaNGMEQwDgYD
-# VR0PAQH/BAQDAgeAMBMGA1UdJQQMMAoGCCsGAQUFBwMDMB0GA1UdDgQWBBQRXBKC
-# VXuhcK7rCDzb/6SAfPGwvDANBgkqhkiG9w0BAQsFAAOCAQEAlZhDvun+4lQ0yd2C
-# +pAFD3B2/l2N9hArAcHhp6DaO48NSIT3eyyhGrfk8f3lDVhvjEbUDDmb6Oe67rBN
-# 3W7Dp1Y+W8Z96kC3miq7UbmVTGkiQGZFwi0KJ8tw++//vlU3zlW9nhqwFxzm7DfL
-# zECzv6bnd9Ri+1R4zhvkd5BLTuwLjPLkzbOTdsGwbXWWOK2gTTCr82I7G9xcq9Gv
-# qAcoJAHVEiNKt7p7Y+ScDL/AZGBMCBTsN9gcAoIgq22EWBHHV02HmPfuYyddaq1c
-# Lmjot0+5wVoPVl4wNktght1WVHDlk3EpEJF5qc7Yhl3YtniIEHQoO8BkWykpFDhy
-# q5wz7TCCBY0wggR1oAMCAQICEA6bGI750C3n79tQ4ghAGFowDQYJKoZIhvcNAQEM
+# AQEBBQADggEPADCCAQoCggEBAKuTSorzjXf0qc4qX04KtYn2ErVj9RAkn/1f/9YN
+# llrRj0s3urh/LnWmHn4vUjPrDTzHXUx4udOclWNlv52uCMAfXKZR3qD73OCHHQ2l
+# +1s4JqrAdGhr6QPyIhCDwl7wqQUfekQtBep+SqbM0vkbvup3WKgol+c3fIUxvM8E
+# bPLg5CcNWug6Twj+Wn1FJidJihmYARSKT5PFv32BLbffUpuvdWXxzRIRv8c4EE+S
+# bWs3lTiCGrp1X33mXYiMRNAiF5ofrCJwRA7LESh4TCqXWDSvs+KFBi1ZxEnLxmUk
+# 1Wrzq11umlIzoJhnEN0VyBvLK6X40uTF50piU+5kGy9kZlkCAwEAAaNGMEQwDgYD
+# VR0PAQH/BAQDAgeAMBMGA1UdJQQMMAoGCCsGAQUFBwMDMB0GA1UdDgQWBBSpc1pf
+# XTSlgxdtXKDrlumz7H67TjANBgkqhkiG9w0BAQsFAAOCAQEAdPAxdgyk/YzF72lK
+# 4P1I3Lwjice2yAR0aoXSEP5gO/xnAvuqCiAcdPfJhqMrrfq5iFLqTuWSfz+k9irn
+# hjzyWgmo2GUrQ8BVRoNAw7HpTJo7Rw8+FfDzyy+stq9UKWrkflHqwb7oBD+aBs/5
+# ZccFKZi8oeV79CCTGdwXKYgE+xYbV//Twr7rpMbVUqbchEDdZXEzT2GdEUd5B02L
+# bDGJ4Gjz8AtCFcSXWQlLnAQxd5CJVFHDkyfkEs2VvBPtR/MBCF3NiNufb8HgClhS
+# ZHayqVVZhUd+NS7/orBY5M1Ioc0/kGiNO3nlWf1IlAPk/jsILweFZkUO0wBTot/O
+# b18zszCCBY0wggR1oAMCAQICEA6bGI750C3n79tQ4ghAGFowDQYJKoZIhvcNAQEM
 # BQAwZTELMAkGA1UEBhMCVVMxFTATBgNVBAoTDERpZ2lDZXJ0IEluYzEZMBcGA1UE
 # CxMQd3d3LmRpZ2ljZXJ0LmNvbTEkMCIGA1UEAxMbRGlnaUNlcnQgQXNzdXJlZCBJ
 # RCBSb290IENBMB4XDTIyMDgwMTAwMDAwMFoXDTMxMTEwOTIzNTk1OVowYjELMAkG
@@ -565,31 +716,31 @@ if ($evCount) { Write-Host "[+] Evidence bundles for $evCount finding(s): $Evide
 # y2ueIu9THFVkT+um1vshETaWyQo8gmBto/m3acaP9QsuLj3FNwFlTxq25+T4QwX9
 # xa6ILs84ZPvmpovq90K8eWyG2N01c4IhSOxqt81nMYIFQzCCBT8CAQEwZzBTMRow
 # GAYDVQQLDBFJbmNpZGVudCBSZXNwb25zZTETMBEGA1UECgwKSVIgVG9vbGtpdDEg
-# MB4GA1UEAwwXSVIgVG9vbGtpdCBDb2RlIFNpZ25pbmcCEFrkxDISXbapRXVtmW45
-# yk4wDQYJYIZIAWUDBAIBBQCggYQwGAYKKwYBBAGCNwIBDDEKMAigAoAAoQKAADAZ
+# MB4GA1UEAwwXSVIgVG9vbGtpdCBDb2RlIFNpZ25pbmcCEBsvfGvcX1ueRu95kL8u
+# JHwwDQYJYIZIAWUDBAIBBQCggYQwGAYKKwYBBAGCNwIBDDEKMAigAoAAoQKAADAZ
 # BgkqhkiG9w0BCQMxDAYKKwYBBAGCNwIBBDAcBgorBgEEAYI3AgELMQ4wDAYKKwYB
-# BAGCNwIBFTAvBgkqhkiG9w0BCQQxIgQgLpHTkAWJK/GM5y6E3Y+1c51YAvdAp8bQ
-# 9KfQNarI+jowDQYJKoZIhvcNAQEBBQAEggEAMSgqvzuh8EQZ2ZIHQs7rUt3QStZ9
-# cNbaACLWsa52ndtlao3lv9OUtgrHSK6qAkrAbUtvof4dvQH+4he3fsv5ow6U1Qnp
-# dnBcgUQVADByCVWwUQjOdTvxHRiepcDL65Ec85yRcyf6dHkMVqs/KUIv0onkk0HP
-# cGPTUZRpXiOd5CQQYrzHH2qDhzBxZ072nnaMIkcso2oBo6BW/7d3/Cneo8lhFUsX
-# YB+lABFjOc8Xlp4wNqRwUrOKweLPABUb4zHxX+OO7vC7cfi6IOjpr2Jb2nLXi2Rr
-# h/RHdyLH2wHt0YcpsUErrLEkBPyeBL2+9qc55h4NIDxEF6IkL2WQYz66D6GCAyYw
+# BAGCNwIBFTAvBgkqhkiG9w0BCQQxIgQgsrvhGAKbUqpPRGao9whefg56f7AYJACW
+# nE7+bQ2aGIYwDQYJKoZIhvcNAQEBBQAEggEAAJVosnrInnS0dUhRCssmazakOv7x
+# BkWWRrbw13SBK6yw06nbAFs07zCu47i4bA/jvMtDQFOPfvodIRnycsmOTB52GSr3
+# Q67FJ6K+3tpOzRNiv5fFgdJ1pv2ysXCnPlWgzY3csFUpsET+mMYd2BSpDCAZ/Guh
+# ua/jGAUXnEo/4NhHHVzldLBtVePKa0ObSR1oQB+wHLL51r8kKeTzFEAV5RSQShx6
+# 5HfTEumhnQW4p12LuAapKZUyj4dWDp5+Z0iaGZ5LwBe4iyCiUkR4tANbp1QwV3kG
+# 9IybUX+nKaEgMJQQ9CF2+/eSmm1JyTUG42EqYsu0BPgbOD2PBcwafoO+v6GCAyYw
 # ggMiBgkqhkiG9w0BCQYxggMTMIIDDwIBATB9MGkxCzAJBgNVBAYTAlVTMRcwFQYD
 # VQQKEw5EaWdpQ2VydCwgSW5jLjFBMD8GA1UEAxM4RGlnaUNlcnQgVHJ1c3RlZCBH
 # NCBUaW1lU3RhbXBpbmcgUlNBNDA5NiBTSEEyNTYgMjAyNSBDQTECEAqA7xhLjfEF
 # gtHEdqeVdGgwDQYJYIZIAWUDBAIBBQCgaTAYBgkqhkiG9w0BCQMxCwYJKoZIhvcN
-# AQcBMBwGCSqGSIb3DQEJBTEPFw0yNjA2MjAwMTE0MzJaMC8GCSqGSIb3DQEJBDEi
-# BCCfqxCyq+fXkYocSSD7h5luRedL1ZqDiORKvbFHLuLfTzANBgkqhkiG9w0BAQEF
-# AASCAgBlJjJgW7qOhPMMG2IJj+Q4JWBSMwZt3ucovfjmjwCLsOrUnGzWBrFUuraE
-# v81o2DgUUuxbtdiWlSjZec3FSKjyVXgmBdIJm4MOCvYVLRO6iKApEYR78IHWt5NG
-# hSi6UBoQCNYwvI3Y3s6MwNyApvQYuUfxu45cujBISq3Ro6cWaVSGHXlgwL62JVGs
-# UKeyv5rJoAT/ys6Dpj/UpgtlF4iHrSTMK9WRWqRkhfmh96pZO52n0CJ+gJul843D
-# 1B0znlH8TYTO6c0h76KZAKCdq9UjaaAQQF1Wr4IMdDqZfXXmqNoM9d/G5c85X7g0
-# XRi07FRdpQnl0qyK++o+h2HRyve9iMDXVOPOgEyf4xyxzxGusoVFtcFGp0KkVvZw
-# jyGe/Qqi0TbKn0kv0U+xgjg0MDqSHhESOzJfi128cK5ENEyCiq39U8Aq84hC+pXt
-# t0VhZsisG86TLPVLpKr80eLLnb+B7gw0qQTpzg1vCwylwCWuOIlTXD6hBYJOoLSt
-# ZZAbsYuQUPtXk1XQD4UKxI/6//hruWUxfDIYDvV9+J47idLmJcS6sEkOmfTtBIgH
-# tB1ggipIfTus6y09+Fe+zSRGw0apfjDZxPSu10vDRbIbWPigszGm3Z441C6q91rK
-# +IefGrFMoHoxrdfI+0GXkmPcEAyaHc9SLyQ98HKXNeqN1U2SEg==
+# AQcBMBwGCSqGSIb3DQEJBTEPFw0yNjA2MjIwNDM0NTRaMC8GCSqGSIb3DQEJBDEi
+# BCDqDBKJhlRsA4AQbammCExvnpIdQvwVBlp+nb5y7wzAjTANBgkqhkiG9w0BAQEF
+# AASCAgDNv2Id1V6sHo03wE64m0HlyYgBeDsD6as3vb/CYhjRMw+w96ZH+ICul21+
+# eLUQ64CUaWw65u5TJLKKBaPY/7r2KahQms9MF/3Y4HqoBuGq4bo4R1a+OVhQVvFl
+# 7LFcNoESHQZf/Z49v9HkAqQSZkbdfB+tnCLgfcfD1KitOfhJOww+p4rMWl1o9qNv
+# 0wA3nTeym5JGqeLguWZZj+BJv/0Zi9vXgBNAFqdUczABdsoJ6dEM3kNL4X33kRdc
+# HZ786WLPY23DxwG/RjAf4NZHu2YKOQY8X8u2SYmO47Gk5340dOHj6QC++prIwRNW
+# 9vPkYgfcqNL+t1LOfabHu8W4sYIVCkUhAMwEvwBSx2NjiRlqMY59b1xijoriDaJi
+# xKcGiKVCZGuhRlRUDp/Qg5/k5UUlgp1HrU7yg1MhlLzy1w0cf+b6/qQPAlHrAT9j
+# ncr/vWbMALRL7HQVGAv1jG0uKUpCDH1Jzpr7bm0mq4VI6tCgrvPJ2/V58KnHYkSY
+# 325EqVojgnQ/moBBJHyOgxHQfu/LJ4m/77TgbwqE+nhbIn9p7XhV5BoX6Gapa9Tu
+# kIYvAAP8ho1rfbpReD2RQNEcmmWSLVI1DuRBJxl8P+rHavRPE+k9+1MieZcx6ua4
+# RT04jC4QyO1x5hNDRWHCGjy65gPQR6AYyVyZxu1B6BEfO+g+Pw==
 # SIG # End signature block

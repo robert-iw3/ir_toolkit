@@ -1,4 +1,4 @@
-# ==============================================================================
+﻿# ==============================================================================
 # IR Playbook 03 - Windows Persistence Eradication
 # Hunts and removes attacker persistence across every Windows technique:
 # Scheduled tasks, Run/RunOnce registry keys, startup folders, services,
@@ -7,17 +7,27 @@
 # Suspicious entries are quarantined and logged - never silently deleted.
 # ==============================================================================
 #Requires -RunAsAdministrator
+[CmdletBinding(SupportsShouldProcess)]
+param(
+    [string]$OutputDir          = '',
+    [string]$IncidentId         = '',
+    [string[]]$MaliciousHashes    = @(),
+    [string[]]$MaliciousPaths     = @(),
+    [string[]]$MaliciousProcesses = @(),
+    [switch]$Apply   # dry-run by default; -Apply to execute removals
+)
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Continue'
 
-$IncidentId         = $env:IR_INCIDENT_ID -replace '[^\w\-]',''
-$MaliciousHashes    = ($env:IR_MALICIOUS_HASHES    -split ',') | ForEach-Object { $_.Trim() } | Where-Object { $_ }
-$MaliciousPaths     = ($env:IR_MALICIOUS_PATHS     -split ',') | ForEach-Object { $_.Trim() } | Where-Object { $_ }
-$MaliciousProcesses = ($env:IR_MALICIOUS_PROCESSES -split ',') | ForEach-Object { $_.Trim() } | Where-Object { $_ }
+if (-not $IncidentId)        { $IncidentId       = ($env:IR_INCIDENT_ID -replace '[^\w\-]','') }
+if (-not $MaliciousHashes)   { $MaliciousHashes  = ($env:IR_MALICIOUS_HASHES    -split ',') | ForEach-Object { $_.Trim() } | Where-Object { $_ } }
+if (-not $MaliciousPaths)    { $MaliciousPaths   = ($env:IR_MALICIOUS_PATHS     -split ',') | ForEach-Object { $_.Trim() } | Where-Object { $_ } }
+if (-not $MaliciousProcesses){ $MaliciousProcesses = ($env:IR_MALICIOUS_PROCESSES -split ',') | ForEach-Object { $_.Trim() } | Where-Object { $_ } }
 
-$IRDir      = 'C:\ProgramData\IRToolkit'
-$QuarantineDir = "$IRDir\Quarantine\$IncidentId\persistence"
-$AuditLog      = "$IRDir\persistence-audit-$IncidentId.txt"
+$mode          = if ($Apply) { 'APPLY' } else { 'DRY-RUN' }
+$IRDir         = if ($OutputDir) { $OutputDir } else { 'C:\ProgramData\IRToolkit' }
+$QuarantineDir = Join-Path $IRDir "Quarantine\$IncidentId\persistence"
+$AuditLog      = Join-Path $IRDir "persistence-audit-$IncidentId.txt"
 New-Item -ItemType Directory -Path $QuarantineDir -Force | Out-Null
 
 $Removed    = 0
@@ -25,7 +35,7 @@ $Suspicious = [System.Collections.Generic.List[string]]::new()
 
 function Write-IRLog {
     param([string]$Msg)
-    $entry = "[$(Get-Date -Format 'HH:mm:ssZ')] $Msg"
+    $entry = "[$(Get-Date -Format 'HH:mm:ssZ')] [$mode] $Msg"
     Write-Output $entry
     $entry | Out-File $AuditLog -Append -Encoding UTF8
 }
@@ -402,27 +412,27 @@ Write-IRLog "PERSIST: Complete - removed: $Removed, suspicious: $($Suspicious.Co
 # SIG # Begin signature block
 # MIIcoQYJKoZIhvcNAQcCoIIckjCCHI4CAQExDzANBglghkgBZQMEAgEFADB5Bgor
 # BgEEAYI3AgEEoGswaTA0BgorBgEEAYI3AgEeMCYCAwEAAAQQH8w7YFlLCE63JNLG
-# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCCLjNPo+OsFA1Td
-# rRDjr1ngUpvEyJ6gnI0Lm7M2Cz3+M6CCFrQwggN2MIICXqADAgECAhBa5MQyEl22
-# qUV1bZluOcpOMA0GCSqGSIb3DQEBCwUAMFMxGjAYBgNVBAsMEUluY2lkZW50IFJl
+# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCBZskk5eh7ml/A7
+# gjYekwN5g/b5nQ5rZn/dg5zdFdRmLaCCFrQwggN2MIICXqADAgECAhAbL3xr3F9b
+# nkbveZC/LiR8MA0GCSqGSIb3DQEBCwUAMFMxGjAYBgNVBAsMEUluY2lkZW50IFJl
 # c3BvbnNlMRMwEQYDVQQKDApJUiBUb29sa2l0MSAwHgYDVQQDDBdJUiBUb29sa2l0
-# IENvZGUgU2lnbmluZzAeFw0yNjA2MjAwMDU5NDZaFw0zMTA2MjAwMTA5NDZaMFMx
+# IENvZGUgU2lnbmluZzAeFw0yNjA2MjIwNDI0NDVaFw0zMTA2MjIwNDM0NDVaMFMx
 # GjAYBgNVBAsMEUluY2lkZW50IFJlc3BvbnNlMRMwEQYDVQQKDApJUiBUb29sa2l0
 # MSAwHgYDVQQDDBdJUiBUb29sa2l0IENvZGUgU2lnbmluZzCCASIwDQYJKoZIhvcN
-# AQEBBQADggEPADCCAQoCggEBAJ1nFbqBzQLbEhUUTT10Lrva+ooE/uVqzTJbGk5/
-# xh3zYBEAaRil7obceqCWtDg6KSjbDQP8wto42fHUK8tp0FU0NEi2+rkWHfcpeasm
-# z2e+UFQMDlXRcxg7dqe+08OB4pFhwrHSPo0m7HZAgtpHd02POka7jaYVoAnScg7i
-# LuZiRSJ3tJKZu1KCSTntV+LbicnowTlaDEvr7JQzSVs+5BpNadU3n/ujzH088Mgm
-# CoXooQpF12SzbZNCZ+kbgza6bNMbEHNGkLr9S0vHQD95oKPWF7YuOu7jqtkuCOZc
-# KYYi4nOXFwLqXmJ+sqqpR2NrrfMkz4VaALGIZ93o10CHWDkCAwEAAaNGMEQwDgYD
-# VR0PAQH/BAQDAgeAMBMGA1UdJQQMMAoGCCsGAQUFBwMDMB0GA1UdDgQWBBQRXBKC
-# VXuhcK7rCDzb/6SAfPGwvDANBgkqhkiG9w0BAQsFAAOCAQEAlZhDvun+4lQ0yd2C
-# +pAFD3B2/l2N9hArAcHhp6DaO48NSIT3eyyhGrfk8f3lDVhvjEbUDDmb6Oe67rBN
-# 3W7Dp1Y+W8Z96kC3miq7UbmVTGkiQGZFwi0KJ8tw++//vlU3zlW9nhqwFxzm7DfL
-# zECzv6bnd9Ri+1R4zhvkd5BLTuwLjPLkzbOTdsGwbXWWOK2gTTCr82I7G9xcq9Gv
-# qAcoJAHVEiNKt7p7Y+ScDL/AZGBMCBTsN9gcAoIgq22EWBHHV02HmPfuYyddaq1c
-# Lmjot0+5wVoPVl4wNktght1WVHDlk3EpEJF5qc7Yhl3YtniIEHQoO8BkWykpFDhy
-# q5wz7TCCBY0wggR1oAMCAQICEA6bGI750C3n79tQ4ghAGFowDQYJKoZIhvcNAQEM
+# AQEBBQADggEPADCCAQoCggEBAKuTSorzjXf0qc4qX04KtYn2ErVj9RAkn/1f/9YN
+# llrRj0s3urh/LnWmHn4vUjPrDTzHXUx4udOclWNlv52uCMAfXKZR3qD73OCHHQ2l
+# +1s4JqrAdGhr6QPyIhCDwl7wqQUfekQtBep+SqbM0vkbvup3WKgol+c3fIUxvM8E
+# bPLg5CcNWug6Twj+Wn1FJidJihmYARSKT5PFv32BLbffUpuvdWXxzRIRv8c4EE+S
+# bWs3lTiCGrp1X33mXYiMRNAiF5ofrCJwRA7LESh4TCqXWDSvs+KFBi1ZxEnLxmUk
+# 1Wrzq11umlIzoJhnEN0VyBvLK6X40uTF50piU+5kGy9kZlkCAwEAAaNGMEQwDgYD
+# VR0PAQH/BAQDAgeAMBMGA1UdJQQMMAoGCCsGAQUFBwMDMB0GA1UdDgQWBBSpc1pf
+# XTSlgxdtXKDrlumz7H67TjANBgkqhkiG9w0BAQsFAAOCAQEAdPAxdgyk/YzF72lK
+# 4P1I3Lwjice2yAR0aoXSEP5gO/xnAvuqCiAcdPfJhqMrrfq5iFLqTuWSfz+k9irn
+# hjzyWgmo2GUrQ8BVRoNAw7HpTJo7Rw8+FfDzyy+stq9UKWrkflHqwb7oBD+aBs/5
+# ZccFKZi8oeV79CCTGdwXKYgE+xYbV//Twr7rpMbVUqbchEDdZXEzT2GdEUd5B02L
+# bDGJ4Gjz8AtCFcSXWQlLnAQxd5CJVFHDkyfkEs2VvBPtR/MBCF3NiNufb8HgClhS
+# ZHayqVVZhUd+NS7/orBY5M1Ioc0/kGiNO3nlWf1IlAPk/jsILweFZkUO0wBTot/O
+# b18zszCCBY0wggR1oAMCAQICEA6bGI750C3n79tQ4ghAGFowDQYJKoZIhvcNAQEM
 # BQAwZTELMAkGA1UEBhMCVVMxFTATBgNVBAoTDERpZ2lDZXJ0IEluYzEZMBcGA1UE
 # CxMQd3d3LmRpZ2ljZXJ0LmNvbTEkMCIGA1UEAxMbRGlnaUNlcnQgQXNzdXJlZCBJ
 # RCBSb290IENBMB4XDTIyMDgwMTAwMDAwMFoXDTMxMTEwOTIzNTk1OVowYjELMAkG
@@ -526,31 +536,31 @@ Write-IRLog "PERSIST: Complete - removed: $Removed, suspicious: $($Suspicious.Co
 # y2ueIu9THFVkT+um1vshETaWyQo8gmBto/m3acaP9QsuLj3FNwFlTxq25+T4QwX9
 # xa6ILs84ZPvmpovq90K8eWyG2N01c4IhSOxqt81nMYIFQzCCBT8CAQEwZzBTMRow
 # GAYDVQQLDBFJbmNpZGVudCBSZXNwb25zZTETMBEGA1UECgwKSVIgVG9vbGtpdDEg
-# MB4GA1UEAwwXSVIgVG9vbGtpdCBDb2RlIFNpZ25pbmcCEFrkxDISXbapRXVtmW45
-# yk4wDQYJYIZIAWUDBAIBBQCggYQwGAYKKwYBBAGCNwIBDDEKMAigAoAAoQKAADAZ
+# MB4GA1UEAwwXSVIgVG9vbGtpdCBDb2RlIFNpZ25pbmcCEBsvfGvcX1ueRu95kL8u
+# JHwwDQYJYIZIAWUDBAIBBQCggYQwGAYKKwYBBAGCNwIBDDEKMAigAoAAoQKAADAZ
 # BgkqhkiG9w0BCQMxDAYKKwYBBAGCNwIBBDAcBgorBgEEAYI3AgELMQ4wDAYKKwYB
-# BAGCNwIBFTAvBgkqhkiG9w0BCQQxIgQgJG4r6xyVrPyB8acuEYafrgsL+B8pXg2m
-# You//SnGbegwDQYJKoZIhvcNAQEBBQAEggEAbwbob2gZEOWAFXBXHiviYx2xsweJ
-# agdXEzo+rbEiFd20PsqtbZGJg908QIC6kUZ9IOV7YgBi0Tn9zFvYTfOcIz0XUhuT
-# SCr7rjp+jQo5r0TBZSjkolXmK4O6GfbVUD0NfDeCp/HoyXbyv2xbVm1uDs3cp+s/
-# z0FIsGtxcsg0IMsmq/zdZTXp2R5fDIBIW0QFho2r1opavVvblc6X2YnFAX9nYAy7
-# Z5//qSo5QSrMMvNmzUi2zANywgzsnFjKzK+Qp0dGOP1TxUW7R+CcnM19mg2CPU3f
-# opZrRQbwQezJW7EE0o6IfchL2Uh0rVKGVk6l1h+EuDYjSpIe8z/cwcEjfaGCAyYw
+# BAGCNwIBFTAvBgkqhkiG9w0BCQQxIgQgenYnMZ8VZm4FYK+2LvI5jjfwDZHgPW+E
+# BzUCya+z7ngwDQYJKoZIhvcNAQEBBQAEggEAJw0DwAFN9ErXzOo1slaJmrBjt2X9
+# jm8NiUGazAPdDuSwmw99lmLF+STbis4f2Zo3T3cw3sKpNv7ekuJyk0xPdx0DCTE3
+# 4S8RwPoNH5c+VQNNvNJNOnh6Sqr3oRI9VGazyqY8bEPCgnBPzbXFA6DervW0OOXA
+# XeUv1UEkTxolwxpUR0uzlP9BJVQVgVfVd4AGAySuqByBWqWM7IJNZ2Z6R8k0XZqQ
+# 8ch+R8nEic0X4FTVK+2hE6D9Hl3ge3vkpJelSbC88PzxCRe/PGduOKaY3yfpCdEf
+# psvhjiajk/EwdmJygaYMBb8JX1yrndFkxThFSp9tIu780pHtEaQNu0iEmKGCAyYw
 # ggMiBgkqhkiG9w0BCQYxggMTMIIDDwIBATB9MGkxCzAJBgNVBAYTAlVTMRcwFQYD
 # VQQKEw5EaWdpQ2VydCwgSW5jLjFBMD8GA1UEAxM4RGlnaUNlcnQgVHJ1c3RlZCBH
 # NCBUaW1lU3RhbXBpbmcgUlNBNDA5NiBTSEEyNTYgMjAyNSBDQTECEAqA7xhLjfEF
 # gtHEdqeVdGgwDQYJYIZIAWUDBAIBBQCgaTAYBgkqhkiG9w0BCQMxCwYJKoZIhvcN
-# AQcBMBwGCSqGSIb3DQEJBTEPFw0yNjA2MjAwMTE0MzBaMC8GCSqGSIb3DQEJBDEi
-# BCCpMyH6vrP3YUPxcWTjLOxq2GavpuwPdeW1zcEjoMwLSzANBgkqhkiG9w0BAQEF
-# AASCAgCJWgH+57GIeXMeDBHkb9hBpyvpzhadammeE/1Q3zztTHfTOh1YgRx0HaAp
-# T25QxHD+y1hToZn+OzHOA4o25Jth1VF8kdSVmvA/Rp6Z4SWlEXrxu5+nljaqmvc3
-# 9F8AmGw15LihpN6DTRTNr/I/z0V5qjzHlDsLhvUc8is1ODqWV7cLnKLDVAEatNMK
-# 0KtqAuPmdZ/20jSjHMMoa9uJmsdiIEei7kBB9e1hVKhDfazG1kiXxwo+YZwM5ybn
-# QKLk86J6e87RzIedTVx0B5X/2KXHz7xF2Jx5Dh/h7YDvYsennlGbFql7a5Nakrvj
-# peU/Uts2ttBk09ZrErKUu2VJWmcBXLuLI6kkZ07w0eRctTCrrcK4p89BGEAgxHqC
-# K9pSqH5p2R8b7PD4uVVDWY2ZfZWmxGvC0/gjprr6Tf5QyqotDGCJ2meOTwdjBZJ1
-# 43WfOs83ES0V96UvgxvLmCTrYYCTMecvklMrb7zz3NPswzHkwFUkv7ccalect7Uo
-# r4G0onn/LOFzko+Oq7STQZSie9e77ik2TmSts0G9zLDYE1Aah1p9IbJZehM+dHdi
-# Vwyur0I/7VoMQ06xAUXn+9kJ+c9h5KJSC/gfDRRpJoDs5XRktOUw/D3qx8ojkiyf
-# qQYdz43jgiN9C07KE/yr/R6ksmao7I3l1RXIOxjexBEGa/5c+Q==
+# AQcBMBwGCSqGSIb3DQEJBTEPFw0yNjA2MjIwNDM0NTJaMC8GCSqGSIb3DQEJBDEi
+# BCBxH5EBhNRCNFaDgj7cEAiPPxNpsxFNVIvNkK0m4uQhlTANBgkqhkiG9w0BAQEF
+# AASCAgBXSLt5Fnd8zYhbuTDwxaZRj8rtpm1Sx73Dng2t7gsyG1pZJTqdTJdFlbeO
+# NPl++yx0MBKHwVWGecBu63YWKsxUm2goNFd7sk0y/5xyej3bX9LYYEjZ5fP2E3MT
+# 8wE3xskSwDsHExf3xriu6uysXDdBQoNfTADHayqCCOB16JqiaXD+YlDsbHCVsTSG
+# BQKKaJ9X82E7i4ysMyuCFekQQ7Juq0cUZFofa2wpKr/OywtEkbsRRwlx/7TnR64T
+# BFNk/68RIpV+izJTTjEfdGhTTyoRmfp0J6K05fnaReHMrCWd6E9I76Etb93vEoUv
+# /LA5GvdAp4g8xcXnZ/dmhIDoBJtnCprSkaN+RU6tulGMEIorLMdKwq0kqpGV6Z+D
+# WF7gZMIDvjLuYPvPJns4JcL36iIQJPWZzbUteZnNNrwY8+u5YTiZy/tJ0fzUvxOa
+# i16+y8mfmuupwIAIj0iQPsWYea3vKaawMR2Aw4Uh5pzMMCnOiAvWX26ATYwlPgQM
+# ozj6cvn5lvrQ9L/7Et8/c38rlEp6FLU/nTnhj7wkNniN7Pre1lsfELF0tf7ASls9
+# QqKgOcMbbu2uZKfKGwze963Q00fedzywJELAb4DVmXvkN5UD80Q6/t0uXTPYZBIy
+# LNCH1jnb7ZD2D7Ywt799OoE0pVMd0oVIcUj70QVHhCYOD45QCg==
 # SIG # End signature block

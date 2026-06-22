@@ -1,27 +1,35 @@
-# ==============================================================================
+﻿# ==============================================================================
 # IR Playbook 02 - Windows Process Eradication
 # Terminates malicious processes by PID and name. Quarantines matching binaries
 # by SHA256 hash. Adds hashes to Windows Defender exclusions-in-reverse
 # (block via WDAC/AppLocker policy if available). Never touches system processes.
 # ==============================================================================
 #Requires -RunAsAdministrator
+[CmdletBinding(SupportsShouldProcess)]
+param(
+    [string]$OutputDir       = '',   # reports\<HOST>\ - passed by orchestrator
+    [string]$IncidentId      = '',
+    [string[]]$MaliciousPids       = @(),
+    [string[]]$MaliciousProcesses  = @(),
+    [string[]]$MaliciousHashes     = @(),
+    [switch]$Apply                          # dry-run by default; pass -Apply to execute
+)
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Continue'
 
-$IncidentId          = $env:IR_INCIDENT_ID -replace '[^\w\-]',''
-$MaliciousPids       = ($env:IR_MALICIOUS_PIDS       -split ',') | ForEach-Object { $_.Trim() } | Where-Object { $_ }
-$MaliciousProcesses  = ($env:IR_MALICIOUS_PROCESSES  -split ',') | ForEach-Object { $_.Trim() } | Where-Object { $_ }
-$MaliciousHashes     = ($env:IR_MALICIOUS_HASHES     -split ',') | ForEach-Object { $_.Trim() } | Where-Object { $_ }
+# Parameter -> env var fallback
+if (-not $IncidentId)        { $IncidentId       = ($env:IR_INCIDENT_ID -replace '[^\w\-]','') }
+if (-not $MaliciousPids)     { $MaliciousPids    = ($env:IR_MALICIOUS_PIDS      -split ',') | ForEach-Object { $_.Trim() } | Where-Object { $_ } }
+if (-not $MaliciousProcesses){ $MaliciousProcesses = ($env:IR_MALICIOUS_PROCESSES -split ',') | ForEach-Object { $_.Trim() } | Where-Object { $_ } }
+if (-not $MaliciousHashes)   { $MaliciousHashes  = ($env:IR_MALICIOUS_HASHES    -split ',') | ForEach-Object { $_.Trim() } | Where-Object { $_ } }
 
-$IRDir      = 'C:\ProgramData\IRToolkit'
-$QuarantineDir = "$IRDir\Quarantine\$IncidentId"
+$mode          = if ($Apply) { 'APPLY' } else { 'DRY-RUN' }
+$IRDir         = if ($OutputDir) { $OutputDir } else { 'C:\ProgramData\IRToolkit' }
+$QuarantineDir = Join-Path $IRDir "Quarantine\$IncidentId"
 New-Item -ItemType Directory -Path $QuarantineDir -Force | Out-Null
 
-# Rollback journal -- one JSON line per reversible action so 06_Restore-Host.ps1 can
-# undo this eradication if the investigation later returns a FALSE POSITIVE verdict.
-$RollbackDir     = "$IRDir\rollback"
-$RollbackJournal = "$RollbackDir\$IncidentId.jsonl"
-New-Item -ItemType Directory -Path $RollbackDir -Force | Out-Null
+# Rollback journal - one JSON line per reversible action for 06_Restore-Host.ps1
+$RollbackJournal = Join-Path $IRDir "Eradication_rollback_$IncidentId.jsonl"
 function Write-Rollback([hashtable]$Entry) {
     ($Entry | ConvertTo-Json -Compress) | Out-File -FilePath $RollbackJournal -Append -Encoding UTF8
 }
@@ -42,22 +50,16 @@ function Stop-ProcessTree {
     param([int]$ProcessId)
     if ($ProcessId -le 4) { return }  # Never kill System/Idle
 
-    # Recursively stop child processes first
     $Children = Get-CimInstance Win32_Process -Filter "ParentProcessId = $ProcessId" -ErrorAction SilentlyContinue
-    foreach ($Child in $Children) {
-        Stop-ProcessTree -ProcessId $Child.ProcessId
-    }
+    foreach ($Child in $Children) { Stop-ProcessTree -ProcessId $Child.ProcessId }
 
     try {
         $Proc = Get-Process -Id $ProcessId -ErrorAction SilentlyContinue
         if ($Proc) {
-            $Name = $Proc.Name
-            Write-IRLog "ERADICATE-PROC: Stopping PID $ProcessId ($Name)"
-            Stop-Process -Id $ProcessId -Force -ErrorAction SilentlyContinue
+            Write-IRLog "[$mode] ERADICATE-PROC: Stopping PID $ProcessId ($($Proc.Name))"
+            if ($Apply) { Stop-Process -Id $ProcessId -Force -ErrorAction SilentlyContinue }
         }
-    } catch {
-        Write-IRLog "ERADICATE-PROC: Failed to stop PID $ProcessId : $_"
-    }
+    } catch { Write-IRLog "[$mode] ERADICATE-PROC: Failed to stop PID $ProcessId : $_" }
 }
 
 $KilledPids    = [System.Collections.Generic.List[int]]::new()
@@ -65,7 +67,7 @@ $KilledProcs   = [System.Collections.Generic.List[string]]::new()
 $Quarantined   = [System.Collections.Generic.List[string]]::new()
 $Errors        = [System.Collections.Generic.List[string]]::new()
 
-Write-IRLog "ERADICATE-PROC: Starting process eradication for $IncidentId"
+Write-IRLog "[$mode] ERADICATE-PROC: Starting process eradication for $IncidentId"
 
 # -- Kill by PID ---------------------------------------------------------------
 foreach ($PidStr in $MaliciousPids) {
@@ -265,27 +267,27 @@ Write-IRLog "ERADICATE-PROC: Complete. PIDs: $($KilledPids.Count), Procs: $($Kil
 # SIG # Begin signature block
 # MIIcoQYJKoZIhvcNAQcCoIIckjCCHI4CAQExDzANBglghkgBZQMEAgEFADB5Bgor
 # BgEEAYI3AgEEoGswaTA0BgorBgEEAYI3AgEeMCYCAwEAAAQQH8w7YFlLCE63JNLG
-# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCBNukLthDM5uXe4
-# /lwCGr9fhumOFaMQUrZDF8cL1Vi9vKCCFrQwggN2MIICXqADAgECAhBa5MQyEl22
-# qUV1bZluOcpOMA0GCSqGSIb3DQEBCwUAMFMxGjAYBgNVBAsMEUluY2lkZW50IFJl
+# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCD9MvkOGokyt3rr
+# KrFYtE57jOp7kwSWarvRhkObHC0hlKCCFrQwggN2MIICXqADAgECAhAbL3xr3F9b
+# nkbveZC/LiR8MA0GCSqGSIb3DQEBCwUAMFMxGjAYBgNVBAsMEUluY2lkZW50IFJl
 # c3BvbnNlMRMwEQYDVQQKDApJUiBUb29sa2l0MSAwHgYDVQQDDBdJUiBUb29sa2l0
-# IENvZGUgU2lnbmluZzAeFw0yNjA2MjAwMDU5NDZaFw0zMTA2MjAwMTA5NDZaMFMx
+# IENvZGUgU2lnbmluZzAeFw0yNjA2MjIwNDI0NDVaFw0zMTA2MjIwNDM0NDVaMFMx
 # GjAYBgNVBAsMEUluY2lkZW50IFJlc3BvbnNlMRMwEQYDVQQKDApJUiBUb29sa2l0
 # MSAwHgYDVQQDDBdJUiBUb29sa2l0IENvZGUgU2lnbmluZzCCASIwDQYJKoZIhvcN
-# AQEBBQADggEPADCCAQoCggEBAJ1nFbqBzQLbEhUUTT10Lrva+ooE/uVqzTJbGk5/
-# xh3zYBEAaRil7obceqCWtDg6KSjbDQP8wto42fHUK8tp0FU0NEi2+rkWHfcpeasm
-# z2e+UFQMDlXRcxg7dqe+08OB4pFhwrHSPo0m7HZAgtpHd02POka7jaYVoAnScg7i
-# LuZiRSJ3tJKZu1KCSTntV+LbicnowTlaDEvr7JQzSVs+5BpNadU3n/ujzH088Mgm
-# CoXooQpF12SzbZNCZ+kbgza6bNMbEHNGkLr9S0vHQD95oKPWF7YuOu7jqtkuCOZc
-# KYYi4nOXFwLqXmJ+sqqpR2NrrfMkz4VaALGIZ93o10CHWDkCAwEAAaNGMEQwDgYD
-# VR0PAQH/BAQDAgeAMBMGA1UdJQQMMAoGCCsGAQUFBwMDMB0GA1UdDgQWBBQRXBKC
-# VXuhcK7rCDzb/6SAfPGwvDANBgkqhkiG9w0BAQsFAAOCAQEAlZhDvun+4lQ0yd2C
-# +pAFD3B2/l2N9hArAcHhp6DaO48NSIT3eyyhGrfk8f3lDVhvjEbUDDmb6Oe67rBN
-# 3W7Dp1Y+W8Z96kC3miq7UbmVTGkiQGZFwi0KJ8tw++//vlU3zlW9nhqwFxzm7DfL
-# zECzv6bnd9Ri+1R4zhvkd5BLTuwLjPLkzbOTdsGwbXWWOK2gTTCr82I7G9xcq9Gv
-# qAcoJAHVEiNKt7p7Y+ScDL/AZGBMCBTsN9gcAoIgq22EWBHHV02HmPfuYyddaq1c
-# Lmjot0+5wVoPVl4wNktght1WVHDlk3EpEJF5qc7Yhl3YtniIEHQoO8BkWykpFDhy
-# q5wz7TCCBY0wggR1oAMCAQICEA6bGI750C3n79tQ4ghAGFowDQYJKoZIhvcNAQEM
+# AQEBBQADggEPADCCAQoCggEBAKuTSorzjXf0qc4qX04KtYn2ErVj9RAkn/1f/9YN
+# llrRj0s3urh/LnWmHn4vUjPrDTzHXUx4udOclWNlv52uCMAfXKZR3qD73OCHHQ2l
+# +1s4JqrAdGhr6QPyIhCDwl7wqQUfekQtBep+SqbM0vkbvup3WKgol+c3fIUxvM8E
+# bPLg5CcNWug6Twj+Wn1FJidJihmYARSKT5PFv32BLbffUpuvdWXxzRIRv8c4EE+S
+# bWs3lTiCGrp1X33mXYiMRNAiF5ofrCJwRA7LESh4TCqXWDSvs+KFBi1ZxEnLxmUk
+# 1Wrzq11umlIzoJhnEN0VyBvLK6X40uTF50piU+5kGy9kZlkCAwEAAaNGMEQwDgYD
+# VR0PAQH/BAQDAgeAMBMGA1UdJQQMMAoGCCsGAQUFBwMDMB0GA1UdDgQWBBSpc1pf
+# XTSlgxdtXKDrlumz7H67TjANBgkqhkiG9w0BAQsFAAOCAQEAdPAxdgyk/YzF72lK
+# 4P1I3Lwjice2yAR0aoXSEP5gO/xnAvuqCiAcdPfJhqMrrfq5iFLqTuWSfz+k9irn
+# hjzyWgmo2GUrQ8BVRoNAw7HpTJo7Rw8+FfDzyy+stq9UKWrkflHqwb7oBD+aBs/5
+# ZccFKZi8oeV79CCTGdwXKYgE+xYbV//Twr7rpMbVUqbchEDdZXEzT2GdEUd5B02L
+# bDGJ4Gjz8AtCFcSXWQlLnAQxd5CJVFHDkyfkEs2VvBPtR/MBCF3NiNufb8HgClhS
+# ZHayqVVZhUd+NS7/orBY5M1Ioc0/kGiNO3nlWf1IlAPk/jsILweFZkUO0wBTot/O
+# b18zszCCBY0wggR1oAMCAQICEA6bGI750C3n79tQ4ghAGFowDQYJKoZIhvcNAQEM
 # BQAwZTELMAkGA1UEBhMCVVMxFTATBgNVBAoTDERpZ2lDZXJ0IEluYzEZMBcGA1UE
 # CxMQd3d3LmRpZ2ljZXJ0LmNvbTEkMCIGA1UEAxMbRGlnaUNlcnQgQXNzdXJlZCBJ
 # RCBSb290IENBMB4XDTIyMDgwMTAwMDAwMFoXDTMxMTEwOTIzNTk1OVowYjELMAkG
@@ -389,31 +391,31 @@ Write-IRLog "ERADICATE-PROC: Complete. PIDs: $($KilledPids.Count), Procs: $($Kil
 # y2ueIu9THFVkT+um1vshETaWyQo8gmBto/m3acaP9QsuLj3FNwFlTxq25+T4QwX9
 # xa6ILs84ZPvmpovq90K8eWyG2N01c4IhSOxqt81nMYIFQzCCBT8CAQEwZzBTMRow
 # GAYDVQQLDBFJbmNpZGVudCBSZXNwb25zZTETMBEGA1UECgwKSVIgVG9vbGtpdDEg
-# MB4GA1UEAwwXSVIgVG9vbGtpdCBDb2RlIFNpZ25pbmcCEFrkxDISXbapRXVtmW45
-# yk4wDQYJYIZIAWUDBAIBBQCggYQwGAYKKwYBBAGCNwIBDDEKMAigAoAAoQKAADAZ
+# MB4GA1UEAwwXSVIgVG9vbGtpdCBDb2RlIFNpZ25pbmcCEBsvfGvcX1ueRu95kL8u
+# JHwwDQYJYIZIAWUDBAIBBQCggYQwGAYKKwYBBAGCNwIBDDEKMAigAoAAoQKAADAZ
 # BgkqhkiG9w0BCQMxDAYKKwYBBAGCNwIBBDAcBgorBgEEAYI3AgELMQ4wDAYKKwYB
-# BAGCNwIBFTAvBgkqhkiG9w0BCQQxIgQgHx88/EePXqRgACRBOafRTe5bTWdodMpK
-# Qekv+3/2qBEwDQYJKoZIhvcNAQEBBQAEggEAafsAoNht3WOSrnY5O0XUFSLSr9m7
-# nVSG6xaRXL1oV6ZX6l4UHFQEa2/cMuGUKSuDVzHsw8407hUV8qGNhyYIjuBj5FbV
-# jwLbB/TWDBizX9VGhNoxfT4174hTUkueD5AU9pUVOyvAAYaI+2G0jAxuaNHCL16p
-# IE+vLkWwTPsgqBT0+bpKBjcmvz7PVZ2rjAtk+KOdipmcetcI1J8HhrtVeK6xJKT4
-# BgFjx48hypofCSJSwuEruz/su0g6ULrkk8gxRqdv3JJDXoq2a8flQtldjXNsi95C
-# xwJ9tlvm/GPrRsHjVfhzJlDMqVMRdHiwQlf6eswzQff4TXjTgEq4rD8lZaGCAyYw
+# BAGCNwIBFTAvBgkqhkiG9w0BCQQxIgQgs1IAIzrxc7w/qgbLbQfM5PMEUs7qul3s
+# mo4i8M4N6QgwDQYJKoZIhvcNAQEBBQAEggEAaIFm98lNspmzAB48LsmbRladiR4o
+# DAKkjiNqHgvZWcI6QPAonFrHBwrQ2XUts6rYkTa81Ko2DHLphIJUiHyRUOlb4/jd
+# tux6/pMqAH7wUNMuNbnwMJHIvTYfMolbOm/ePq7PRnIeNn45LT98SJSvNFTpQ63S
+# ZKfxiH6XKfFe/j4KErUCWChdpMDo6gI0c9BAJsNiQDK1xeZELesMSZoP9JaNNGGU
+# c7eJFEToX7NbpYCETBOu1TQerUli26tLFUS6JPllO3yW5ef+Rv0uK0cYbZ+zYEJv
+# R41K+UU60j6dhIVI5ZT5dHkphB6HZMN6bKU4JH5ycgj7f6M4QWCOa0Pje6GCAyYw
 # ggMiBgkqhkiG9w0BCQYxggMTMIIDDwIBATB9MGkxCzAJBgNVBAYTAlVTMRcwFQYD
 # VQQKEw5EaWdpQ2VydCwgSW5jLjFBMD8GA1UEAxM4RGlnaUNlcnQgVHJ1c3RlZCBH
 # NCBUaW1lU3RhbXBpbmcgUlNBNDA5NiBTSEEyNTYgMjAyNSBDQTECEAqA7xhLjfEF
 # gtHEdqeVdGgwDQYJYIZIAWUDBAIBBQCgaTAYBgkqhkiG9w0BCQMxCwYJKoZIhvcN
-# AQcBMBwGCSqGSIb3DQEJBTEPFw0yNjA2MjAwMTE0MzBaMC8GCSqGSIb3DQEJBDEi
-# BCByJtumuND7GjLFBGAhnrn6JRMINF1IS8da9WXEn9UpCjANBgkqhkiG9w0BAQEF
-# AASCAgCj3hZqI8mvF1gM52on4F//8O0U7JPMhHzmmqTXJbHTN+8/M9XS3L/4ShAg
-# bvW3jjiHHNpXHuFbSQOciDuMFn+AQAR/J3EoTjCuIS1PzrvDLJMI9sVajRdP+S/7
-# gGhmG+9Uo/hvY/KFwyuKiGUxIoFWIwfZ8ucuV+QbLAHaYKu4btumf3/4iqcCCFmY
-# ZjpyRgIR06y6y5yFz813OF+jPkM6xlg7iGkmCKUfTbOOWBmWCBpUi1RjDqk/tOlp
-# VAXhZQ6bYOFOaT5OccqQQ3bH3JyHio4V8lcCOHvOcfDUQn0jWgcdcOb+nS5hQEYY
-# 9LyFsZz+mp2rsznbkzQg8rCHgFxvE4JbJVb2wT4La8tebkzF2+xStzHq8LqS/B/2
-# vTQa8nDNEPFUlLMIhwxWRJ1bZoXvum0BKxLPP0EHJbjctyTxUZIcUBpUaWGlJpx2
-# jpc8x5YwOZIokD7laSFJMXLSL7V33k9VURDgqfutrsnDffWS2v20YbJIztvWjMUl
-# W33VC3pbuyzvAo52/A2WmmVlp7sHrQtjrc5eVA2qy8FNTE237uSLfhlU7Yb7nC6C
-# vHxingX8nYr+hAiCfn6m7t731UnYodUGiEhrtMXNcmDRX61b9d/kkTKppIMkIh8C
-# HIBFoQmzISZm+e1ns+/Uq0Gi5TKJC9U9lEariz2abcUJHr71MQ==
+# AQcBMBwGCSqGSIb3DQEJBTEPFw0yNjA2MjIwNDM0NTBaMC8GCSqGSIb3DQEJBDEi
+# BCCelWrIWEf6ObyTAjnG/vOE23x/4c9Ua6/maPHrLyVaADANBgkqhkiG9w0BAQEF
+# AASCAgAkxyWbHiXU7iLj5yY9+CNVeoQ66sbl2Q1t5wxukDb4NWUX5UPJEbVUf8Ls
+# 5dbwh5Mh6s+Cpu5D4zodrCIOkFt5EB3cowwoohamX8QxVtkiZEmjdDADGdRyXcg1
+# BusiCS8hbfgb5bhqqGu0fUwT2n5f5VoztSxk6XxcgIdPykMjQOo06bvj80nI6ekm
+# EFuzCNUySjqrSziq6+SmcZ/AqIS5hPfpnj9JwrTu6QFuOKzTydAxxRuapId+A3Zn
+# SB4nlBab5sCuf9T9jmBs18/HyGIiYzPlXYTeXysLKeGXrCHRQUfe3przJof4mjgw
+# tZ+gLOG7Z1MrXASGpOeF8hiBwHsAS62euWTWDU41hUe/BqHtzSH5xC+IuXBngyvP
+# eRq9Rw71KugUaFdMC8i5PF5Cu0IjFL4spLyT0SLieODmSR+V+FLjvz6UKVxkj9Cb
+# WGTZq0GHPk6HYwNaGww1z5kKzWOyuyxQb28PvMmeNIkKFJUe2hEoDIzCCsLFyLqb
+# XBBIMfJDG8qB1upWmd2AHu65srJTu6Osl1O5l6dxeQXrfE52ALvnRZ3dqktsH2og
+# YtAs+5uY24Y+awwYWbZgePmyZAp+2U3e4BsmyJhpnNh+PT2yxQWtC82fA0g9vlVy
+# QAGtCNPr5rBrRdY7E0uJu3seET4JDy2R38eQ/nD97YXg7PgO8Q==
 # SIG # End signature block
