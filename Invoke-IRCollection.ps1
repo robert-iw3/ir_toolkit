@@ -69,6 +69,13 @@ param(
     [switch]$NoFirewallLockdown,
     [int[]]$AllowInboundPort = @(),         # management pinhole(s) kept open (e.g. 5985 WinRM)
     [string[]]$AllowInboundRemoteAddress = @(),
+    # Egress observation: after collection, start a scheduled sensor that logs outbound
+    # connections over a window (default 24h), then auto-blackholes egress. Outbound is
+    # left open during the window so jittered/long-dwell C2 beacons are observed. On by
+    # default; the responder returns later to collect the egress evidence log.
+    [switch]$NoEgressMonitor,
+    [int]$EgressWindowHours = 24,
+    [string[]]$EgressMgmtIP = @(),          # management IP(s) kept open in the egress blackhole
     [ValidateSet('Restricted','AllSigned','RemoteSigned')]
     [string]$PostRunExecutionPolicy = 'RemoteSigned',
     # Per-phase timeout safety net. A hung sub-step (stuck native tool, locked file)
@@ -136,6 +143,7 @@ try {
     $ForensicsScript   = Join-Path $PSScriptRoot 'playbooks\windows\00_Collect-Forensics.ps1'
     $ClockScript       = Join-Path $PSScriptRoot 'playbooks\windows\Get-ClockContext.ps1'
     $FirewallScript    = Join-Path $PSScriptRoot 'playbooks\windows\Enforce-StrictFirewall.ps1'
+    $EgressScript      = Join-Path $PSScriptRoot 'playbooks\windows\Watch-Egress.ps1'
     $HuntDir           = Join-Path $PSScriptRoot 'playbooks\windows\threat_hunting'
     $EDRScript         = Join-Path $HuntDir 'EDR_Toolkit.ps1'
     $AnalyzeScript     = Join-Path $HuntDir 'Analyze-EDRReport.ps1'
@@ -960,6 +968,29 @@ try {
         deep_scan    = [bool]$DeepFileScan
         artifacts    = $artifacts
     } | ConvertTo-Json -Depth 4 | Out-File -FilePath (Join-Path $OutDir "_manifest_$RunStamp.json") -Encoding UTF8
+
+    # PHASE: Egress observation (deferred). Start a scheduled sensor that logs outbound
+    # connections over a window (default 24h) then auto-blackholes egress. Outbound stays
+    # OPEN during the window so jittered/long-dwell C2 beacons are observed; the responder
+    # RETURNS later to collect the egress evidence log. Runs after collection so it does not
+    # compete with the live triage. Off with -NoEgressMonitor.
+    if (-not $NoEgressMonitor) {
+        Write-Log "==== PHASE: Egress Observation (start sensor; auto-blackhole at +$EgressWindowHours h) ====" 'Cyan'
+        if (Test-Path -LiteralPath $EgressScript) {
+            $egArgs = @('-ExecutionPolicy','Bypass','-NoProfile','-File', $EgressScript,
+                        '-Start','-IncidentId', $IncidentId, '-WindowHours', "$EgressWindowHours")
+            $egMgmt = if (@($EgressMgmtIP).Count -gt 0) { $EgressMgmtIP } else { $AllowInboundRemoteAddress }
+            if (@($egMgmt).Count -gt 0) { $egArgs += @('-MgmtIP') + ($egMgmt -join ',') }
+            try {
+                & $PSExe @egArgs *>&1 | Tee-Object -FilePath (Join-Path $OutDir "_Egress_$RunStamp.log") -Append
+                Write-Log "  Egress sensor started. Return after the window to collect the evidence log + confirm blackhole." 'Green'
+            } catch { Write-Log "  Egress monitor start error: $($_.Exception.Message)" 'Yellow' }
+        } else {
+            Write-Log "  SKIP - Watch-Egress.ps1 not found: $EgressScript" 'Yellow'
+        }
+    } else {
+        Write-Log "Egress observation skipped (-NoEgressMonitor)." 'Yellow'
+    }
 
     # Seal evidence custody - chain-of-custody record + manifest SHA256 + optional HMAC.
     # PS twin of playbooks/reporting/evidence_custody.py.

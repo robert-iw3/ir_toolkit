@@ -68,6 +68,8 @@ flowchart TD
 ### Stage 0 · Containment
 Immediately enforces Default-Deny inbound firewall, exports the pre-lockdown state as a `.wfw` backup so eradication can restore known-good rules while keeping known-bad C2 blocked.
 
+**Inbound is blocked but outbound is deliberately left OPEN during the analysis window** (`Enforce-StrictFirewall.ps1` sets `DefaultOutboundAction Allow`). This is intentional: blocking inbound kills the adversary's listeners and lateral movement *in*, which forces their traffic onto **outbound beaconing** — where we can *see* where the implant calls home and what it exfils. Cutting egress immediately would blind the investigation to the C2/exfil destinations. See **Stage 4b · Egress observation** for how that visibility is captured over time and the deferred blackhole that closes it.
+
 ### Stage 1 · Collection
 
 **Forensics snapshot** (`00_Collect-Forensics.ps1`)
@@ -202,8 +204,16 @@ The reports are intentionally split: the three **final reports** show only beyon
 ### Stage 4 · Eradication
 Kills malicious processes, quarantines implants (sha256-verified), unregisters persistence (tasks, COM, WMI, services), disables/revokes implicated accounts, blocks C2 egress via firewall. Every action is dry-run by default and written to a rollback journal.
 
+### Stage 4b · Egress observation (OPTIONAL, deferred — extends past the analyst's visit)
+
+> **⚠️ Data-sensitive hosts: isolate FIRST, do not observe.** Egress observation deliberately leaves outbound open for a window to learn the C2/exfil destinations — which means tolerating that the implant **may keep exfiltrating** during that window. For a host holding sensitive/regulated data (PII/PHI/secrets/crown-jewel IP) that trade is **not acceptable**: completely isolate the network stack **before** investigation (full inbound **and** outbound block) and skip this phase — `playbooks\windows\01_Contain-Host.ps1` (blocks in + out), or `Enforce-StrictFirewall.ps1 -FullInboundLockdown -BlockOutbound`, then run collection with **`-NoEgressMonitor`**. You lose *where* it exfiltrated but **eliminate further data loss** — the right priority when the data outweighs the attribution. Observe only when mapping the C2 infrastructure is worth the residual exfil risk.
+
+Because C2 beacons **jitter** and can **dwell for hours**, a point-in-time `netstat` during collection routinely misses them. When you do choose to observe, `Watch-Egress.ps1 -Start` (on by default; `-NoEgressMonitor` to skip) registers a SYSTEM scheduled task that snapshots outbound connections (`Get-NetTCPConnection` + owning process) every minute into an **append-only evidence log** (`C:\ProgramData\IRToolkit\egress-<id>\`), filtering RFC1918/management. When the observation window closes (default **24h**) a one-shot task **auto-blackholes egress** (`Enforce-StrictFirewall.ps1 -BlockOutbound`, keeping a management pinhole) and removes the poller.
+
+> **Workflow impact — return visit required.** The responder leaves the sensor running and **comes back after the window** to (1) collect the egress evidence log (`Watch-Egress.ps1 -Collect` reports its path + unique destinations) and bundle it as evidence, and (2) confirm the blackhole fired (`-Status` → `blackhole: done`). Tune with `-WindowHours` / `-IntervalMin`; `-Blackhole` cuts egress immediately, `-Stop` tears the sensor down without blackholing.
+
 ### Stage 5 · Restoration
-Restores firewall to pre-lockdown known-good state while keeping C2 IPs blocked. Recovers quarantined files only after sha256-verifying them against the rollback journal.
+Restores firewall to pre-lockdown known-good state while keeping C2 IPs blocked. Recovers quarantined files only after sha256-verifying them against the rollback journal. The egress blackhole is part of the same `.wfw`-backed firewall state, so `Enforce-StrictFirewall.ps1 -Rollback` reverses it too.
 
 `IOCs.json` is emitted in the **analysis** stage (not reporting) so eradication's C2 re-block never depends on reports being generated. Every orchestrator writes a uniform `_status.json` (`COMPLETED` / `PARTIAL` / `FAILED` + per-phase results + `tp_count`) for SOAR gating.
 

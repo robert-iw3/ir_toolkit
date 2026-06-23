@@ -19,6 +19,11 @@
 #   ./Invoke-IRCollection-Linux.sh [--output-root DIR] [--incident-id ID]
 #                                  [--skip-forensics] [--skip-hunt] [--deep]
 #                                  [--capture-memory [--memory-output /path/on/big/disk]]
+#                                  [--no-egress-monitor] [--egress-window-hours N]
+#                                  [--egress-mgmt-ips a,b]
+#   After collection, a deferred egress-observation sensor is started (root) that logs
+#   outbound connections for --egress-window-hours (default 24) then auto-blackholes
+#   egress; the responder returns later to collect /var/ir/egress-<id>/ as evidence.
 # Run as root for full visibility (shadow, all /proc, every cron); degrades
 # gracefully as a normal user. --capture-memory pre-flights free space and auto-
 # redirects to a local volume (or --memory-output) when the output drive is too small;
@@ -39,6 +44,9 @@ DEEP=0
 CAPTURE_MEMORY=0
 MEMORY_OUTPUT=""        # explicit path for the memory image (e.g. a local disk with space)
 MEM_COMPRESS=0          # avml snappy compression (smaller image; needs avml-convert to analyze)
+NO_EGRESS_MONITOR=0     # by default, start the deferred egress-observation sensor after collection
+EGRESS_WINDOW_HOURS=24
+EGRESS_MGMT_IPS="${IR_MGMT_IPS:-}"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -51,6 +59,9 @@ while [[ $# -gt 0 ]]; do
         --memory-output) MEMORY_OUTPUT="$2"; shift 2 ;;  # redirect image to a local volume with space
         --compress)      MEM_COMPRESS=1; shift ;;        # avml snappy compression (smaller image)
         --deep)          DEEP=1; shift ;;
+        --no-egress-monitor) NO_EGRESS_MONITOR=1; shift ;;   # don't start the egress sensor
+        --egress-window-hours) EGRESS_WINDOW_HOURS="$2"; shift 2 ;;
+        --egress-mgmt-ips) EGRESS_MGMT_IPS="$2"; shift 2 ;;  # mgmt IP(s) kept open in the blackhole
         -h|--help)       grep '^#' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "Unknown option: $1" >&2; exit 2 ;;
     esac
@@ -247,6 +258,27 @@ PYMERGE
     fi
 else
     log "Skipping hunt + triage + adjudication (--skip-hunt)."
+fi
+
+# --- Egress observation (deferred) --------------------------------------------
+# Start a cron-driven sensor that logs outbound connections over a window (default
+# 24h) then auto-blackholes egress. Outbound stays OPEN during the window so
+# jittered/long-dwell C2 beacons are observed; the responder RETURNS later to
+# collect the egress evidence log + confirm the blackhole. Off with --no-egress-monitor.
+EGRESS_SCRIPT="${SCRIPT_DIR}/playbooks/linux/monitor_egress.sh"
+if [[ $NO_EGRESS_MONITOR -eq 0 && -f "$EGRESS_SCRIPT" ]]; then
+    if [[ $EUID -eq 0 ]]; then
+        log "Egress observation: starting sensor (window ${EGRESS_WINDOW_HOURS}h; auto-blackhole at close)"
+        IR_INCIDENT_ID="$INCIDENT_ID" bash "$EGRESS_SCRIPT" --start \
+            --incident "$INCIDENT_ID" --window-hours "$EGRESS_WINDOW_HOURS" \
+            ${EGRESS_MGMT_IPS:+--mgmt-ips "$EGRESS_MGMT_IPS"} >>"$RUN_LOG" 2>&1 \
+            && log "  Egress sensor active — return after the window to collect /var/ir/egress-${INCIDENT_ID}/ and confirm blackhole." \
+            || log "  Egress sensor start failed (see $RUN_LOG)."
+    else
+        log "Egress observation skipped — needs root to install the cron sensor (re-run as root or start manually)."
+    fi
+elif [[ $NO_EGRESS_MONITOR -eq 1 ]]; then
+    log "Egress observation skipped (--no-egress-monitor)."
 fi
 
 # --- Manifest: SHA256 of every collected artifact -----------------------------

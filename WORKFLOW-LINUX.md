@@ -307,6 +307,45 @@ sudo ./playbooks/linux/07_revoke_credentials.sh \
     --principals-file ./reports/<HOSTNAME>/Principals.json                      # credential revocation
 ```
 
+## Step 4b — Egress observation (OPTIONAL, deferred — extends past the responder's visit)
+
+> ### ⚠️ Data-sensitive hosts: isolate FIRST, do not observe
+> Egress observation deliberately **leaves outbound open** for a window to learn the C2/exfil
+> destinations — which means tolerating the risk that the implant **continues to exfiltrate** during
+> that window. For a host holding sensitive/regulated data (PII, PHI, secrets, crown-jewel IP), that
+> trade is **not acceptable**. In that case, **completely isolate the network stack before the
+> investigation** — full inbound **and** outbound lockdown — and skip this phase:
+> ```bash
+> sudo IR_INCIDENT_ID=<id> IR_MGMT_IPS=<mgmt> ./playbooks/linux/01_contain_host.sh   # full in+out isolation FIRST
+> ./Invoke-IRCollection-Linux.sh --no-egress-monitor ...                              # then collect, no egress window
+> ```
+> You lose visibility into *where* it was exfiltrating, but you **eliminate further data loss** —
+> the correct priority when the data outweighs the attribution. Use egress observation only when the
+> intelligence value (mapping the C2 infrastructure) outweighs the residual exfil risk.
+
+**Why outbound is watched (when you choose to), not cut immediately:** containment locks down inbound
+(kills listeners + lateral movement *in*), which forces the adversary onto **outbound beaconing**.
+Leaving egress open during the analysis window lets us *see* where the implant calls home and what it
+exfils. But C2 beacons **jitter** and can **dwell for hours**, so a point-in-time `ss`/`sockstat` at
+collection routinely misses them — you have to watch egress over time.
+
+`monitor_egress.sh` polls the connection table (`conntrack` + `ss`, with the owning PID/process) on a
+cadence into an **append-only evidence log**, filtering RFC1918/management, then **auto-blackholes
+outbound** when the window closes (default **24h**). It only governs OUTBOUND; inbound containment
+(`01_contain_host.sh`) and known-C2 blocks (`04_block_c2.sh`) are unchanged.
+
+```bash
+sudo IR_INCIDENT_ID=<id> ./playbooks/linux/monitor_egress.sh --start \
+     --window-hours 24 --interval-min 1 --mgmt-ips 203.0.113.5   # observe, auto-blackhole at +24h
+```
+
+> **Workflow impact — return visit required.** The responder leaves the sensor running and **comes
+> back after the window** to (1) collect the egress evidence log — `monitor_egress.sh --collect
+> --incident <id>` reports its path (`/var/ir/egress-<id>/egress-<id>.log`) + unique destinations —
+> and bundle it as evidence, and (2) confirm the blackhole fired (`--status` → `blackhole: done`).
+> `--blackhole` cuts egress immediately; `--stop` tears the sensor down without blackholing. The
+> pre-blackhole ruleset is saved in the incident dir and reversed by `06_restore.sh`.
+
 ## Step 5 — Restoration
 
 ```bash

@@ -1,11 +1,19 @@
 ﻿<#
 .SYNOPSIS
-    Enforces a strict Default Deny (Block) inbound Windows Firewall posture with binary state rollback.
+    Enforces a strict Default-Deny inbound Windows Firewall posture (and, as a deferred
+    follow-on, an outbound blackhole) with binary state rollback.
 
 .DESCRIPTION
     Safely transitions the Windows Defender Firewall to a strict 'Block Inbound' default.
     Generates a full binary export of the firewall state prior to mutation.
     Includes built-in validation to ensure pre-existing explicit 'Allow' rules continue to function.
+
+    Two-stage network posture:
+      • Analysis window (default): inbound Block, outbound ALLOW — so the C2/egress sensor can
+        observe where the implant beacons and exfils to (beacons jitter / dwell for hours).
+      • Follow-on (-BlockOutbound): after the egress-observation window closes, also set
+        DefaultOutboundAction=Block to blackhole egress, keeping a management pinhole
+        (-AllowOutboundPort / -AllowOutboundRemoteAddress). Reversible via -Rollback.
 
 .PARAMETER Rollback
     Switch. Triggers the restoration of a previous firewall state.
@@ -42,7 +50,15 @@ param (
     # Optional management pinhole kept open during full lockdown (e.g. 3389 for RDP,
     # 5985/5986 for WinRM) so a remote responder is not locked out.
     [int[]]$AllowInboundPort = @(),
-    [string[]]$AllowInboundRemoteAddress = @()
+    [string[]]$AllowInboundRemoteAddress = @(),
+    # FOLLOW-ON outbound blackhole: after the egress-observation window has captured
+    # where the implant beacons/exfils, set DefaultOutboundAction=Block to cut all
+    # egress (a management pinhole is kept so the responder is not locked out). This
+    # is the deferred second stage — NOT used during the analysis window, when
+    # outbound is deliberately left open so the C2 sensor can observe beaconing.
+    [switch]$BlockOutbound,
+    [int[]]$AllowOutboundPort = @(),
+    [string[]]$AllowOutboundRemoteAddress = @()
 )
 
 $ErrorActionPreference = 'Stop'
@@ -132,9 +148,29 @@ try {
         Enable-NetFirewallRule -DisplayGroup "Core Networking" -ErrorAction SilentlyContinue
     }
 
+    # --- B2. OUTBOUND BLACKHOLE (deferred follow-on) ---
+    # During analysis OutboundAction stays Allow so the C2 sensor can watch beaconing.
+    # -BlockOutbound is the second stage, run AFTER the egress-observation window.
+    $OutboundAction = 'Allow'
+    if ($BlockOutbound) {
+        $OutboundAction = 'Block'
+        Write-Host "    -> [2b/4] OUTBOUND BLACKHOLE: setting DefaultOutboundAction = Block..." -ForegroundColor Yellow
+        # Keep a management egress pinhole so the responder is not cut off
+        if (@($AllowOutboundPort).Count -gt 0) {
+            $op = @{ DisplayName = "IR-MGMT-EGRESS-PINHOLE"; Direction = 'Outbound'; Action = 'Allow'
+                     Protocol = 'TCP'; RemotePort = $AllowOutboundPort }
+            if (@($AllowOutboundRemoteAddress).Count -gt 0) { $op['RemoteAddress'] = $AllowOutboundRemoteAddress }
+            New-NetFirewallRule @op | Out-Null
+            Write-Host "       Management egress pinhole kept open: TCP $($AllowOutboundPort -join ',') to $(@($AllowOutboundRemoteAddress) -join ',')" -ForegroundColor Gray
+        }
+        # Allow local DNS so name resolution for management does not hard-fail
+        New-NetFirewallRule -DisplayName "IR-ALLOW-LOCAL-DNS-EGRESS" -Direction Outbound -Action Allow `
+            -Protocol UDP -RemotePort 53 -RemoteAddress LocalSubnet -ErrorAction SilentlyContinue | Out-Null
+    }
+
     # --- C. ENFORCE DEFAULT DENY ---
-    Write-Host "    -> [3/4] Mutating DefaultInboundAction to 'Block' across all profiles..." -ForegroundColor Yellow
-    Set-NetFirewallProfile -Profile Domain,Private,Public -DefaultInboundAction Block -DefaultOutboundAction Allow
+    Write-Host "    -> [3/4] Mutating DefaultInboundAction=Block, DefaultOutboundAction=$OutboundAction across all profiles..." -ForegroundColor Yellow
+    Set-NetFirewallProfile -Profile Domain,Private,Public -DefaultInboundAction Block -DefaultOutboundAction $OutboundAction
 
     # --- D. STATE VALIDATION ---
     Write-Host "    -> [4/4] Validating state enforcement..." -ForegroundColor Gray
