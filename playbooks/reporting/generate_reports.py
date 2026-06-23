@@ -349,16 +349,69 @@ def md_incident(model, host, incident, analyst, when):
     a("")
     a("---")
     a("")
-    a("## 5. Resolution / eradication")
+    # ── Memory forensics & YARA (only when a memory image was analyzed) ──────────
+    if model.get("has_memory") or model.get("yara"):
+        a("## 5. Memory forensics & YARA")
+        a("")
+        y = model.get("yara")
+        if y:
+            trusted = y.get("trusted")
+            a(f"- **YARA engine:** `{y.get('engine', '?')}`  ·  **rules scanned:** "
+              f"{y.get('rules_compiled', '?')} (Linux-applicable, compiled)  ·  "
+              f"**duration:** {y.get('duration_seconds', '?')}s")
+            badge = "✅ trusted (ELF self-test canary matched)" if trusted else \
+                    "❌ **UNTRUSTED** — self-test canary never matched / timed out; 0 matches is NOT clean"
+            a(f"- **Scan integrity:** {badge}")
+            n = y.get("match_count", 0)
+            if n:
+                a(f"- **YARA matches: {n}** (malware/tool signatures):")
+                for mt in y.get("matches", [])[:25]:
+                    where = (f"PID {mt['pid']} ({mt.get('process', '')})" if mt.get("pid")
+                             else f"offset {mt.get('offset', '?')}")
+                    # location disambiguates injected code (anon/exec) from a rule grazing a loaded
+                    # library (file-backed) — shown so FP vs TP is visible at a glance
+                    region, perms, path = mt.get("region", ""), mt.get("perms", ""), mt.get("path", "")
+                    ctx = ""
+                    if region == "anon" and "x" in perms:
+                        ctx = f" — ⚠️ **anonymous executable** ({perms}, injected/unbacked)"
+                    elif region == "file":
+                        ctx = f" — file-backed {perms} `{path or '?'}` (verify hash/package)"
+                    elif region:
+                        ctx = f" — {region} {perms}"
+                    a(f"  - `{mt.get('rule', '?')}` — {where}{ctx} "
+                      f"[{mt.get('severity', 'High')}]")
+            else:
+                a("- **YARA matches:** 0" + ("" if trusted else " *(unreliable — see integrity above)*"))
+        else:
+            a("- YARA: not run for this image.")
+        a("")
+        a("Memory findings (injection, rootkit hooks, LD_PRELOAD, capabilities, eBPF, recovered "
+          "shell history, external C2) are merged into the adjudication funnel below; the full "
+          "per-match detail is in `_yara_results_*.json` and `Memory_Findings_*.json`.")
+        a("")
+        a("---")
+        a("")
+
+    a("## 6. Resolution / eradication")
     a("")
     a("Run on the **isolated** host from the toolkit root:")
     a("")
-    a("```powershell")
-    a("# 1) Review the plan (changes nothing):")
-    a(f".\\Invoke-Eradication.ps1 -HostFolder .\\{host} -MinVerdict \"Likely True Positive\"")
-    a("# 2) Execute (restores the firewall to known-good afterward, keeping known-bad blocked):")
-    a(f".\\Invoke-Eradication.ps1 -HostFolder .\\{host} -MinVerdict \"Likely True Positive\" -Apply")
-    a("```")
+    if model.get("platform") == "linux":
+        a("```bash")
+        a("# 1) Review the plan (changes nothing):")
+        a(f"sudo ./Invoke-Eradication-Linux.sh --host-folder ./{host} "
+          "--min-verdict \"Likely True Positive\"")
+        a("# 2) Execute (contain -> cut C2 -> eradicate; firewall restored after, known-bad kept blocked):")
+        a(f"sudo ./Invoke-Eradication-Linux.sh --host-folder ./{host} "
+          "--min-verdict \"Likely True Positive\" --apply")
+        a("```")
+    else:
+        a("```powershell")
+        a("# 1) Review the plan (changes nothing):")
+        a(f".\\Invoke-Eradication.ps1 -HostFolder .\\{host} -MinVerdict \"Likely True Positive\"")
+        a("# 2) Execute (restores the firewall to known-good afterward, keeping known-bad blocked):")
+        a(f".\\Invoke-Eradication.ps1 -HostFolder .\\{host} -MinVerdict \"Likely True Positive\" -Apply")
+        a("```")
     a("")
     if model["relays"]:
         a("**Network containment kept after eradication (known-bad, do NOT unblock):**")
@@ -372,7 +425,7 @@ def md_incident(model, host, incident, analyst, when):
     a("")
     a("---")
     a("")
-    a("## 6. IOC appendix")
+    a("## 7. IOC appendix")
     a("")
     a("```")
     if model["rats"]:
@@ -729,6 +782,27 @@ def md_timeline(findings, host, incident):
 
 
 # --------------------------------------------------------------------- main
+def detect_platform(host_folder):
+    """'linux' | 'windows' — so the report references the right eradication tooling. The custody
+    record carries an authoritative `platform` field (both collectors write it); fall back to
+    platform-specific collection artifacts."""
+    cust = newest(host_folder, "_custody_*.json")
+    if cust:
+        rec = load_json(cust)
+        plat = str((rec[0] if rec else {}).get("platform", "")).lower()
+        if "linux" in plat:
+            return "linux"
+        if "win" in plat:
+            return "windows"
+    if (glob.glob(os.path.join(host_folder, "Journal_Findings_*.json"))
+            or glob.glob(os.path.join(host_folder, "Container_Findings_*.json"))):
+        return "linux"
+    for w in ("EventLog_*.json", "Amcache*.json", "ShimCache*.json", "Autoruns*.json"):
+        if glob.glob(os.path.join(host_folder, w)):
+            return "windows"
+    return "windows"      # default preserves prior behavior when the platform is unknown
+
+
 def load_model(host_folder):
     """Load the newest findings from a host folder and correlate them. Shared by
     report generation and the standalone IOC emitter."""
@@ -744,7 +818,12 @@ def load_model(host_folder):
                                                   "LOLBin Execution", "Browser Artifact",
                                                   "Cloud C2 Beacon")]
     host = os.path.basename(os.path.normpath(host_folder))
-    return correlate(findings, remote_findings), host, findings
+    model = correlate(findings, remote_findings)
+    model["platform"] = detect_platform(host_folder)
+    yres = newest(host_folder, "_yara_results_*.json")        # dedicated YARA scan results
+    model["yara"] = (load_json(yres) or [None])[0] if yres else None
+    model["has_memory"] = bool(newest(host_folder, "Memory_Findings_*.json"))
+    return model, host, findings
 
 
 def emit_iocs(host_folder, incident_id=None):

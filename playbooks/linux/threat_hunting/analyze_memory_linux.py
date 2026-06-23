@@ -566,21 +566,75 @@ YARA_NOISE = re.compile(r"(base64|url|email|ipv4|domain|hex_|generic_|test_|eica
                         re.IGNORECASE)
 
 
+CANARY_RULE = "IRToolkit_Canary_ELF"   # self-test rule (see linux_yara.py); never a real threat
+
+
+def _canary_hits(rows):
+    return sum(1 for r in (rows or [])
+               if str(_get(r, "Rule", "Rule Name", "rule")) == CANARY_RULE)
+
+
+_YARA_HIGH_SIGNAL = ("cobalt", "beacon", "meterpreter", "mimikatz", "shellcode", "inject",
+                     "empire", "rootkit", "implant", "webshell", "ransom", "backdoor")
+
+
 def analyze_yara(rows):
-    """vol3 yarascan.YaraScan output -> findings. A rule hit in memory is a strong signal
-    (malware family / tool signature). Attribute to the owning process when present."""
+    """YARA hits (native scan OR per-process vol worker) -> findings. A rule hit in memory is a
+    strong signal (malware family / tool signature). The self-test canary + known-noise rules are
+    excluded. Native rows carry {Rule, Offset, Value(hex)}; the per-process worker adds PID/Process
+    plus ENRICHMENT — {Perms, Region(anon|file), Path, Strings} — the FP/TP disambiguator.
+
+    Context only ESCALATES or ANNOTATES, never downgrades (no blindspots): a hit in anonymous
+    EXECUTABLE memory is injected/unbacked code -> Critical; a file-backed hit keeps its severity but
+    is annotated with the backing path (could still be a trojanised binary) so the adjudicator/analyst
+    decides; a rule that matched many processes is flagged as likely-shared-bytes (could also be a
+    library-injection campaign) — all surfaced, nothing cleared here."""
     out = []
+    # breadth: how many distinct PIDs each rule hit (a rule across many procs == common/shared bytes,
+    # OR an LD_PRELOAD-style injection — annotate, don't clear).
+    rule_pids = {}
     for r in rows or []:
         rule = str(_get(r, "Rule", "Rule Name", "rule"))
-        if not rule or YARA_NOISE.search(rule):
+        pid = _get(r, "PID", "Pid")
+        if rule and pid:
+            rule_pids.setdefault(rule, set()).add(str(pid))
+    for r in rows or []:
+        rule = str(_get(r, "Rule", "Rule Name", "rule"))
+        if not rule or rule == CANARY_RULE or YARA_NOISE.search(rule):
             continue
         pid = _get(r, "PID", "Pid")
         proc = _get(r, "Process", "COMM", "Task", "Component", "Owner")
         offset = _get(r, "Offset", "Address")
-        where = f"PID {pid} ({proc})" if pid else (str(proc) if proc else f"@ {offset}")
-        out.append(_finding("High", "YARA Memory Match", f"{rule} :: {where}",
-                            f"YARA rule '{rule}' matched in memory ({where}, offset={offset}) "
-                            f"— malware/tool signature.",
+        snippet = _get(r, "Value", "Data", "Match")          # hex snippet (native engine)
+        perms = str(_get(r, "Perms") or "")
+        region = str(_get(r, "Region") or "")                # 'anon' | 'file' | ''
+        path = str(_get(r, "Path") or "")
+        strings = _get(r, "Strings") or []
+        where = f"PID {pid} ({proc})" if pid else (str(proc) if proc else f"offset {offset}")
+        anon_exec = region == "anon" and "x" in perms
+        sev = "Critical" if (anon_exec or any(k in rule.lower() for k in _YARA_HIGH_SIGNAL)) else "High"
+        ftype = "Injected Code (memory YARA)" if anon_exec else "YARA Memory Match"
+        # context clause
+        if anon_exec:
+            loc = f"in ANONYMOUS EXECUTABLE memory ({perms}) — injected/unbacked code"
+        elif region == "file":
+            loc = (f"in file-backed {perms} mapping {path or '?'} — verify that on-disk file's "
+                   f"hash/package ownership (a rule grazing a loaded binary/library is often benign, "
+                   f"but a trojanised binary is not)")
+        elif region == "anon":
+            loc = f"in anonymous {perms} memory"
+        else:
+            loc = f"({where}, offset={offset})"
+        details = f"YARA rule '{rule}' matched {loc}."
+        if strings:
+            details += f" Matched strings: {', '.join(str(s) for s in strings[:12])}."
+        breadth = len(rule_pids.get(rule, ()))
+        if breadth >= 3:
+            details += (f" NOTE: this rule matched {breadth} processes — likely common/shared bytes "
+                        f"(e.g. interpreter/library content), but rule out a library-injection campaign.")
+        if snippet:
+            details += f" Bytes(hex): {str(snippet)[:96]}"
+        out.append(_finding(sev, ftype, f"{rule} :: {where}", details,
                             "T1055 (Process Injection), T1027 (Obfuscated Files)"))
     return out
 
@@ -652,7 +706,7 @@ def prioritize(findings):
     """(B) Stable-order findings by investigative priority so the few high-value items float to
     the top of a wide-net flood: correlated threats first, then by severity, then strong signals.
     Pure ordering — nothing is dropped."""
-    sev = {"High": 0, "Medium": 1, "Low": 2}
+    sev = {"Critical": -1, "High": 0, "Medium": 1, "Low": 2}
     return sorted(findings, key=lambda f: (
         0 if f["Type"] == "Correlated Memory Threat" else 1,
         sev.get(f["Severity"], 3),
@@ -705,32 +759,76 @@ def _vol_exe(explicit=None):
     return staged if os.path.isfile(staged) else None
 
 
-def run_plugin(vol, image, plugin, symbols=None, extra=None, timeout=900):
-    cmd = [vol, "-q", "-r", "json", "-f", image]
+def run_plugin(vol, image, plugin, symbols=None, extra=None, timeout=900, progress=False):
+    # `-q` suppresses Volatility's progress feedback — keep it for the fast plugins, but DROP it for
+    # the long YARA scan so vol's native progress streams (plus a heartbeat) instead of looking hung.
+    cmd = [vol, "-r", "json", "-f", image]
+    if not progress:
+        cmd.insert(1, "-q")
     if symbols:
         cmd += ["-s", symbols]
     cmd.append(plugin)
     cmd += extra or []
     try:
+        if progress:
+            return _run_with_progress(cmd, timeout)
         cp = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, check=False)
         return json.loads(cp.stdout) if cp.stdout.strip() else []
     except (OSError, subprocess.SubprocessError, ValueError):
         return []
 
 
-def collect(image, vol=None, symbols=None, offline_dir=None, skip=(), yara_file=None,
+def _run_with_progress(cmd, timeout):
+    """Run a long plugin with a rolling log: vol's own progress streams to stderr (we leave it
+    attached) and a heartbeat prints elapsed time every 30 s, so a multi-minute YARA scan visibly
+    progresses instead of appearing stuck. stdout (the JSON) is still captured + parsed."""
+    import threading
+    import time
+    print("[mem]   YARA scan started — vol progress streams below; heartbeat every 30s …",
+          file=sys.stderr, flush=True)
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, text=True)   # stderr inherits -> live
+    start, stop = time.time(), threading.Event()
+
+    def _beat():
+        while not stop.wait(30):
+            print(f"[mem]   … YARA still scanning ({int(time.time() - start)}s elapsed)",
+                  file=sys.stderr, flush=True)
+
+    th = threading.Thread(target=_beat, daemon=True)
+    th.start()
+    try:
+        out, _ = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        out = ""
+    finally:
+        stop.set()
+    print(f"[mem]   YARA scan finished ({int(time.time() - start)}s elapsed).",
+          file=sys.stderr, flush=True)
+    try:
+        return json.loads(out) if out and out.strip() else []
+    except ValueError:
+        return []
+
+
+def collect(image, vol=None, symbols=None, offline_dir=None, skip=(), yara_extra=None,
             yara_plugin="yarascan.YaraScan", yara_timeout=7200, deep=False):
+    """yara_extra: the vol args selecting the ruleset, e.g. ["--yara-compiled-file", "x.yarc"]
+    (preferred — pre-compiled with externals so it actually loads) or ["--yara-file", src]."""
     rows = {}
     plugins = list(PLUGINS)
     if deep or offline_dir:
         plugins += list(OPTIONAL_PLUGINS)      # heavy per-VMA/per-thread plugins (opt-in / offline)
     if offline_dir:
         plugins += list(YARA_PLUGINS)          # read whichever yara JSON was pre-saved
-    elif yara_file:
+    elif yara_extra:
         plugins.append(yara_plugin)            # YARA only when rules are supplied (it's slow)
-    for plugin in plugins:
+    total = len(plugins)
+    for i, plugin in enumerate(plugins, 1):
         if plugin in skip:
             continue
+        if not offline_dir:                        # rolling per-plugin log so nothing looks hung
+            print(f"[mem]   [{i}/{total}] {plugin}", file=sys.stderr, flush=True)
         if offline_dir:
             path = os.path.join(offline_dir, plugin + ".json")
             try:
@@ -739,9 +837,10 @@ def collect(image, vol=None, symbols=None, offline_dir=None, skip=(), yara_file=
             except (OSError, ValueError):
                 rows[plugin] = []
         elif plugin in YARA_PLUGINS:
-            # YARA is the long pole — its own (larger) timeout so a deep scan isn't killed.
+            # YARA is the long pole — its own (larger) timeout + a rolling progress log so the
+            # multi-minute scan doesn't look hung after "compiled N rules".
             rows[plugin] = run_plugin(vol, image, plugin, symbols,
-                                      extra=["--yara-file", yara_file], timeout=yara_timeout)
+                                      extra=yara_extra, timeout=yara_timeout, progress=True)
         else:
             rows[plugin] = run_plugin(vol, image, plugin, symbols)
     return rows
@@ -765,27 +864,86 @@ def decompress_if_needed(image, quiet=False):
     return out
 
 
-def resolve_yara(yara_file, yara_dir, use_staged):
-    """Return a single YARA rules file for vol3 --yara-file. --yara-file wins; else build a
-    combined include file from a rules dir (or the staged tools/yara_rules with --yara)."""
-    if yara_file:
-        return yara_file
-    rules_dir = yara_dir
-    if not rules_dir and use_staged:
-        rules_dir = os.path.join(os.path.dirname(__file__), "..", "..", "..", "tools", "yara_rules")
-    if not rules_dir or not os.path.isdir(rules_dir):
-        return None
-    import glob as _glob
-    import tempfile
-    files = sorted(_glob.glob(os.path.join(rules_dir, "**", "*.yar"), recursive=True)
-                   + _glob.glob(os.path.join(rules_dir, "**", "*.yara"), recursive=True))
-    if not files:
-        return None
-    fd, combined = tempfile.mkstemp(suffix="_combined.yar")
-    with os.fdopen(fd, "w", encoding="utf-8") as fh:
-        for f in files:
-            fh.write(f'include "{os.path.abspath(f)}"\n')
-    return combined
+def _write_yara_results(out_dir, stamp, engine, image, rules_n, rules_failed, duration,
+                        timed_out, canary_hits, yara_rows):
+    """Dedicated YARA scan-results file (parity with the Windows `_yara_results_<stamp>.jsonl`).
+    Captures the scan provenance + every rule match with offset/attribution/snippet, so YARA output
+    is auditable independently of the merged Memory_Findings."""
+    matches = []
+    for r in yara_rows or []:
+        rule = str(_get(r, "Rule", "Rule Name", "rule"))
+        if not rule or rule == CANARY_RULE:
+            continue
+        region = str(_get(r, "Region") or "")
+        perms = str(_get(r, "Perms") or "")
+        matches.append({
+            "rule": rule,
+            "offset": _get(r, "Offset", "Address"),
+            "pid": _get(r, "PID", "Pid"),
+            "process": _get(r, "Process", "COMM", "Task"),
+            "region": region,                                # anon | file (the FP/TP disambiguator)
+            "perms": perms,                                  # e.g. rwx / r-x / r--
+            "path": _get(r, "Path"),                         # backing file when region == file
+            "strings": _get(r, "Strings") or [],             # which yara strings actually fired
+            "matched_hex": _get(r, "Value", "Data"),
+            "severity": ("Critical" if (region == "anon" and "x" in perms)
+                         or any(k in rule.lower() for k in _YARA_HIGH_SIGNAL) else "High"),
+        })
+    doc = {
+        "stamp": stamp, "engine": engine, "image": os.path.basename(str(image)),
+        "rules_compiled": rules_n, "rules_failed": rules_failed,
+        "duration_seconds": duration, "timed_out": timed_out,
+        "canary_matched": canary_hits > 0,
+        "trusted": canary_hits > 0 and not timed_out,
+        "match_count": len(matches), "matches": matches,
+    }
+    path = os.path.join(out_dir, f"_yara_results_{stamp}.json")
+    try:
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(doc, fh, indent=2)
+        print(f"[mem]   YARA results -> {os.path.basename(path)} "
+              f"({len(matches)} match(es), trusted={doc['trusted']})", file=sys.stderr, flush=True)
+    except OSError:
+        pass
+    return path
+
+
+def compile_yara_ruleset(yara_file, yara_dir, use_staged, out_dir, stamp, quiet=False,
+                         include_generic=False):
+    """Compile the requested YARA rules to a single COMPILED .yarc (Linux-curated by content +
+    externals declared). Used by BOTH engines — the native scanner loads it directly, and the vol
+    fallback passes it via --yara-compiled-file. Returns the .yarc path or None.
+
+    Why compile ourselves: vol's --yara-file compiles raw source with no externals → a single
+    undefined identifier fails the whole set → 0 matches (a silent false 'clean')."""
+    if yara_file and yara_file.endswith((".yarc", ".yc", ".compiled")):
+        return yara_file, 0, 0                 # analyst supplied an already-compiled ruleset
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import linux_yara
+    except ImportError:                        # yara-python not available
+        return None, 0, 0
+    out = os.path.join(out_dir, f"_yara_compiled_{stamp}.yarc")
+    if yara_file:                              # analyst source file: compile just it (its own dir)
+        import tempfile
+        import shutil as _sh
+        d = tempfile.mkdtemp()
+        _sh.copy(yara_file, d)
+        compiled, n, failed = linux_yara.compile_ruleset(d, out, include_generic=include_generic)
+    else:
+        rules_dir = yara_dir
+        if not rules_dir and use_staged:
+            rules_dir = os.path.join(os.path.dirname(__file__), "..", "..", "..",
+                                     "tools", "yara_rules")
+        if not rules_dir or not os.path.isdir(rules_dir):
+            return None, 0, 0
+        compiled, n, failed = linux_yara.compile_ruleset(rules_dir, out, include_generic=include_generic)
+    if not compiled:
+        return None, 0, 0
+    if not quiet:
+        print(f"[mem] compiled {n} Linux-applicable YARA rule file(s) ({failed} skipped) "
+              f"-> {os.path.basename(out)}", file=sys.stderr)
+    return compiled, n, failed
 
 
 def main():
@@ -800,11 +958,25 @@ def main():
                     help="YARA-scan memory with the staged tools/yara_rules")
     ap.add_argument("--yara-file", help="single YARA rules file (or compiled) for vol yarascan")
     ap.add_argument("--yara-rules-dir", help="dir of .yar rules (combined into one include file)")
-    ap.add_argument("--yara-scope", choices=["process", "full"], default="process",
-                    help="process = linux.vmayarascan (per-PID VMAs, faster, attributable); "
-                         "full = yarascan.YaraScan (exhaustive physical layer, slow)")
+    ap.add_argument("--yara-engine", choices=["native", "vol"], default="native",
+                    help="native (DEFAULT) = yara-python over the whole image: fast triage, FULL "
+                         "physical coverage (kernel+free pages), but NO per-PID attribution "
+                         "(~25min/25GB). vol = per-process worker via Volatility library: PER-PID "
+                         "ATTRIBUTION + per-process timeout + rolling resumable JSONL, scans mapped "
+                         "process memory only (~80min on a desktop w/ browsers, resumable).")
+    ap.add_argument("--yara-broad", action="store_true",
+                    help="also scan platform-generic rules (broader, but slower — generic Windows "
+                         "byte-pattern rules match heavily in a full-image scan). Default: Linux-only.")
+    ap.add_argument("--yara-proc-timeout", type=int, default=180,
+                    help="per-process scan timeout in seconds (vol engine + native two-phase "
+                         "follow-up); a slow/huge process aborts and the scan continues. Default 180.")
+    ap.add_argument("--no-yara-followup", dest="yara_followup", action="store_false",
+                    help="native engine: do NOT auto-run the per-process enrichment after triage "
+                         "finds matches (default: follow up to attribute + add VMA context).")
+    ap.add_argument("--yara-scope", choices=["process", "full"], default="full",
+                    help="vol engine only: process = vmayarascan (per-PID); full = yarascan")
     ap.add_argument("--yara-timeout", type=int, default=7200,
-                    help="seconds for the YARA plugin (default 7200; the scan is the long pole)")
+                    help="seconds for the YARA scan (default 7200; the scan is the long pole)")
     ap.add_argument("--deep", action="store_true",
                     help="also run heavy per-VMA/per-thread plugins (proc.Maps, pscallstack)")
     ap.add_argument("--stamp", default=datetime.datetime.now().strftime("%Y%m%d_%H%M%S"))
@@ -819,7 +991,9 @@ def main():
 
     out_dir = args.output_dir or (os.path.dirname(os.path.abspath(args.image))
                                   if args.image else ".")
-    vol, image, yara_file = None, args.image, None
+    vol, image = None, args.image
+    yara_extra, yarc, yara_n, yara_failed = None, None, 0, 0
+    yara_requested = bool(args.yara or args.yara_file or args.yara_rules_dir)
     if not args.offline_dir:
         vol = _vol_exe(args.vol)
         if not vol:
@@ -831,16 +1005,102 @@ def main():
         except (RuntimeError, OSError, subprocess.SubprocessError) as e:
             print(f"[mem] {e}", file=sys.stderr)
             return 1
-        yara_file = resolve_yara(args.yara_file, args.yara_rules_dir, args.yara)
-        if (args.yara or args.yara_file or args.yara_rules_dir) and not yara_file:
-            print("[mem] YARA requested but no rules found (--yara-file / --yara-rules-dir / "
-                  "staged tools/yara_rules).", file=sys.stderr)
+        if yara_requested:
+            yarc, yara_n, yara_failed = compile_yara_ruleset(
+                args.yara_file, args.yara_rules_dir, args.yara, out_dir, args.stamp, args.quiet,
+                include_generic=args.yara_broad)
+            if not yarc:
+                print("[mem] YARA requested but no rules compiled (need yara-python + rules in "
+                      "--yara-rules-dir / staged tools/yara_rules).", file=sys.stderr)
+            # Both engines run POST-collect: native scans the whole image (scan_image), vol drives the
+            # per-process worker. Neither uses collect()'s in-line yara plugin (yara_extra stays None).
 
     skip = {p.strip() for p in args.skip_plugins.split(",") if p.strip()}
-    rows = collect(image, vol, args.symbols, args.offline_dir, skip, yara_file=yara_file,
+    rows = collect(image, vol, args.symbols, args.offline_dir, skip, yara_extra=yara_extra,
                    yara_plugin=YARA_SCOPE_PLUGIN[args.yara_scope], yara_timeout=args.yara_timeout,
                    deep=args.deep)
+
+    # YARA scan runs POST-collect so its rows feed the same analyze() pipeline:
+    #   native (default) = yara-python over the whole image (fast, full physical coverage, no PID)
+    #   vol              = per-process worker via Volatility vmayarascan (PER-PID ATTRIBUTION,
+    #                      per-process timeout, ROLLING RESUMABLE JSONL) — the proven attributed path
+    yara_dur, canary_override = 0, None
+    if yarc and not args.offline_dir:
+        import linux_yara
+        import time as _t
+        worker = os.path.join(os.path.dirname(os.path.abspath(__file__)), "linux_yara_worker.py")
+        jsonl = os.path.join(out_dir, f"_yara_results_{args.stamp}.jsonl")
+        if args.yara_engine == "native":
+            print("[mem]   YARA native triage (engine=yara-python, full image) …", file=sys.stderr,
+                  flush=True)
+            _s = _t.time()
+            yrows, timed_out = linux_yara.scan_image(yarc, image, timeout=args.yara_timeout,
+                                                     results_jsonl=jsonl)
+            yara_dur = int(_t.time() - _s)
+            print(f"[mem]   YARA native triage finished ({yara_dur}s, {len(yrows)} rule-match(es)).",
+                  file=sys.stderr, flush=True)
+            rows["yarascan.YaraScan"] = yrows
+            if timed_out:
+                rows["_yara_timed_out"] = True
+            # TWO-PHASE: the fast triage tells us WHICH signatures are present (no PID). If any fired,
+            # follow up IMMEDIATELY with the per-process worker to ATTRIBUTE them to a PID and ENRICH
+            # each with VMA context (anon/file region, perms, backing path, matched strings) — the
+            # detail that separates injected code from a rule grazing a loaded library. Skipped on a
+            # clean host (0 triage matches), so the common case stays fast.
+            matched = {str(_get(r, "Rule", "rule")) for r in yrows
+                       if str(_get(r, "Rule", "rule")) not in ("", CANARY_RULE)}
+            if matched and args.yara_followup and vol:
+                print(f"[mem]   triage matched {len(matched)} rule(s); running per-process "
+                      f"enrichment (attribute + context) — rolling log: {jsonl}",
+                      file=sys.stderr, flush=True)
+                jl = os.path.join(out_dir, f"_yara_followup_{args.stamp}.jsonl")
+                _s2 = _t.time()
+                subprocess.run([sys.executable, worker, image, yarc, jl,
+                                args.symbols or "-", str(args.yara_proc_timeout)], check=False)
+                yara_dur += int(_t.time() - _s2)
+                try:
+                    with open(jl, encoding="utf-8") as fh:
+                        parsed = linux_yara.parse_worker_jsonl(fh.readlines())
+                    enriched = linux_yara.worker_rows_to_yara_rows(parsed["finished"])
+                    if enriched:                       # prefer attributed+enriched over offset-only
+                        rows["yarascan.YaraScan"] = enriched
+                        canary_override = parsed["canary_hits"]
+                        print(f"[mem]   enrichment attributed {len(enriched)} match(es) across "
+                              f"{len(parsed['finished'])} proc(s).", file=sys.stderr, flush=True)
+                except OSError:
+                    pass
+        else:                                       # vol: per-process worker (attributed, resumable)
+            print("[mem]   YARA per-process scan (engine=vol vmayarascan, per-PID attribution) — "
+                  f"rolling log: {jsonl}", file=sys.stderr, flush=True)
+            _s = _t.time()
+            subprocess.run([sys.executable, worker, image, yarc, jsonl,
+                            args.symbols or "-", str(args.yara_proc_timeout)], check=False)
+            yara_dur = int(_t.time() - _s)
+            with open(jsonl, encoding="utf-8") as fh:
+                parsed = linux_yara.parse_worker_jsonl(fh.readlines())
+            yrows = linux_yara.worker_rows_to_yara_rows(parsed["finished"])
+            rows["yarascan.YaraScan"] = yrows
+            canary_override = parsed["canary_hits"]   # per-process canary (not the native ELF row)
+            print(f"[mem]   YARA per-process scan finished ({yara_dur}s, "
+                  f"{len(parsed['finished'])} proc(s), {len(yrows)} attributed match(es), "
+                  f"{len(parsed['timeouts'])} per-proc timeout(s)).", file=sys.stderr, flush=True)
+
     findings = analyze(rows)
+
+    # YARA trust self-test + dedicated results file (parity with the Windows _yara_results JSON).
+    if yarc and not args.offline_dir:
+        yrows = [r for k in YARA_PLUGINS for r in (rows.get(k) or [])]
+        # native: canary is an ELF-match row; vol: per-process canary count from the worker JSONL
+        canary = canary_override if canary_override is not None else _canary_hits(yrows)
+        timed_out = bool(rows.get("_yara_timed_out"))
+        if canary == 0 or timed_out:
+            why = "timed out" if timed_out else "the ELF self-test canary never matched"
+            findings.insert(0, _finding(
+                "High", "YARA Self-Test FAILED", "engine did not inspect memory",
+                f"YARA scan unreliable ({why}) — '0 YARA matches' is NOT a clean result. "
+                f"Raise --yara-timeout, check yara-python, or try --yara-engine vol.", "N/A"))
+        _write_yara_results(out_dir, args.stamp, args.yara_engine, image, yara_n, yara_failed,
+                            yara_dur, timed_out, canary, yrows)
 
     out_path = os.path.join(out_dir, f"Memory_Findings_{args.stamp}.json")
     with open(out_path, "w", encoding="utf-8") as fh:

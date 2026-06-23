@@ -10,7 +10,8 @@
 #
 # Usage:
 #   Analyze-Memory-Linux.sh --image PATH [--host-folder DIR] [--symbols DIR]
-#                           [--kernel VER] [--yara] [--adjudicate]
+#                           [--kernel VER] [--yara] [--yara-engine native|vol]
+#                           [--yara-broad] [--yara-proc-timeout S] [--adjudicate]
 #                           [--keep-env] [--dry-run] [--quiet]
 #
 #   --symbols DIR   use a prebuilt ISF dir (skip building)
@@ -19,7 +20,13 @@
 #   --fetch-symbols acquire kernel debug symbols cross-distro: debuginfod (any distro) then
 #                   the distro package manager (apt/dnf/zypper). Alias: --install-dbgsym.
 #   --build-id HEX  kernel build-id for debuginfod when analyzing another host's image
-#   --yara          YARA-scan memory with the staged tools/yara_rules
+#   --yara          YARA-scan memory with the staged tools/yara_rules (Linux-applicable rules only)
+#   --yara-engine   native (default) = fast full-image scan, full physical coverage, no per-PID;
+#                   vol = per-process worker, PER-PID attribution + per-process timeout + rolling
+#                   resumable JSONL (slower; scans mapped process memory). Both write a live
+#                   rolling _yara_results_<stamp>.jsonl + a _yara_results_<stamp>.json summary.
+#   --yara-broad    also include platform-generic rules (broader but noisier). Default: Linux-only.
+#   --yara-proc-timeout S   vol engine: per-process scan timeout in seconds (default 180)
 #   --adjudicate    merge findings into the newest Combined_Findings + re-run adjudicate.py
 #   --keep-env      do NOT tear down the venv/symbols (for debugging)
 # ==============================================================================
@@ -32,6 +39,7 @@ ADJUDICATOR="${SCRIPT_DIR}/adjudicate.py"
 
 IMAGE=""; HOST_FOLDER=""; SYMBOLS=""; KERNEL="$(uname -r)"; BUILD_ID=""; DBGD_URLS=""
 YARA=0; ADJUDICATE=0; KEEP=0; DRYRUN=0; QUIET=0; FETCH=0; YARA_SCOPE=""; YARA_TIMEOUT=""
+YARA_ENGINE=""; YARA_BROAD=0; YARA_PROC_TIMEOUT=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -42,8 +50,11 @@ while [[ $# -gt 0 ]]; do
         --build-id)    BUILD_ID="$2"; shift 2 ;;             # kernel build-id for debuginfod (cross-host images)
         --debuginfod-urls) DBGD_URLS="$2"; shift 2 ;;
         --yara)        YARA=1; shift ;;
-        --yara-scope)  YARA_SCOPE="$2"; shift 2 ;;           # process (default, fast) | full (exhaustive)
+        --yara-engine) YARA_ENGINE="$2"; shift 2 ;;          # native (default, fast) | vol (attributed)
+        --yara-broad)  YARA_BROAD=1; shift ;;                # also scan platform-generic rules (slower)
+        --yara-scope)  YARA_SCOPE="$2"; shift 2 ;;           # vol engine: process | full
         --yara-timeout) YARA_TIMEOUT="$2"; shift 2 ;;
+        --yara-proc-timeout) YARA_PROC_TIMEOUT="$2"; shift 2 ;;  # vol engine: per-process timeout (s)
         --adjudicate)  ADJUDICATE=1; shift ;;
         --fetch-symbols|--install-dbgsym) FETCH=1; shift ;;  # debuginfod + distro pkg mgr (sudo)
         --keep-env)    KEEP=1; shift ;;
@@ -143,8 +154,11 @@ fi
 ARGS=(--image "$IMAGE" --output-dir "$HOST_FOLDER" --stamp "$STAMP")
 [[ -n "$SYMBOLS" ]] && ARGS+=(--symbols "$SYMBOLS")
 [[ $YARA -eq 1 ]] && ARGS+=(--yara)
+[[ -n "$YARA_ENGINE" ]] && ARGS+=(--yara-engine "$YARA_ENGINE")
+[[ $YARA_BROAD -eq 1 ]] && ARGS+=(--yara-broad)
 [[ -n "$YARA_SCOPE" ]] && ARGS+=(--yara-scope "$YARA_SCOPE")
 [[ -n "$YARA_TIMEOUT" ]] && ARGS+=(--yara-timeout "$YARA_TIMEOUT")
+[[ -n "$YARA_PROC_TIMEOUT" ]] && ARGS+=(--yara-proc-timeout "$YARA_PROC_TIMEOUT")
 [[ $QUIET -eq 1 ]] && ARGS+=(--quiet)
 log "running analyzer..."
 python "$ANALYZER" "${ARGS[@]}" || log "analyzer returned non-zero (see output)."
@@ -163,6 +177,19 @@ if [[ $ADJUDICATE -eq 1 && -f "$MEM_FINDINGS" ]]; then
             "$PY" "$ADJUDICATOR" --host-folder "$HOST_FOLDER" --report "$COMBINED" \
                 --stamp "$STAMP" >/dev/null 2>&1 \
                 && log "re-adjudicated -> Adjudication_${STAMP}.json" || log "adjudication failed."
+        fi
+        # Regenerate IOCs + reports so memory/YARA findings reach IOCs.json, Incident_Report.md,
+        # and Attack_Graph.md — not just the adjudication. (system python; no venv deps)
+        RID="$(basename "$HOST_FOLDER")_${STAMP}"
+        REP="${SCRIPT_DIR}/../../reporting"
+        [[ -f "${REP}/build_iocs.py" ]] && \
+            "$PY" "${REP}/build_iocs.py" --host-folder "$HOST_FOLDER" --incident-id "$RID" --quiet >/dev/null 2>&1 || true
+        [[ -f "${REP}/extract_principals.py" ]] && \
+            "$PY" "${REP}/extract_principals.py" --host-folder "$HOST_FOLDER" --incident-id "$RID" --quiet >/dev/null 2>&1 || true
+        if [[ -f "${REP}/generate_reports.py" ]]; then
+            "$PY" "${REP}/generate_reports.py" --host-folder "$HOST_FOLDER" --incident-id "$RID" >/dev/null 2>&1 \
+                && log "regenerated Incident_Report + Attack_Graph + IOCs (memory/YARA included)." \
+                || log "report regeneration failed."
         fi
     fi
 fi

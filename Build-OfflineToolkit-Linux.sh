@@ -126,12 +126,45 @@ if [[ $INCLUDE_MEMORY -eq 1 ]]; then
     fi
 fi
 
-# --- YARA rules: used by the memory analyzer --yara scan (recorded, not fetched) -
+# --- YARA rules: community packs + abuse.ch yaraify, staged for the memory --yara scan ---------
+# The analyzer (linux_yara.py) filters these to Linux/generic rules and compiles them with the
+# externals declared (so they actually load — see analyze_memory_linux.py).
 yrules="${TOOLS_DIR}/yara_rules"
+stage_yara_pack() {  # name, url, subdir, within(substr filter, "" = flat zip like yaraify)
+    local name="$1" url="$2" subdir="$3" within="$4"
+    local dest="${yrules}/${subdir}"
+    if [[ $CHECK_ONLY -eq 1 ]]; then
+        compgen -G "${dest}/*.yar*" >/dev/null 2>&1 \
+            && record "yara:${name}" "$url" "" "present ($(find "$dest" \( -name '*.yar' -o -name '*.yara' \) 2>/dev/null | wc -l))" \
+            || record "yara:${name}" "$url" "" "not-staged"
+        return
+    fi
+    command -v unzip >/dev/null 2>&1 || { record "yara:${name}" "$url" "" "skipped (no unzip)"; return; }
+    local zip ex; zip="$(mktemp --suffix=.zip)"; ex="$(mktemp -d)"
+    mkdir -p "$dest"
+    if download "$url" "$zip" 2>/dev/null && unzip -qo "$zip" -d "$ex" 2>/dev/null; then
+        local n=0
+        while IFS= read -r -d '' f; do
+            [[ -n "$within" && "$f" != *"$within"* ]] && continue
+            cp -f "$f" "${dest}/$(basename "$f")" 2>/dev/null && n=$((n+1))
+        done < <(find "$ex" \( -name '*.yar' -o -name '*.yara' \) -print0 2>/dev/null)
+        record "yara:${name}" "$url" "" "ok (${n} rules)"
+    else
+        record "yara:${name}" "$url" "" "failed"
+    fi
+    rm -rf "$zip" "$ex" 2>/dev/null || true
+}
+if [[ $INCLUDE_MEMORY -eq 1 ]]; then
+    stage_yara_pack "abusech-yaraify" "https://yaraify.abuse.ch/yarahub/yaraify-rules.zip" "abusech" ""
+    stage_yara_pack "neo23x0" "https://github.com/Neo23x0/signature-base/archive/refs/heads/master.zip" "neo23x0" "/yara/"
+    stage_yara_pack "elastic" "https://github.com/elastic/protections-artifacts/archive/refs/heads/main.zip" "elastic" "/yara/"
+    stage_yara_pack "reversinglabs" "https://github.com/reversinglabs/reversinglabs-yara-rules/archive/refs/heads/develop.zip" "reversinglabs" "/yara/"
+fi
+# Overall presence record
 if compgen -G "${yrules}/**/*.yar*" >/dev/null 2>&1 || compgen -G "${yrules}/*.yar*" >/dev/null 2>&1; then
     record "yara_rules" "tools/yara_rules" "" "present ($(find "$yrules" \( -name '*.yar' -o -name '*.yara' \) 2>/dev/null | wc -l) rules)"
 else
-    record "yara_rules" "tools/yara_rules" "" "not-staged (add .yar rules for --yara memory scan)"
+    record "yara_rules" "tools/yara_rules" "" "not-staged (use --include-memory to fetch, or add .yar rules)"
 fi
 
 # --- LOLDrivers vulnerable-driver list ----------------------------------------

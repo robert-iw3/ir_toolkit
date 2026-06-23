@@ -261,6 +261,13 @@ if ($IncludeYaraRules) {
 
     $ruleSources = @(
         @{
+            Name   = 'AbuseCh'
+            Url    = 'https://yaraify.abuse.ch/yarahub/yaraify-rules.zip'
+            SubDir = 'abusech'
+            Filter = '*.yar'
+            Within = ''           # flat zip (rules at the root) — keep all .yar
+        }
+        @{
             Name   = 'Elastic'
             Url    = 'https://github.com/elastic/protections-artifacts/archive/refs/heads/main.zip'
             SubDir = 'elastic'

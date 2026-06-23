@@ -39,6 +39,9 @@ collection  →  analysis  →  reporting  →  memory forensics  →  eradicati
 
 All three platforms follow this shape. Each platform's workflow doc has its own end-to-end
 diagram and specifics: [Windows](WORKFLOW-WINDOWS.md) · [Linux](WORKFLOW-LINUX.md) · [Cloud](WORKFLOW-CLOUD.md).
+Cross-cutting: [WORKFLOW-YARA.md](WORKFLOW-YARA.md) — how memory YARA hits are enriched (region /
+perms / backing file / matched strings) and the logic, with examples, for calling a finding benign vs
+a true positive without a doubt.
 
 > ### ⚠️ Capture and analyze memory — it is imperative, not optional
 >

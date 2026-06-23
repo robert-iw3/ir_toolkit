@@ -250,12 +250,53 @@ python3 playbooks/linux/threat_hunting/analyze_memory_linux.py --offline-dir vol
 | `linux.psaux` / `linux.bash` | reverse-shell / offensive / implant-exec cmdlines + **living-off-the-land** (encoded-exec, download cradles, GTFOBins shell escapes, credential access, defense-evasion/anti-forensics, persistence, tunneling/C2, exfil) | T1059 / T1105 / T1003 / T1070 / T1572 |
 | `linux.sockstat` | external (non-RFC1918) connections at capture (C2), **reputation-ranked** (known network apps → Low, unexpected binaries → Medium) | T1071 |
 | `linux.check_syscall` / `linux.check_modules` / `linux.tty_check` | syscall/module/tty hooks (rootkit) | T1014 |
-| YARA (`--yara`) | rule hits in memory; **`--yara-scope process`** (default, `linux.vmayarascan`, per-PID, fast) or **`full`** (`yarascan.YaraScan`, exhaustive physical) | T1055 / T1027 |
+| YARA (`--yara`) | rule hits in memory (Linux-applicable rules only — PE/dotnet/macho + Windows-API rules dropped by content, ~9,600→~400; ELF canary proves the engine read memory). **`--yara-engine native`** (default) = yara-python over the whole image, fast + full physical coverage, no per-PID; **`--yara-engine vol`** = per-process worker driving Volatility as a library (init once, loop in-process) for **per-PID attribution + per-process timeout + rolling resumable JSONL** | T1055 / T1027 |
 | **Correlation** | `Correlated Memory Threat` — emitted when a strong signal (injection / hidden-proc / LOTL / YARA hit) and another signal **converge on one PID** → high-confidence compromise | T1055 / T1059 |
 
 Output `Memory_Findings_<stamp>.json` (common schema, **priority-ordered** — correlated threats
 first) → add to `Combined_Findings` and re-run `adjudicate.py` to fold into the verdict ladder.
-YARA perf knobs: `--yara-scope`, `--yara-timeout`, `--yara-rules-dir` (Linux-only rule subset).
+YARA perf knobs: `--yara-engine native|vol`, `--yara-broad` (add generic rules), `--yara-timeout`
+(native), `--yara-proc-timeout` (per-process cap), `--no-yara-followup`, `--yara-rules-dir`. Both
+engines stream a rolling `_yara_results_<stamp>.jsonl` during the scan and write a
+`_yara_results_<stamp>.json` summary (engine, rules, duration, canary-trusted, per-match attribution)
+— surfaced in the incident report's **Memory forensics & YARA** section.
+
+### How the memory YARA scan works — and how it *proves* a false positive
+
+The scan rules are first curated by **content** (not filename): rules importing `pe`/`dotnet`/`macho`
+or built from Windows-API/registry strings are dropped, leaving the ~400 genuinely Linux-applicable
+rules out of ~9,600 (`--yara-broad` adds the platform-generic ones). An **ELF canary** rule is
+compiled in: if it never fires, the engine never read memory, so "0 matches" is reported as
+**UNTRUSTED**, not clean.
+
+Then a **two-phase** scan runs:
+
+1. **Triage (native, fast).** `yara-python` mmaps the whole image and scans it in one pass — full
+   physical coverage (kernel + free pages), ~25 min on a 25 GB image, telling us *which* signatures
+   are present (no PID yet).
+2. **Enrichment follow-up (per-process), automatic when triage hits.** A worker drives Volatility as
+   a library (init the image once, then loop every task in-process) and re-scans, recording for each
+   hit the **owning PID + process**, and crucially the **VMA context**: the region type
+   (`anon` = unbacked/injected vs `file` = mapped from disk), the **permissions** (`rwx`/`r-x`/`r--`),
+   the **backing file path**, and **which YARA strings actually fired**.
+
+That context is the disambiguator. A real implant looks like `region=anon`, `perms=rwx`, `path=""`,
+with a *specific* matched string — injected, unbacked, executable code. A false positive looks like
+a rule grazing the bytes of a legitimate on-disk file. From the live `reports/ubuntu-main` run:
+
+| Match | Region / perms | Backing file | Strings that fired | Verdict |
+|---|---|---|---|---|
+| `TH_Generic_MassHunt…` (networkd-dispat, firewalld, unattended-upgr) | `file` / `r--` | `/usr/bin/python3.13` | `$dl1 $exec3 $net1 $priv1`… | **FP** — the rule's download/exec/network *keyword* strings matched the **read-only** string table of the **Python interpreter** these daemons run on |
+| `ELF_Mirai` (Xwayland, ibus-x11, mutter-x11) | `file` / `r-x` | `libLLVM.so.20.1` | `$arch $archx`… (CPU-arch names) | **FP** — Mirai's architecture-detection strings matched **LLVM's** built-in CPU-name tables (a compiler contains every arch name); the library is loaded by all the GUI/Mesa processes, which is why one rule hit many PIDs |
+
+Why this proves FP without a blindspot: every hit is in a **read-only or non-writable, file-backed**
+mapping of a **legitimate packaged binary/library**, matched only by **generic anchor strings** — none
+in anonymous executable memory. The toolkit does **not** silently drop these (a trojanised on-disk
+binary, or an LD_PRELOAD library-injection campaign, are real vectors). Instead it **annotates** each
+finding with the region/perms/path/strings and a *"verify hash/package"* next step, **escalates** any
+`anon`+executable hit to Critical, and lets the adjudication ladder + analyst make the call with full
+context. The breadth note ("matched N processes — likely shared bytes, but rule out a library
+injection") is exactly that: context, not a clearance.
 
 ## Step 4 — Eradication
 

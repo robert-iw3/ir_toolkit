@@ -1,13 +1,15 @@
 # Dependency Inventory
 
 Every external dependency the toolkit touches, its role, and **how it is satisfied for
-offline/air-gapped operation**. The live, machine-readable copy is
-`tools/STAGED_MANIFEST.json` (regenerate with `Build-OfflineToolkit-Linux.sh --check-only`).
+offline/air-gapped operation**, across **Windows, Linux, and Cloud**. The live, machine-readable
+copies are `tools/STAGED_MANIFEST.json` (Linux/Cloud — `Build-OfflineToolkit-Linux.sh --check-only`)
+and the Windows manifest written by `Build-OfflineToolkit.ps1`.
 
-**Key principle:** the toolkit's own code (collection, detection, adjudication, reporting,
-LLM review, custody) is **Python 3 standard library + bash only** — verified by audit, there
-are **no first-party pip dependencies**. The only third-party runtime is **Volatility 3** for
-memory analysis, which is vendored as wheels.
+**Key principle:** the toolkit's own code is platform-native with **no first-party package
+dependencies** — Linux/Cloud is **Python 3 stdlib + bash only**; Windows is **native PowerShell**
+(collection/detection/eradication invoke no Python). The only third-party *runtimes* are the
+memory-analysis engines: **Volatility 3** (Linux, vendored as wheels) and **MemProcFS** (Windows,
+staged) — plus the **YARA** engine on both.
 
 Satisfaction legend: **bundled** (in repo) · **staged** (fetched by the build script into
 `tools/`) · **vendored** (wheels in `tools/vol3_wheels/`) · **assumed** (OS-provided on the
@@ -31,8 +33,9 @@ target/analyst host — recorded, not bundled).
 | `volatility3` (+ `pefile`, `yara-python`) | the analyzer engine | **vendored** `tools/vol3_wheels/` → offline venv via `pip install --no-index` |
 | `dwarf2json` | build the Volatility 3 Linux **ISF** from a debug `vmlinux` | **staged** `tools/dwarf2json` (arch-aware) |
 | kernel **ISF / symbols** | version-EXACT kernel layout (a generic `vmlinux.h`/BTF will not work) | **staged** `tools/symbols/` via `--stage-symbols` (build while connected); else fetched at analysis time |
-| YARA rules | `--yara` in-memory signature scan | **bundled/staged** `tools/yara_rules/` (1775 rules) |
-| `python3-venv`, `pip` | ephemeral analyzer venv | **assumed** |
+| YARA rules (Elastic, ReversingLabs, Neo23x0, **abuse.ch yaraify**) | `--yara` in-memory signature scan | **staged** `tools/yara_rules/<pack>/` via `--include-memory`. `linux_yara.py` drops PE/dotnet/macho-bound + Windows-API-only rules **by content** (~9,600 → ~400 Linux-applicable), declares the file-scan externals, and compiles per-file namespaces into one `.yarc` (an ELF canary proves the engine read memory). **Two engines:** `--yara-engine native` = yara-python over the whole image (fast, full physical coverage, no PID); `--yara-engine vol` = `linux_yara_worker.py` drives Volatility 3 **as a library** (init the 25GB layer once, then loop tasks in-process — *not* per-PID CLI, which re-inits ~130s/call) for **per-PID attribution + per-process timeout + rolling resumable JSONL**. |
+| `yara-python` | compile + load the ruleset | **vendored** in `tools/vol3_wheels/` |
+| `python3-venv`, `pip`, `unzip` | analyzer venv + rule-pack extraction | **assumed** |
 | `debuginfod-find` (elfutils) | universal ISF fetch by build-id (connected staging) | **assumed** (optional) |
 | `dpkg-deb` | extract a dbgsym `vmlinux` without root | **assumed** (Debian) |
 
@@ -42,6 +45,29 @@ the target kernel's exact build (struct offsets + symbol addresses + banner). Ac
 (`Build-LinuxSymbols.sh`): existing debug `vmlinux` → **debuginfod** (any distro, by build-id)
 → distro package manager (`apt`/`dnf`/`zypper`). For air-gapped analysis, run
 `--stage-symbols --symbols-kernel <ver>` **while connected** to bake the ISF into `tools/symbols/`.
+
+## Windows — `Build-OfflineToolkit.ps1`
+
+The Windows workflow is **native PowerShell** (no Python for collection/detection/eradication).
+Staged tools land in `tools/`; flags: `-IncludeMemory -IncludeMemProcFS -IncludeVolatility
+-IncludeYaraRules -StageSymbols`.
+
+| Dependency | Role | Satisfied by |
+|---|---|---|
+| PowerShell 5.1 / 7 | every collector, hunt, adjudication, eradication script | **assumed** (OS-provided) |
+| Sysinternals (Autoruns, Sigcheck, Handle, ListDlls, PsTools, TCPView, Strings, ProcDump) | forensic collection | **staged** `tools/` |
+| `go-winpmem` / WinPmem | memory acquisition (AFF4 default / RAW) | **staged** `tools/` (`-IncludeMemory`) |
+| **MemProcFS** (`memprocfs.exe` + `vmmpyc`) + **Python 3.12 embeddable** | primary memory analysis (AFF4) | **staged** `tools/memprocfs/` (`-IncludeMemProcFS`) |
+| Volatility 3 standalone (`vol.exe`) | secondary memory analysis (RAW/DMP) | **staged** `tools/vol.exe` (`-IncludeVolatility`) |
+| **YARA** engine (`yara64.exe`, `yarac64.exe`) | file + memory signature scan / **rule compilation** | **staged** `tools/` |
+| YARA rules (Elastic, ReversingLabs, Neo23x0, **abuse.ch yaraify**) | file + memory scan | **staged** `tools/yara_rules/<pack>/` (`-IncludeYaraRules`). `memory_yara.py` drops **non-Windows** rules by name, declares externals, and compiles with `yarac64` to one `.yac` (DOS-stub canary proves the scan ran). |
+| Windows debug symbols (PDBs) | Volatility 3 symbol resolution | **auto-fetched** from Microsoft on first run (or pre-staged with `-StageSymbols`) |
+| LOLDrivers list | vulnerable-driver catalog | **staged** `tools/loldrivers.json` |
+
+> Symbols are the inverse of Linux: Windows **auto-fetches PDBs** (no per-kernel ISF problem);
+> Linux must build a kernel-exact ISF. YARA design is **twinned** — each platform compiles a
+> verified ruleset and filters out the *other* platform's format-bound rules (Windows: PE-name +
+> `yarac64`; Linux: `pe`/`dotnet`/`macho` imports by content + `yara-python`).
 
 ## Cloud workflow — `--include-cloud`
 
