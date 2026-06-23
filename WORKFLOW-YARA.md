@@ -237,6 +237,44 @@ Cobalt_Strike_Beacon — PID 5308 (SecHealthUI.exe)
 **Decision:** Private+RWX (injected) + specific Cobalt config strings + injected-VAD + macro-style
 parent + C2 = undeniable. **True positive — declare.**
 
+### Windows — from a real-world run of this tool (what was found + what proves it)
+
+A live `Analyze-Memory.ps1` run over a captured memory image of a suspected-compromise host produced
+**104 YARA matches across 102 processes**. Raw, that is undifferentiated noise. The per-hit VAD
+context separates the real implants from rule grazes **with no analyst guesswork** — and the report
+renders it inline. Here is what was found and what proves it.
+
+**The four true positives — rule strings in ANONYMOUS (unbacked) memory:**
+```
+REDLEAVES_CoreImplant_UniqueStrings — PID 13680 (ShellExperienceHost)   region = anon / rw-
+WiltedTulip_Windows_UM_Task         — PID 3464  (svchost.exe)           region = anon / rw-
+CoinMiner_Strings                   — PID 13816 (msedgewebview2)        region = anon / rw-
+LOLBin_Mshta_Scriptlet              — PID 13680 (ShellExperienceHost)   region = anon / rw-
+```
+**What proves it:** the matched strings live in **anonymous, unbacked memory** — there is no on-disk
+file they could have been read from, so they are the implant's own runtime strings, not a signature
+grazing a loaded module. REDLEAVES (APT10) and WiltedTulip are **family-specific** rules (Rule D), and
+a specific family rule firing in unbacked memory is a true positive. *(Perms here are `rw-`, not
+`rwx`; the **anon/unbacked location + family-rule specificity** is what's decisive. An `anon + rwx`
+hit would additionally trip Rule B and be auto-typed "Injected Code (memory YARA)" → Critical.)*
+
+**The noise — the SAME rule, FILE-BACKED on signed DLLs (the ~100× `LOLBin_BITS_Drop` cluster):**
+```
+LOLBin_BITS_Drop — PID 620  (svchost.exe)   file-backed -wx C:\...\shlwapi.dll  -- verify signature
+LOLBin_BITS_Drop — PID 11272(iCloudCKKS)    file-backed -wx C:\...\zlib1.dll    -- verify signature
+LOLBin_BITS_Drop — PID 11020(msedge.exe)    file-backed -wx C:\...\SHLWAPI.dll  -- verify signature
+   ... ~100 hits, nearly all file-backed on Microsoft/vendor-signed system DLLs
+```
+**What proves it benign:** one rule fired across ~100 processes (Rule E — breadth) and almost every
+hit is **file-backed on a signed system DLL** (Rule C) — the rule's BITS strings live inside
+`shlwapi.dll` / `zlib1.dll`, which load nearly everywhere. Verify those DLL signatures and the cluster
+clears as false positive.
+
+**Takeaway for the analyst:** without enrichment this host reads as "104 YARA matches" — flat and
+unactionable. With the VAD context, the **four real implants (all `anon`)** stand out at a glance
+against the **~100 file-backed false positives**, and the proof (region / perms / backing file) is on
+the same line in the report. That is the difference between a 2-hour triage and a 2-minute one.
+
 ---
 
 ## Quick reference

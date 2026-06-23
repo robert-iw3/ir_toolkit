@@ -452,7 +452,8 @@ elif not os.path.isfile(YARA_WORKER):
 else:
     import subprocess as _sp
     all_rules = myara.collect_rule_files(str(YARA_RULES_DIR))
-    win_rules = myara.filter_windows_rules(all_rules)   # drop Linux/macOS rules
+    win_rules = myara.filter_windows_rules(all_rules)      # drop Linux/macOS rules
+    win_rules = myara.exclude_memory_noise(win_rules)      # drop file-oriented feeds (abuse.ch)
     log(f'  Rules: {len(win_rules)} Windows-applicable (of {len(all_rules)} staged)')
 
     # Compile the Windows ruleset + DOS-stub canary into ONE .yac. search_yara needs
@@ -497,17 +498,27 @@ else:
             crashes += 1
             log(f'  YARA worker crashed (native) on PID {bad} - skipping and resuming', 'WARN')
 
-        # Build findings from the accumulated results.
+        # Build findings from the accumulated results, enriched with VAD context.
         for pid, name, hits in summary['finished']:
             if yara_count >= YARA_MAX_HITS: break
             seen = set()
-            for rule_name, match_count in hits:
+            for hit in hits:
+                rule_name = hit.get('rule', '')
                 if myara.is_noise_rule(rule_name): continue
                 if (pid, rule_name) in seen: continue        # one finding per PID+rule
                 seen.add((pid, rule_name))
-                add(myara.severity_for_rule(rule_name), 'YARA Match (Memory)',
+                region = hit.get('region', '')
+                perms  = myara.normalize_perms(hit.get('perms', ''))
+                path   = hit.get('path', '')
+                count  = hit.get('n', 0)
+                base   = myara.severity_for_rule(rule_name)
+                sev    = myara.classify_yara_hit(region, perms, base)   # anon+exec -> Critical
+                ftype  = 'Injected Code (memory YARA)' if (region == 'anon' and 'x' in perms) \
+                         else 'YARA Match (Memory)'
+                ctx    = myara.hit_context_note(region, perms, path)
+                add(sev, ftype,
                     f'PID {pid} ({name})',
-                    f'Rule: {rule_name} | {match_count} match(es)',
+                    f'Rule: {rule_name} | {count} match(es) | {ctx}',
                     'T1055 (Process Injection), T1027 (Obfuscated Files)')
                 yara_count += 1
 

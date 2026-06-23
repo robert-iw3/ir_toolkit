@@ -41,9 +41,30 @@ def main():
 
     scannable = [p for p in vmm.process_list() if not is_sys(p) and p.pid not in skip]
 
+    def _addr_context(addr, vads, mods):
+        """VAD perms/type + backing module path for a match address. region='file' when
+        the address is backed by a loaded module or an Image/Mapped VAD; else 'anon'
+        (Private/unbacked - where injected/reflective code lives)."""
+        prot, vtype, path = "", "", ""
+        for v in vads:
+            try:
+                if int(v["start"]) <= addr < int(v["end"]):
+                    prot, vtype = v.get("protection", ""), str(v.get("type", "")).strip()
+                    break
+            except Exception:
+                continue
+        for m in mods:
+            try:
+                if m.base <= addr < m.base + m.image_size:
+                    path = m.fullname or m.name or ""
+                    break
+            except Exception:
+                continue
+        region = "file" if (path or "image" in vtype.lower() or "mapped" in vtype.lower()) else "anon"
+        return region, prot, path
+
     for p in scannable:
         emit({"t": "start", "pid": p.pid})         # written BEFORE the risky scan
-        res = {}
         try:
             y = p.search_yara(yac)
             timer = threading.Timer(timeout_s, y.abort)
@@ -52,16 +73,38 @@ def main():
                 hits = y.result()
             finally:
                 timer.cancel()
+            try:
+                vads = p.maps.vad()
+            except Exception:
+                vads = []
+            try:
+                mods = p.module_list()
+            except Exception:
+                mods = []
+            canary = False
+            agg = {}   # (rule, region, perms, base(path)) -> {rule,region,perms,path,strings,n}
             for h in (hits or []):
                 rn = str(h.get("id", ""))
-                res[rn] = res.get(rn, 0) + sum(len(v) for v in h.get("matches", {}).values())
+                matches = h.get("matches", {}) or {}
+                if rn == CANARY:
+                    canary = True
+                    continue
+                addr = next((vlist[0] for vlist in matches.values() if vlist), None)
+                region, prot, path = _addr_context(addr, vads, mods) if addr is not None else ("", "", "")
+                key = (rn, region, prot, os.path.basename(path))
+                ent = agg.setdefault(key, {"rule": rn, "region": region, "perms": "",
+                                           "path": path, "strings": set(), "n": 0,
+                                           "_prot": prot})
+                ent["n"] += sum(len(v) for v in matches.values())
+                ent["strings"].update(matches.keys())
+            hits_out = [{"rule": e["rule"], "region": e["region"], "perms": e["_prot"],
+                         "path": e["path"], "strings": sorted(e["strings"]), "n": e["n"]}
+                        for e in agg.values()]
         except Exception as e:
             emit({"t": "result", "pid": p.pid, "name": p.name, "canary": False,
                   "hits": [], "error": str(e)})
             continue
-        emit({"t": "result", "pid": p.pid, "name": p.name,
-              "canary": CANARY in res,
-              "hits": [[k, v] for k, v in res.items() if k != CANARY]})
+        emit({"t": "result", "pid": p.pid, "name": p.name, "canary": canary, "hits": hits_out})
 
     emit({"t": "done"})
     out.close()

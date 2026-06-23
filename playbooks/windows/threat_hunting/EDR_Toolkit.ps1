@@ -1009,11 +1009,14 @@ function Invoke-YaraFileScan {
     # Use the full corpus (elastic + neo23x0 + reversinglabs + local), NOT a subset
     # gated on prior findings - a host can be compromised with zero prior file
     # findings, and the elastic Windows_Trojan rules (the APT signatures) were never
-    # selected by the old type-map. Drop Linux/macOS-tagged rules (irrelevant here).
-    $nonWin = '(?i)(?:^|[\\/_])(linux|macos|osx|android|freebsd|ios)(?:[\\/_.]|$)'
+    # selected by the old type-map. Drop Linux/macOS-tagged rules (irrelevant here) and
+    # the abuse.ch feed (duplicate rule-ids that fail the combined compile + PE-structure
+    # noise) - consistent with the memory scan's exclude_memory_noise.
+    $nonWin    = '(?i)(?:^|[\\/_])(linux|macos|osx|android|freebsd|ios)(?:[\\/_.]|$)'
+    $noiseFeed = '(?i)[\\/]abusech[\\/]'
     $ruleFiles = [System.Collections.Generic.List[string]]::new()
     Get-ChildItem $RulesDir -Recurse -Include '*.yar','*.yara' -File -ErrorAction SilentlyContinue |
-        Where-Object { $_.Name -notmatch $nonWin -and $_.FullName -notmatch $nonWin } |
+        Where-Object { $_.Name -notmatch $nonWin -and $_.FullName -notmatch $nonWin -and $_.FullName -notmatch $noiseFeed } |
         ForEach-Object { $ruleFiles.Add($_.FullName) }
 
     if ($ruleFiles.Count -eq 0) {
@@ -1397,27 +1400,27 @@ Export-Reports -OutDir $ReportPath
 # SIG # Begin signature block
 # MIIcoQYJKoZIhvcNAQcCoIIckjCCHI4CAQExDzANBglghkgBZQMEAgEFADB5Bgor
 # BgEEAYI3AgEEoGswaTA0BgorBgEEAYI3AgEeMCYCAwEAAAQQH8w7YFlLCE63JNLG
-# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCByc+o4MJHO5EYt
-# wfL+2bRWSP+7xXnxa00838nOpOvm7qCCFrQwggN2MIICXqADAgECAhAbL3xr3F9b
-# nkbveZC/LiR8MA0GCSqGSIb3DQEBCwUAMFMxGjAYBgNVBAsMEUluY2lkZW50IFJl
+# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCBt1oG1eaXZkXOq
+# FGJ9tW9XHUGsyRPYMLcW6Cqts/Pc/KCCFrQwggN2MIICXqADAgECAhBj3Isegven
+# qEj21ds5AZieMA0GCSqGSIb3DQEBCwUAMFMxGjAYBgNVBAsMEUluY2lkZW50IFJl
 # c3BvbnNlMRMwEQYDVQQKDApJUiBUb29sa2l0MSAwHgYDVQQDDBdJUiBUb29sa2l0
-# IENvZGUgU2lnbmluZzAeFw0yNjA2MjIwNDI0NDVaFw0zMTA2MjIwNDM0NDVaMFMx
+# IENvZGUgU2lnbmluZzAeFw0yNjA2MjMxNDE2NTlaFw0zMTA2MjMxNDI2NTlaMFMx
 # GjAYBgNVBAsMEUluY2lkZW50IFJlc3BvbnNlMRMwEQYDVQQKDApJUiBUb29sa2l0
 # MSAwHgYDVQQDDBdJUiBUb29sa2l0IENvZGUgU2lnbmluZzCCASIwDQYJKoZIhvcN
-# AQEBBQADggEPADCCAQoCggEBAKuTSorzjXf0qc4qX04KtYn2ErVj9RAkn/1f/9YN
-# llrRj0s3urh/LnWmHn4vUjPrDTzHXUx4udOclWNlv52uCMAfXKZR3qD73OCHHQ2l
-# +1s4JqrAdGhr6QPyIhCDwl7wqQUfekQtBep+SqbM0vkbvup3WKgol+c3fIUxvM8E
-# bPLg5CcNWug6Twj+Wn1FJidJihmYARSKT5PFv32BLbffUpuvdWXxzRIRv8c4EE+S
-# bWs3lTiCGrp1X33mXYiMRNAiF5ofrCJwRA7LESh4TCqXWDSvs+KFBi1ZxEnLxmUk
-# 1Wrzq11umlIzoJhnEN0VyBvLK6X40uTF50piU+5kGy9kZlkCAwEAAaNGMEQwDgYD
-# VR0PAQH/BAQDAgeAMBMGA1UdJQQMMAoGCCsGAQUFBwMDMB0GA1UdDgQWBBSpc1pf
-# XTSlgxdtXKDrlumz7H67TjANBgkqhkiG9w0BAQsFAAOCAQEAdPAxdgyk/YzF72lK
-# 4P1I3Lwjice2yAR0aoXSEP5gO/xnAvuqCiAcdPfJhqMrrfq5iFLqTuWSfz+k9irn
-# hjzyWgmo2GUrQ8BVRoNAw7HpTJo7Rw8+FfDzyy+stq9UKWrkflHqwb7oBD+aBs/5
-# ZccFKZi8oeV79CCTGdwXKYgE+xYbV//Twr7rpMbVUqbchEDdZXEzT2GdEUd5B02L
-# bDGJ4Gjz8AtCFcSXWQlLnAQxd5CJVFHDkyfkEs2VvBPtR/MBCF3NiNufb8HgClhS
-# ZHayqVVZhUd+NS7/orBY5M1Ioc0/kGiNO3nlWf1IlAPk/jsILweFZkUO0wBTot/O
-# b18zszCCBY0wggR1oAMCAQICEA6bGI750C3n79tQ4ghAGFowDQYJKoZIhvcNAQEM
+# AQEBBQADggEPADCCAQoCggEBAM3b6zgkW9zzqQraVSnj+a4zp1l4KkWs2NKNqvPP
+# p9Pyjhif7sY2FZyXnXbkKElZkNveSR84IkSBjIBC/9Q2gum1eM9nDmbnj2v5L+Nu
+# llMOkOjUC913DYNHmHdk/8FDJwAjl6mtsAWZwTvc7FUpyqGiD09yILSywsivvkDV
+# nE/qWzKgMRGflBJreqDUR5o0l0hLhowxG58ywKqElIJpwV+N1ngcfYIpJPO4XEHB
+# 6sSe0fkZralmnZdZ+sw6LRUpE7nMxmy6ZktNz51jXnm/oR7N9VbHUBOMtBLAFmny
+# CFddkOEV4z4Pz3yC0SOcgJXvoJ3yfPLzug7t5W+kRcNGmrECAwEAAaNGMEQwDgYD
+# VR0PAQH/BAQDAgeAMBMGA1UdJQQMMAoGCCsGAQUFBwMDMB0GA1UdDgQWBBQQFW0G
+# zu1Gz5VThEyg9LLMhDsLlDANBgkqhkiG9w0BAQsFAAOCAQEAGVSgMDhKb7EDBXTH
+# 3pTUUxUoQNNByOzeSepp+Wq5HpPEO7lS204uZSljF1a6QNjya4SsVE3o4+TR9CJm
+# uXqRvesj578tf9DQSl0iflg2rz9UGCXRVTazH8xMWOpt8fMlXbUf3xfYS4Wqena2
+# dl5JhRwvaDUmO5EJixsQwTiYS+vS5sG0TzMIT2N0dyCrA4eRinORCiUzTn3zYZe4
+# osCBOkhKbaiX6YkjzWhFGEarCNYwAYhleymgIy88BowoBYgwn1vx9G14hS9cEcHp
+# d/oHA9RE3wgiiYW2VCYWv+8GWrBv+WCruhrzagOTl6RURC1ctkiRl6MbQ9XENvQF
+# HPfs5TCCBY0wggR1oAMCAQICEA6bGI750C3n79tQ4ghAGFowDQYJKoZIhvcNAQEM
 # BQAwZTELMAkGA1UEBhMCVVMxFTATBgNVBAoTDERpZ2lDZXJ0IEluYzEZMBcGA1UE
 # CxMQd3d3LmRpZ2ljZXJ0LmNvbTEkMCIGA1UEAxMbRGlnaUNlcnQgQXNzdXJlZCBJ
 # RCBSb290IENBMB4XDTIyMDgwMTAwMDAwMFoXDTMxMTEwOTIzNTk1OVowYjELMAkG
@@ -1521,31 +1524,31 @@ Export-Reports -OutDir $ReportPath
 # y2ueIu9THFVkT+um1vshETaWyQo8gmBto/m3acaP9QsuLj3FNwFlTxq25+T4QwX9
 # xa6ILs84ZPvmpovq90K8eWyG2N01c4IhSOxqt81nMYIFQzCCBT8CAQEwZzBTMRow
 # GAYDVQQLDBFJbmNpZGVudCBSZXNwb25zZTETMBEGA1UECgwKSVIgVG9vbGtpdDEg
-# MB4GA1UEAwwXSVIgVG9vbGtpdCBDb2RlIFNpZ25pbmcCEBsvfGvcX1ueRu95kL8u
-# JHwwDQYJYIZIAWUDBAIBBQCggYQwGAYKKwYBBAGCNwIBDDEKMAigAoAAoQKAADAZ
+# MB4GA1UEAwwXSVIgVG9vbGtpdCBDb2RlIFNpZ25pbmcCEGPcix6C96eoSPbV2zkB
+# mJ4wDQYJYIZIAWUDBAIBBQCggYQwGAYKKwYBBAGCNwIBDDEKMAigAoAAoQKAADAZ
 # BgkqhkiG9w0BCQMxDAYKKwYBBAGCNwIBBDAcBgorBgEEAYI3AgELMQ4wDAYKKwYB
-# BAGCNwIBFTAvBgkqhkiG9w0BCQQxIgQgJ2dcW/G37+w/bcgk54agEyml68xujPxA
-# A4nlKj+sqFQwDQYJKoZIhvcNAQEBBQAEggEAqjYcv8RNDeEpbQrV8kEEZFaf7y/d
-# Hly5HIYN7//XVJCv1QBtAztXcHteqQ4xPrvZ183LveOljLLYg64M9z5Mfl53lXxD
-# /vwhfT1hMmoSOFRMsD1ouzlC8y9JoDY+qmD1ZdBsXl7X4ZszTrDMF3lg4gcyRi9k
-# y2OXZcUIBi5ICJjpAzHeChPwKVc6Ld3QzQpQSV1hJsO/kNLcidxgjmQNq4TmWeNJ
-# GOAsZoxLiYWNXfliSxgPI1fgHu4zCKRousNqv3ZVoAJbyY+bsvNySZ+riJb7AEn3
-# mqOGViZ44wlYC5cIapTGX/97VNhnR7cbDQeOV0Zb9STOp/7iZe6Z2j1LhqGCAyYw
+# BAGCNwIBFTAvBgkqhkiG9w0BCQQxIgQgSVjRpIlISDhxo7pLNtjQsl5+3Ov546uC
+# Yj3fVZST2QkwDQYJKoZIhvcNAQEBBQAEggEAhpcVh0zZ7bzsTJnEYWivoRO6k62+
+# BCtKfDC0/BCYXF8yvGUNAIXI/8ujWiKHS4rukU3IvHg3Gkc/kW6+EA2qeTkKUmRr
+# tFLFpsUVQpu5uvvWxpQz6x7F1zUXiAydRCM/eg4R+tOOhz6H+vecOZ98z0b8l0nu
+# Pjm552zBtTYCDf7UNWvl+jC6ZrDQnnWogof0o87MfjKajiLoMRqO76TrxOHaeDeN
+# m7xfklO9jMsFArVDwvLh384OuWdPHTugGBh6A2SSXsNNzmL1zcqOtpehH6RmVWUp
+# 1XPSTJeilQ3lLy1mtvWi1ksEgrIIdm7hdjcx6lBnpap7b1CtbKx6qc3w4qGCAyYw
 # ggMiBgkqhkiG9w0BCQYxggMTMIIDDwIBATB9MGkxCzAJBgNVBAYTAlVTMRcwFQYD
 # VQQKEw5EaWdpQ2VydCwgSW5jLjFBMD8GA1UEAxM4RGlnaUNlcnQgVHJ1c3RlZCBH
 # NCBUaW1lU3RhbXBpbmcgUlNBNDA5NiBTSEEyNTYgMjAyNSBDQTECEAqA7xhLjfEF
 # gtHEdqeVdGgwDQYJYIZIAWUDBAIBBQCgaTAYBgkqhkiG9w0BCQMxCwYJKoZIhvcN
-# AQcBMBwGCSqGSIb3DQEJBTEPFw0yNjA2MjIwNDM0NTRaMC8GCSqGSIb3DQEJBDEi
-# BCA+qg5I+DLhTC8RIx31hfQU9FaiPSlE3yn7Lqmo3w65ljANBgkqhkiG9w0BAQEF
-# AASCAgB4kKSsDMc9M2ljiclmVpzOlzYkCB77Cyrvme4xwMqBbpPPgNJdc/88BTFF
-# T9nt+5fMSO8YuCRjB85A9mgOFyNpMm9MXYKtoc7gESFinBd22nQrB3Afp51BKWYN
-# PPkiug3NbKwJ0he+3nadGtWPbVTjRdYT6553+a+uQSmP3mpxNmNVH6+qHYhBww0I
-# 8rT4hKnxL0sQr+a/2DpyELg9MyyCabXWH2q/qXwNSdISu435KhcZlCfaodGaSjol
-# ZC9yABxOCF8Qdy+3TPQeZDvCH9cGO1WE7TyGnsNgAjFjtJTb/EmHltJ1Oi81aIA3
-# zSwlyrY+tQqMh9xM/dPhYb4wo6MS9TAU7f9TyeEJ9yWSSYp/uttDAhBZwlb6wBtF
-# VzWtQTml6WeU8P4GCnOcaP73FXh4g+BSEVholhk3K4/1U3MfyVilnQ1be66ULLeh
-# +FNY0PmK7xHnUIa9I/NMxnowL6YnBebZxmgSyu+sK1jyoCLVUIzkeYs3GL5QpBIE
-# 7COQKH9GsXUX37Qu61KBe8Mj0ICf1PFXAd69BHlT99r3ZYxMvg4w+cRe35wAMJmc
-# V41sGURohYivoWMD2bgXEzHYPXo92u6FkmAVgKwNlpR1ImtM9OysX2VndFdH9rfs
-# WpMhnrximpxpimMaXcoKNS8eXM7Yq5GOw9IVSaasevuoK+y+/w==
+# AQcBMBwGCSqGSIb3DQEJBTEPFw0yNjA2MjMxNDI3MTNaMC8GCSqGSIb3DQEJBDEi
+# BCC7fiaZ3e0Uwccc7J4Zopz6K8ZqZtQkwNHYdbm2j/4KTjANBgkqhkiG9w0BAQEF
+# AASCAgC1UvP71sa3gv1OudZ/ypnNeWfRYzT9kvWFoGWg2pj26YDeBG4uUR5oL77U
+# 6wyJz0XTQg5zULsg45bgOUmsDm57IvD9t369ti5277iv/WGZ+Pbf+R4qSFrmAHBw
+# r1O16HkKIolQ97VEowaQS+IaSIyuPGTCO/iCD95Ztw3eEuKwGmXRl4soTuKEWmXw
+# 6h7vwcbHGziLYQ3jC7W8RNS0CEMnKzZl+vymky/cOfg9Rgzmk1BWS3XvOrBpGq1p
+# ClmNST9ZU+U9qQDJKPt/jqDBW6WAd8u4Z+N1PYwcRh94Opkx4ODjIFFEilHlZK8V
+# yuesIenO2OieOOFu0aFQBKiN4d7QZXA/4kZ/rTThPumqLrYrH0LpMj9j6G5xMJii
+# 7+56Ydbrjoa5V8U+/Rg5WyR85eGKrwf0qVGVI2r+2mc5U3UtwTvOWJGahO+l4UQS
+# LwZxdqx683/rpmUjL8jHpxC8kE1T7da2QSLZmes4cgTNASYoQUjVmo6GAwZKlmGb
+# GPy2oaFIZjYnmVICamd0yqiitjIq2XegfFM6Uc6jAojCyaMaDPRXFhfMIvQBg9ac
+# UrZb/4v3688Pe1LUKhdih/koy83sION3fkcjCNi3nouMo6Gsuwmt0g4iCnh0/WaM
+# fs8B1DZHBeSDM23RHtAs98MU7p4hlHDhrDVoh0S7hheS7xIvSQ==
 # SIG # End signature block

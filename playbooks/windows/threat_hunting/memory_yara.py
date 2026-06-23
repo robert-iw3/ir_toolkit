@@ -52,6 +52,19 @@ def filter_windows_rules(rule_files):
     return [f for f in rule_files if is_windows_rule(f)]
 
 
+# Rule sets that are file-scan oriented and noise/unstable against process MEMORY.
+# abuse.ch rules match PE structure (MZ header, imports, TLS callbacks, packed/encrypted
+# markers) that is present in EVERY loaded DLL, so in a memory scan they bury real
+# detections and crash the native scanner. Excluded from memory; still available to the
+# file scan + offline staging.
+_MEM_EXCLUDE_RE = re.compile(r"(?i)(?:^|[\\/])abusech(?:[\\/]|$)")
+
+
+def exclude_memory_noise(rule_files):
+    """Drop file-oriented rule sets (abuse.ch) that are noise/unstable in a memory scan."""
+    return [f for f in rule_files if not _MEM_EXCLUDE_RE.search(f or "")]
+
+
 def severity_for_rule(rule_name):
     """Critical for high-signal rule names, otherwise High."""
     low = (rule_name or "").lower()
@@ -121,6 +134,32 @@ def _write_combined_include(rule_files, work_dir):
     return path
 
 
+_RULE_NAME_RE = re.compile(r"(?m)^\s*(?:private\s+|global\s+)*rule\s+([A-Za-z_]\w*)")
+
+
+def _rule_names(path):
+    try:
+        with open(path, encoding="utf-8", errors="ignore") as fh:
+            return _RULE_NAME_RE.findall(fh.read())
+    except Exception:
+        return []
+
+
+def dedupe_rule_files(rule_files):
+    """Drop files that would re-introduce an already-seen rule identifier (a single
+    compiled .yac can't contain two rules of the same name). Returns (kept, dropped).
+    Keeps the first occurrence; a file with no parseable rule names is always kept."""
+    seen, kept, dropped = set(), [], []
+    for f in rule_files:
+        names = _rule_names(f)
+        if names and any(n in seen for n in names):
+            dropped.append(f)
+            continue
+        seen.update(names)
+        kept.append(f)
+    return kept, dropped
+
+
 def compile_ruleset(rule_files, yarac_exe, out_path, external_vars=None):
     """Compile rule_files into ONE compiled .yac at out_path.
 
@@ -132,11 +171,15 @@ def compile_ruleset(rule_files, yarac_exe, out_path, external_vars=None):
     external_vars = _default_externals(external_vars)
     if not rule_files:
         return None, 0, 0
+    # A single .yac cannot hold two rules with the same identifier; vendor feeds
+    # (e.g. abusech shipping copies of neo23x0 rules) cause duplicates that fail the
+    # whole compile. Drop files that re-introduce an already-seen rule name.
+    rule_files, _dupe_dropped = dedupe_rule_files(rule_files)
     work = os.path.dirname(os.path.abspath(out_path)) or "."
     combined = _write_combined_include(rule_files, work)
     try:
         if _run_yarac([combined], yarac_exe, out_path, external_vars):
-            return out_path, len(rule_files), 0
+            return out_path, len(rule_files), len(_dupe_dropped)
     finally:
         try:
             os.unlink(combined)
@@ -182,6 +225,47 @@ def validate_rule_files(rule_files, yarac_exe, external_vars=None, chunk_size=12
     return good, failed
 
 
+def normalize_perms(protection):
+    """Protection string -> short rwx form. Handles both the PAGE_* keyword form
+    (PAGE_EXECUTE_READWRITE -> 'rwx') and the MemProcFS VAD char form ('p-rw--' -> 'rw-')."""
+    p = (protection or "")
+    pu = p.upper()
+    if "PAGE_" in pu or "EXECUTE" in pu or "READONLY" in pu or "READWRITE" in pu:
+        r = "r" if ("READ" in pu or "WRITE" in pu or "EXECUTE" in pu) else "-"
+        w = "w" if "WRITE" in pu else "-"   # READWRITE / WRITECOPY
+        x = "x" if "EXECUTE" in pu else "-"
+        return r + w + x
+    pl = p.lower()                          # char-flag form, e.g. 'p-rwx-' / '---wxc'
+    return ("r" if "r" in pl else "-") + ("w" if "w" in pl else "-") + ("x" if "x" in pl else "-")
+
+
+def vad_region(vad_type, path):
+    """'file' if the region is backed by a disk file (Image/Mapped or any path), else 'anon'
+    (Private/unbacked - where injected/reflective code lives)."""
+    if path:
+        return "file"
+    t = (vad_type or "").lower()
+    return "file" if ("image" in t or "mapped" in t) else "anon"
+
+
+def classify_yara_hit(region, perms, base_severity="High"):
+    """Escalate an anonymous EXECUTABLE hit (injected/unbacked code) to Critical. Never downgrade -
+    a file-backed hit could still be a trojanised/reflectively-loaded DLL, so it keeps its severity."""
+    if region == "anon" and "x" in (perms or ""):
+        return "Critical"
+    return base_severity
+
+
+def hit_context_note(region, perms, path):
+    """One-line disambiguation note for a YARA hit, mirroring the Linux report context."""
+    if region == "anon" and "x" in (perms or ""):
+        return "anon-exec region (%s) -- injected/unbacked code" % perms
+    if region == "file":
+        import os as _os
+        return "file-backed %s %s -- verify signature/hash" % (perms, _os.path.basename(path) or "?")
+    return "%s %s" % (region, perms)
+
+
 def parse_worker_jsonl(lines):
     """Parse JSONL emitted by memory_yara_worker into a resumable summary.
 
@@ -209,8 +293,8 @@ def parse_worker_jsonl(lines):
             fin.add(pid)
             if rec.get("canary"):
                 canary_hits += 1
-            finished.append((pid, rec.get("name", ""),
-                             [tuple(h) for h in rec.get("hits", [])]))
+            # hits are enriched dicts {rule, region, perms, path, strings, n}
+            finished.append((pid, rec.get("name", ""), list(rec.get("hits", []))))
         elif t == "done":
             done = True
     return {"canary_hits": canary_hits, "finished": finished,

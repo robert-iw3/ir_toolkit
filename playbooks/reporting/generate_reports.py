@@ -193,12 +193,15 @@ def correlate(findings, remote_findings):
     # host with many matches collapses to one row per PID with a hit count + rules.
     yara_clusters = OrderedDict()
     for f in findings:
-        if get(f, "Type") == "YARA Match (Memory)":
+        if get(f, "Type") in ("YARA Match (Memory)", "Injected Code (memory YARA)"):
             tgt = get(f, "Target")
             yara_clusters.setdefault(tgt, [])
-            m = re.search(r"Rule:\s*([^|]+?)(?:\s*\||$)", get(f, "Details"))
-            if m:
-                yara_clusters[tgt].append(m.group(1).strip())
+            d = get(f, "Details")                       # "Rule: <r> | <n> match(es) | <context>"
+            rm = re.search(r"Rule:\s*([^|]+?)\s*\|", d) or re.search(r"Rule:\s*(.+)$", d)
+            rule = rm.group(1).strip() if rm else ""
+            cm = re.search(r"match\(es\)\s*\|\s*(.+)$", d)
+            ctx = cm.group(1).strip() if cm else ""
+            yara_clusters[tgt].append(f"{rule} ({ctx})" if ctx else rule)
 
     return {
         "funnel": funnel,
@@ -322,12 +325,13 @@ def md_incident(model, host, incident, analyst, when):
         total_hits = sum(len(v) for v in yc.values())
         a("## YARA matches by process (memory)")
         a("")
-        a(f"{total_hits} match(es) across {len(yc)} process(es), clustered per PID.")
+        a(f"{total_hits} match(es) across {len(yc)} process(es), clustered per PID. "
+          "Context: **anon-exec = injected/unbacked code** (real); file-backed = verify signature/hash.")
         a("")
-        a("| Process (PID) | Hits | Rules |")
+        a("| Process (PID) | Hits | Rule (VAD context) |")
         a("|---|---:|---|")
         for tgt in sorted(yc, key=lambda k: len(yc[k]), reverse=True):
-            rules = ", ".join(dict.fromkeys(yc[tgt]))   # unique, order-preserving
+            rules = "; ".join(dict.fromkeys(yc[tgt]))   # unique, order-preserving
             a(f"| {tgt} | {len(yc[tgt])} | {rules} |")
         a("")
         a("---")
