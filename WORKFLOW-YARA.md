@@ -239,6 +239,10 @@ parent + C2 = undeniable. **True positive — declare.**
 
 ### Windows — from a real-world run of this tool (what was found + what proves it)
 
+***Windows Defender (full & offline scan) found nothing, along with Trend Micro "Maximum" Security.***
+
+***Do you really trust your (insert buzzword here) EDR/AV software? lol***
+
 A live `Analyze-Memory.ps1` run over a captured memory image of a suspected-compromise host produced
 **104 YARA matches across 102 processes**. Raw, that is undifferentiated noise. The per-hit VAD
 context separates the real implants from rule grazes **with no analyst guesswork** — and the report
