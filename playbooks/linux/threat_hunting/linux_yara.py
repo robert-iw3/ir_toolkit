@@ -13,13 +13,13 @@ LINUX_EXTERNALS = {"filename": "", "filepath": "", "extension": "", "filetype": 
 _NOISE_RE = re.compile(
     r"(?i)^(generic_|test_|debug_|example_|placeholder|with_|pua_|riskware_|grayware_)")
 # Linux-applicability is decided by RULE CONTENT, not filename. The staged packs are ~10k rules,
-# the vast majority Windows/PE malware that can never match a Linux ELF image — scanning them all
+# the vast majority Windows/PE malware that can never match a Linux ELF image - scanning them all
 # is the "goes forever" problem. We keep only rules that can plausibly fire on Linux memory.
 #
-#   DROP: imports a Windows/macOS executable-format module (pe/dotnet/macho) — format-bound; OR
+#   DROP: imports a Windows/macOS executable-format module (pe/dotnet/macho) - format-bound; OR
 #         the rule body is Windows-API/registry/path bound AND shows no Linux/cross-platform signal.
 #   KEEP: imports elf; OR shows a Linux/ELF/ProcFS/shell/script/webshell signal; OR is generic
-#         (no platform-specific strings at all — cross-platform families, packers, hacktools).
+#         (no platform-specific strings at all - cross-platform families, packers, hacktools).
 _NONLINUX_IMPORT_RE = re.compile(r'^\s*import\s+"(?:pe|dotnet|macho)"', re.MULTILINE)
 # Unsupported / problematic module imports stripped before compile (à la malhunt).
 _STRIP_IMPORT_RE = re.compile(r'^\s*import\s+"(?:cuckoo|androguard|magic)"\s*$', re.MULTILINE)
@@ -57,7 +57,7 @@ def collect_rule_files(rules_dir):
 def classify_rule(path):
     """'linux' | 'windows' | 'generic' for a rule FILE, by content. Drives curation: we scan only
     'linux' + 'generic' rules on a Linux image (Windows/PE rules are the bulk and never match ELF
-    memory — scanning them is the performance killer)."""
+    memory - scanning them is the performance killer)."""
     try:
         with open(path, "r", encoding="utf-8", errors="ignore") as fh:
             content = fh.read()
@@ -76,7 +76,7 @@ def classify_rule(path):
 
 def select_rules(files, include_generic=False):
     """Curate the scan set. Default (include_generic=False) keeps only rules with an explicit
-    Linux/ELF/ProcFS/shell/script signal — targeted + low-noise + fast, like the Windows ~500-rule
+    Linux/ELF/ProcFS/shell/script signal - targeted + low-noise + fast, like the Windows ~500-rule
     set. include_generic=True also keeps platform-generic rules (broader coverage, but the generic
     bucket holds broad Windows byte-pattern rules that match millions of times in a full-image scan
     and slow it dramatically). Windows/macOS-bound rules are always dropped."""
@@ -182,12 +182,12 @@ def compile_ruleset(rules_dir, out_path, externals=None, add_canary=True, includ
 
 def scan_image(yarc_path, image_path, timeout=3600, max_snippet=80, results_jsonl=None, log=True):
     """NATIVE-engine scan: yara-python mmaps the raw/LiME image and scans it with the C engine in a
-    single Aho-Corasick pass — full physical coverage (kernel + unmapped + free-page remnants), at
+    single Aho-Corasick pass - full physical coverage (kernel + unmapped + free-page remnants), at
     ~hundreds of MB/s, regardless of rule count. This is what makes it fast where Volatility's
     per-page Python `vmayarascan` is not.
 
     ROLLING LOG (parity with the Windows worker): as each rule matches DURING the scan, the hit is
-    APPENDED (flushed) to results_jsonl and printed live — so you can `tail -f` the matches and the
+    APPENDED (flushed) to results_jsonl and printed live - so you can `tail -f` the matches and the
     record survives a crash/timeout. Returns (rows, timed_out): one dict per matched rule
     [{Rule, Offset, Value(hex snippet)}]; the callback fires once per matching rule."""
     import yara
@@ -277,14 +277,14 @@ def parse_worker_jsonl(lines):
 
 
 def crashing_pid(started_pids, finished_pids):
-    """The pid that started scanning but never produced a result (the crasher) — so a resumed run
+    """The pid that started scanning but never produced a result (the crasher) - so a resumed run
     can skip it. Mirrors the Windows worker's crash-isolation."""
     pending = set(started_pids) - set(finished_pids)
     return next(iter(pending)) if pending else None
 
 
 def worker_rows_to_yara_rows(finished):
-    """Convert parsed per-process results into the rows analyze_yara() consumes — preserving PER-PID
+    """Convert parsed per-process results into the rows analyze_yara() consumes - preserving PER-PID
     attribution AND the enrichment context (VMA perms, anon/file region, backing path, matched yara
     string ids) that disambiguates injected code from a rule grazing a loaded library."""
     rows = []
@@ -302,11 +302,11 @@ def worker_rows_to_yara_rows(finished):
 
 def yara_trust_verdict(total_matches, canary_matches):
     """Untrusted when the scan returned matches-capable output but the canary (in every ELF) never
-    fired — that means the engine did not actually inspect memory (compile/load failure)."""
+    fired - that means the engine did not actually inspect memory (compile/load failure)."""
     if canary_matches > 0:
         return {"trusted": True,
-                "message": "YARA self-test OK: ELF canary matched (%d) — engine inspected memory."
+                "message": "YARA self-test OK: ELF canary matched (%d) - engine inspected memory."
                            % canary_matches}
     return {"trusted": False,
-            "message": "YARA self-test FAILED: ELF canary never matched — rules did not compile/"
+            "message": "YARA self-test FAILED: ELF canary never matched - rules did not compile/"
                        "load and memory was NOT scanned; YARA results are unreliable."}

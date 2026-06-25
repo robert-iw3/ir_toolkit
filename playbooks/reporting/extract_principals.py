@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-extract_principals.py — identify the accounts/identities an incident implicates.
+extract_principals.py - identify the accounts/identities an incident implicates.
 
 Emitted in the ANALYSIS stage (like IOCs.json) so eradication can revoke
 credentials/sessions for the right principals without re-deriving them. A confirmed
@@ -8,7 +8,7 @@ hands-on intrusion means the accounts used on the host must be assumed exposed; 
 turns the manual "rotate credentials" note into a machine-readable target list.
 
 A principal is auto-revocable unless it is a built-in/system account or the
-responder — those are flagged for review, never auto-disabled.
+responder - those are flagged for review, never auto-disabled.
 
 Output Principals.json:
     {incident_id, hostname, generated_utc,
@@ -87,7 +87,7 @@ def extract(findings, host=""):
                 "name": name, "domain": dom, "type": ptype,
                 "source": ftype,
                 "auto_revoke": (not protected),
-                "reason": "built-in/system account — review only" if protected
+                "reason": "built-in/system account - review only" if protected
                           else "implicated by a true-positive finding",
             })
             seen[key] = True

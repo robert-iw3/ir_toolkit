@@ -1,7 +1,7 @@
 # Cloud Workflow (AWS / Azure / GCP)
 
 Driven by Python 3 + bash using the provider CLIs (`aws` / `az` / `gcloud`). Unlike the
-Windows/Linux host workflows (offline, read-only), cloud is inherently online — it calls
+Windows/Linux host workflows (offline, read-only), cloud is inherently online - it calls
 provider APIs. Provider auto-detected from `--provider`.
 
 See [readme.md](readme.md) for the cross-platform overview and adjudication philosophy.
@@ -12,7 +12,7 @@ See [readme.md](readme.md) for the cross-platform overview and adjudication phil
 
 ```mermaid
 flowchart TD
-    B0(["PROVIDER APIs — aws / az / gcloud (online)"]):::phase
+    B0(["PROVIDER APIs - aws / az / gcloud (online)"]):::phase
     B0 --> B1["Invoke-IRCollection-Cloud.sh
     --provider aws|azure|gcp --target T"]:::tool
     B1 --> B2{"--contain?"}:::decision
@@ -32,7 +32,7 @@ flowchart TD
     dry-run by default"]:::tool
     D1 --> D2["Revoke IAM/keys · kill process · block C2 egress
     eradicate persistence"]:::step
-    D2 --> D3[/"Restore — known-good minus known-bad C2"/]:::artifact
+    D2 --> D3[/"Restore - known-good minus known-bad C2"/]:::artifact
 
     classDef phase fill:#1e3a5f,stroke:#60a5fa,color:#e2e8f0,rx:20
     classDef tool  fill:#1e293b,stroke:#64748b,color:#cbd5e1
@@ -58,7 +58,7 @@ findings are Indeterminate.
 
 **Flow-log C2 confirmation:** when `--c2-ips` are supplied, `normalize_flow_logs` searches the
 collected flow logs for each C2 IP. A match upgrades the indicator from *asserted* to
-*observed on the wire* — a `Cloud Network Flow to C2` finding (True Positive, T1071). Format-agnostic
+*observed on the wire* - a `Cloud Network Flow to C2` finding (True Positive, T1071). Format-agnostic
 across all three providers (an IP is the same string in any flow schema).
 
 ### Disk-snapshot acquisition (opt-in: `--snapshot-disks`)
@@ -94,7 +94,7 @@ an analyst follow-up. These normalizers are pure functions covered by pytest
 
 ---
 
-## Step 1 / 4 / 5 — Collection, eradication, restoration
+## Step 1 / 4 / 5 - Collection, eradication, restoration
 
 ```bash
 # 1. Collection (cloud telemetry + report generation, in the project dir)
@@ -145,7 +145,7 @@ podman run --rm --env-file docker/ir-cloud.env --tmpfs /work ir-cloud:latest
 
 ## AI incident review (provider-native, optional)
 
-`--llm-review` runs an AI incident review using the **provider's own LLM** — advisory only:
+`--llm-review` runs an AI incident review using the **provider's own LLM** - advisory only:
 
 | Provider | Backend | Default model |
 |---|---|---|

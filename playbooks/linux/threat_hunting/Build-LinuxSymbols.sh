@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# Build-LinuxSymbols.sh — generate a Volatility 3 Linux symbol table (ISF) for a
+# Build-LinuxSymbols.sh - generate a Volatility 3 Linux symbol table (ISF) for a
 # kernel, so analyze_memory_linux.py can parse a Linux memory image.
 #
 # Unlike Windows (Volatility auto-fetches PDBs), Linux needs an ISF JSON matching
 # the EXACT target-kernel build (struct offsets + symbol addresses + banner). A
-# generic vmlinux.h (eBPF CO-RE / BTF header) does NOT work — those types are
+# generic vmlinux.h (eBPF CO-RE / BTF header) does NOT work - those types are
 # relocated at load time, not version-pinned. dwarf2json cannot read BTF either,
 # so we need a DWARF vmlinux. This acquires one across the major distros:
 #
 #   1. an already-present debug vmlinux (any known path)
-#   2. debuginfod  — universal, distro-agnostic fetch by kernel build-id
+#   2. debuginfod  - universal, distro-agnostic fetch by kernel build-id
 #   3. the distro package manager (apt/dnf/zypper/apk) debug-symbol package
 #
 # Usage:
@@ -60,7 +60,7 @@ PLAN="${IR_SYMBOLS_PLAN:-0}"   # test seam: print what would run instead of doin
 OUT="${OUT:-$(mktemp -d /tmp/ir-linux-isf.XXXXXX)}"
 mkdir -p "${OUT}/linux"
 
-# -- distro detection (no sourcing untrusted file — grep KEY=value) --
+# -- distro detection (no sourcing untrusted file - grep KEY=value) --
 OSREL="${IR_OS_RELEASE:-/etc/os-release}"
 osrel_get() { awk -F= -v k="$1" '$1==k{gsub(/^"|"$/,"",$2);print $2;exit}' "$OSREL" 2>/dev/null; }
 DISTRO_ID="$(osrel_get ID)"
@@ -83,7 +83,7 @@ log "distro=${DISTRO_ID:-?} family=${FAMILY} kernel=${KVER}"
 
 # BTF is the kernel-exact type source, but dwarf2json/Volatility can't consume it.
 [[ -f /sys/kernel/btf/vmlinux ]] && \
-    log "note: /sys/kernel/btf/vmlinux present (kernel-exact) but unusable by dwarf2json — need DWARF."
+    log "note: /sys/kernel/btf/vmlinux present (kernel-exact) but unusable by dwarf2json - need DWARF."
 
 # -- debug-vmlinux discovery (Debian, RHEL, SUSE, custom build trees) --
 find_vmlinux() {
@@ -124,14 +124,14 @@ PY
 fetch_debuginfod() {
     local bid="${BUILD_ID:-$(local_build_id || true)}"
     if [[ -z "$bid" ]]; then
-        log "debuginfod: no kernel build-id (image from another kernel? pass --build-id) — skipping."
+        log "debuginfod: no kernel build-id (image from another kernel? pass --build-id) - skipping."
         return 1
     fi
     if [[ "$PLAN" == "1" ]]; then
         log "PLAN[debuginfod]: DEBUGINFOD_URLS=<federation> debuginfod-find debuginfo ${bid}"; return 1
     fi
     command -v debuginfod-find >/dev/null 2>&1 || {
-        log "debuginfod-find absent (install elfutils debuginfod client) — skipping debuginfod."
+        log "debuginfod-find absent (install elfutils debuginfod client) - skipping debuginfod."
         return 1
     }
     export DEBUGINFOD_URLS="${DBGD_URLS:-${DEBUGINFOD_URLS:-$DEFAULT_DEBUGINFOD}}"
@@ -177,17 +177,17 @@ install_debug_pkg() {
             sudo zypper --non-interactive install -y kernel-default-debuginfo >/dev/null 2>&1
             ;;
         arch)
-            log "arch: no official kernel debug package — use debuginfod (debuginfod.archlinux.org)."
+            log "arch: no official kernel debug package - use debuginfod (debuginfod.archlinux.org)."
             [[ "$PLAN" == "1" ]] && log "PLAN[arch]: (debuginfod only)"
             return 1
             ;;
         alpine)
-            log "alpine: kernel DWARF generally unavailable via apk — use debuginfod or a build-tree vmlinux."
+            log "alpine: kernel DWARF generally unavailable via apk - use debuginfod or a build-tree vmlinux."
             [[ "$PLAN" == "1" ]] && log "PLAN[alpine]: (debuginfod only)"
             return 1
             ;;
         *)
-            log "unknown distro family — pass --vmlinux or use --build-id + debuginfod."
+            log "unknown distro family - pass --vmlinux or use --build-id + debuginfod."
             return 1
             ;;
     esac
@@ -253,7 +253,7 @@ D2J_ARGS=(linux --elf "$VMLINUX")
 if [[ -r "$SYSMAP" ]]; then
     D2J_ARGS+=(--system-map "$SYSMAP")
 elif [[ -f "$SYSMAP" ]]; then
-    log "System.map present but not readable (root-only) — using vmlinux symbols only."
+    log "System.map present but not readable (root-only) - using vmlinux symbols only."
 fi
 log "generating ISF -> ${ISF}"
 if ! "$D2J" "${D2J_ARGS[@]}" > "$ISF" 2>/dev/null || [[ ! -s "$ISF" ]]; then

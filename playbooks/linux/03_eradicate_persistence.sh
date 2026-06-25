@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# IR Playbook 03 — Linux Persistence Eradication
+# IR Playbook 03 - Linux Persistence Eradication
 # Hunts and removes attacker persistence mechanisms across every known technique:
 # cron, systemd, init, rc scripts, authorized_keys, shell profiles, LD_PRELOAD,
 # at jobs, XDG autostart, PAM modules, and kernel module loading.
@@ -37,8 +37,8 @@ flag_suspicious() {
     local item="$1"
     local reason="$2"
     suspicious+=("${item}")
-    printf '[%s] SUSPICIOUS: %s — %s\n' "$(date -u +%H:%M:%SZ)" "${item}" "${reason}" >> "${AUDIT_LOG}"
-    logger -t ir-playbook "PERSIST: Suspicious: ${item} — ${reason}"
+    printf '[%s] SUSPICIOUS: %s - %s\n' "$(date -u +%H:%M:%SZ)" "${item}" "${reason}" >> "${AUDIT_LOG}"
+    logger -t ir-playbook "PERSIST: Suspicious: ${item} - ${reason}"
 }
 
 # Build a set of known-bad paths from MALICIOUS_PATHS env var
@@ -69,7 +69,7 @@ neutralize() {
     local reason="$2"
     quarantine_file "${f}" "persist"
     > "${f}" 2>/dev/null || true  # Zero-out in-place (handles immutable paths)
-    printf '[%s] REMOVED: %s — %s\n' "$(date -u +%H:%M:%SZ)" "${f}" "${reason}" >> "${AUDIT_LOG}"
+    printf '[%s] REMOVED: %s - %s\n' "$(date -u +%H:%M:%SZ)" "${f}" "${reason}" >> "${AUDIT_LOG}"
     logger -t ir-playbook "PERSIST: Removed ${f} (${reason})"
     (( removed++ )) || true
 }
@@ -223,7 +223,7 @@ done
 # -- LD_PRELOAD hijacking ------------------------------------------------------
 if [[ -f /etc/ld.so.preload && -s /etc/ld.so.preload ]]; then
     quarantine_file /etc/ld.so.preload "ld_so_preload"
-    > /etc/ld.so.preload  # Zero out — this file should normally be empty
+    > /etc/ld.so.preload  # Zero out - this file should normally be empty
     flag_suspicious "/etc/ld.so.preload" "non-empty ld.so.preload detected and cleared"
     ldconfig 2>/dev/null || true
 fi
@@ -259,7 +259,7 @@ if [[ -f /etc/nsswitch.conf ]]; then
             [[ -z "${_mod}" ]] && continue
             if ! echo "${_mod}" | grep -qE "^(${_nsswitch_safe})$"; then
                 flag_suspicious "/etc/nsswitch.conf" \
-                    "non-standard NSS module '${_mod}' for '${_db}' — possible credential intercept"
+                    "non-standard NSS module '${_mod}' for '${_db}' - possible credential intercept"
             fi
         done <<< "${_mods}"
     done < /etc/nsswitch.conf 2>/dev/null || true
@@ -273,7 +273,7 @@ if [[ -d /etc/ld.so.conf.d ]]; then
     while IFS= read -r _conf; do
         if grep -qE '^(/tmp/|/dev/shm/|/var/tmp/|/home/[^/]+/\.[^/]|/run/[^/]+/\.[^/])' \
                "${_conf}" 2>/dev/null; then
-            flag_suspicious "${_conf}" "ld.so.conf.d entry points to volatile/hidden path — library hijacking"
+            flag_suspicious "${_conf}" "ld.so.conf.d entry points to volatile/hidden path - library hijacking"
             neutralize "${_conf}" "malicious ld.so.conf.d entry"
             ldconfig 2>/dev/null || true
         fi
@@ -288,7 +288,7 @@ while IFS= read -r _mod_name; do
     _mod_path=$(modinfo -n "${_mod_name}" 2>/dev/null || true)
     if [[ -z "${_mod_path}" ]]; then
         flag_suspicious "kernel-module:${_mod_name}" \
-            "loaded module has no modinfo — possible in-memory rootkit LKM"
+            "loaded module has no modinfo - possible in-memory rootkit LKM"
     elif [[ "${_mod_path}" != "/lib/modules/$(uname -r)"* ]]; then
         flag_suspicious "kernel-module:${_mod_name}" \
             "module loaded from outside standard kernel path: ${_mod_path}"
@@ -297,7 +297,7 @@ while IFS= read -r _mod_name; do
     fi
     # Blocklist via modprobe.d to prevent reload after reboot
     if [[ "${_blocklist_written}" == false ]]; then
-        printf '# IR incident %s — auto-generated module blocklist\n' "${INCIDENT_ID}" \
+        printf '# IR incident %s - auto-generated module blocklist\n' "${INCIDENT_ID}" \
             > "${IR_MODPROBE_CONF}" 2>/dev/null || true
         _blocklist_written=true
     fi
@@ -312,13 +312,13 @@ for _target_file in \
     /etc/ld.so.preload /etc/nsswitch.conf /etc/hosts /etc/modules; do
     [[ -f "${_target_file}" ]] || continue
     if lsattr "${_target_file}" 2>/dev/null | grep -q '^....i'; then
-        flag_suspicious "${_target_file}" "immutable attribute (chattr +i) set — blocking cleanup"
+        flag_suspicious "${_target_file}" "immutable attribute (chattr +i) set - blocking cleanup"
         chattr -i "${_target_file}" 2>/dev/null && \
             logger -t ir-playbook "PERSIST: Removed immutable bit from ${_target_file}" || true
     fi
 done
 
-logger -t ir-playbook "PERSIST: Sweep complete — removed: ${removed}, suspicious: ${#suspicious[@]}"
+logger -t ir-playbook "PERSIST: Sweep complete - removed: ${removed}, suspicious: ${#suspicious[@]}"
 printf '\nSummary: %d items removed, %d flagged suspicious\n' "${removed}" "${#suspicious[@]}" >> "${AUDIT_LOG}"
 
 python3 -c "

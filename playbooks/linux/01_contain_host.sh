@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# IR Playbook 01 — Linux Network Containment
+# IR Playbook 01 - Linux Network Containment
 # Isolates the host by dropping all traffic except management network SSH access.
 # Idempotent: safe to re-run. Preserves the current SSH session.
 # ==============================================================================
@@ -23,7 +23,7 @@ if command -v iptables &>/dev/null && iptables -L &>/dev/null 2>&1; then
 elif command -v nft &>/dev/null; then
     BACKEND="nftables"
 else
-    logger -t ir-playbook "CONTAIN: ERROR — no firewall backend found"
+    logger -t ir-playbook "CONTAIN: ERROR - no firewall backend found"
     python3 -c "import json; print(json.dumps({'phase':'containment','status':'failed','error':'no_firewall_backend','incident_id':'${INCIDENT_ID}'}))"
     exit 1
 fi
@@ -39,7 +39,7 @@ for m in "${_mgmt[@]}"; do
 done
 
 if [[ "${#MGMT_LIST[@]}" -eq 0 ]]; then
-    logger -t ir-playbook "CONTAIN: WARNING — no MGMT_IPS set; SSH access will be lost after isolation"
+    logger -t ir-playbook "CONTAIN: WARNING - no MGMT_IPS set; SSH access will be lost after isolation"
 fi
 
 # -- iptables path -------------------------------------------------------------

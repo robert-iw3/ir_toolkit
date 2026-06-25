@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-analyze_memory_linux.py — offline Linux memory analysis (Volatility 3) -> findings.
+analyze_memory_linux.py - offline Linux memory analysis (Volatility 3) -> findings.
 
 Run this on your ANALYST machine after copying the avml `.raw`/`.lime` image off
 the target. Runs a set of Volatility 3 Linux plugins and emits ONLY concerning
@@ -32,7 +32,7 @@ Integrate: add Memory_Findings_*.json to Combined_Findings and re-run adjudicate
 Usage:
   analyze_memory_linux.py --image mem.raw [--output-dir DIR] [--vol vol] [--symbols DIR]
                           [--offline-dir DIR] [--skip-plugins a,b] [--quiet]
-  --offline-dir reads pre-saved `<plugin>.json` (vol -r json) instead of running vol —
+  --offline-dir reads pre-saved `<plugin>.json` (vol -r json) instead of running vol -
   for air-gapped re-analysis and testing.
 """
 import argparse
@@ -119,7 +119,7 @@ PLUGINS = ("linux.pslist.PsList", "linux.pidhashtable.PIDHashTable",
            "linux.capabilities.Capabilities", "linux.mountinfo.MountInfo",
            "linux.library_list.LibraryList")
 
-# Heavy per-VMA / per-thread plugins (big output, slow on large images) — opt-in with --deep.
+# Heavy per-VMA / per-thread plugins (big output, slow on large images) - opt-in with --deep.
 OPTIONAL_PLUGINS = ("linux.proc.Maps", "linux.pscallstack.PsCallStack")
 
 # YARA scan scope (perf vs coverage): process = per-PID VMAs (faster, attributable, skips free
@@ -167,7 +167,7 @@ def analyze_processes(pslist_rows, pidhash_rows):
         if pid and pid not in pslist_pids:
             out.append(_finding("High", "Hidden Process (memory)",
                                 f"PID {pid} ({_get(r, 'COMM', 'Process')})",
-                                "Process in the PID hashtable but missing from pslist — "
+                                "Process in the PID hashtable but missing from pslist - "
                                 "DKOM/unlink rootkit hiding.",
                                 "T1014 (Rootkit), T1055 (Process Injection)"))
     return out
@@ -183,16 +183,16 @@ def analyze_malfind(rows):
         out.append(_finding("High", "Injected Memory (malfind)",
                             f"PID {pid} ({proc}) @ {start}",
                             f"Executable+writable anonymous mapping (prot={prot}) with no "
-                            f"backing file — injected code/shellcode.",
+                            f"backing file - injected code/shellcode.",
                             "T1055 (Process Injection)"))
     return out
 
 
 def _implant_exec(args):
-    """True when the program being executed lives in a world-writable implant dir — i.e. the
+    """True when the program being executed lives in a world-writable implant dir - i.e. the
     executable (argv[0]) is there, OR an interpreter (argv[0]) is running a script (argv[1])
     from there. An implant dir appearing only as a *data argument* (e.g. firefox crashhelper
-    '/usr/lib/firefox/crashhelper … /tmp/ …') is NOT a match — that was a false positive."""
+    '/usr/lib/firefox/crashhelper … /tmp/ …') is NOT a match - that was a false positive."""
     toks = args.split()
     if not toks:
         return False
@@ -263,7 +263,7 @@ def analyze_sockstat(rows, proc_map=None):
         dport = _get(r, "Destination Port", "DestinationPort", "Dest Port")
         state = str(_get(r, "State"))
         pid = _get(r, "PID", "Pid", "Tid")
-        # sockstat frequently has no comm column — join the pslist PID->name for ATTRIBUTION
+        # sockstat frequently has no comm column - join the pslist PID->name for ATTRIBUTION
         # only. Severity is NOT adjusted by process reputation: a browser/daemon beaconing is a
         # real C2 vector (injection), so name-based downgrade would be a blindspot.
         proc = _get(r, "Process", "COMM") or proc_map.get(str(pid), "")
@@ -271,7 +271,7 @@ def analyze_sockstat(rows, proc_map=None):
             out.append(_finding("Medium", "External Connection (memory)",
                                 f"{dst}:{dport}",
                                 f"PID {pid} ('{proc}') had an external connection to "
-                                f"{dst}:{dport} (state={state or 'n/a'}) at capture — possible C2.",
+                                f"{dst}:{dport} (state={state or 'n/a'}) at capture - possible C2.",
                                 "T1071 (Application Layer Protocol)"))
     return out
 
@@ -285,7 +285,7 @@ def _analyze_hooks(rows, ftype, what):
             target = _get(r, "Index", "Name", "Address", "Table Address") or "entry"
             out.append(_finding("High", ftype, str(target),
                                 f"{what} points to an unattributed handler "
-                                f"(sym={sym or 'UNKNOWN'}) — kernel hook / rootkit.",
+                                f"(sym={sym or 'UNKNOWN'}) - kernel hook / rootkit.",
                                 "T1014 (Rootkit)"))
     return out
 
@@ -300,12 +300,12 @@ def analyze_check_modules(rows):
         name = str(_get(r, "Name", "Module") or "").strip()
         # check_modules emits unnamed/empty rows on modern kernels (sysfs-vs-list deltas that
         # aren't real modules). A genuinely rootkit-hidden module still carries a name, so an
-        # empty name is plugin noise — skip it rather than cry "rootkit" on every empty row.
+        # empty name is plugin noise - skip it rather than cry "rootkit" on every empty row.
         if not name or name in ("-", "0x0"):
             continue
         out.append(_finding("High", "Hidden Kernel Module (memory)", name,
                             f"Module '{name}' present in kernel structures but hidden from "
-                            f"the module list — possible rootkit.",
+                            f"the module list - possible rootkit.",
                             "T1014 (Rootkit), T1547.006 (Kernel Modules)"))
     return out
 
@@ -324,7 +324,7 @@ def analyze_envars(rows):
         pid, comm = _get(r, "PID", "Pid"), _get(r, "COMM", "Process", "Comm")
         if key in ("LD_PRELOAD", "LD_AUDIT"):
             out.append(_finding("High", "Linker Hijack (memory)", f"PID {pid} ({comm})",
-                                f"{key}={val[:200]} — dynamic-linker injection (userland rootkit / "
+                                f"{key}={val[:200]} - dynamic-linker injection (userland rootkit / "
                                 f"library injection).", "T1574.006 (Dynamic Linker Hijacking)"))
         elif key == "LD_LIBRARY_PATH" and IMPLANT_RE.search(val):
             out.append(_finding("Medium", "Linker Path in Implant Dir (memory)",
@@ -334,7 +334,7 @@ def analyze_envars(rows):
     return out
 
 
-# NOTE: a vol3 `linux.lsof` analyzer was removed after live validation — its FD column is a plain
+# NOTE: a vol3 `linux.lsof` analyzer was removed after live validation - its FD column is a plain
 # integer (no txt/mem class), so it cannot isolate the EXECUTABLE from the thousands of benign
 # open memfd/deleted data FDs (`memfd:libffi`, gvfs metadata, …). Flagging them all is pure noise.
 # Fileless / injected execution is covered precisely by `malfind` (anon executable memory) and, in
@@ -349,7 +349,7 @@ def analyze_ptrace(rows):
         pid, comm = _get(r, "PID", "Pid"), _get(r, "Process", "COMM", "Comm")
         if tracer and tracer not in ("", "0", "-", "N/A", "None"):
             out.append(_finding("Medium", "Ptrace Attachment (memory)", f"PID {pid} ({comm})",
-                                f"Process is being ptrace'd by TID {tracer} — code injection / "
+                                f"Process is being ptrace'd by TID {tracer} - code injection / "
                                 f"credential theft / anti-debug.",
                                 "T1055.008 (Ptrace Injection), T1622 (Debugger Evasion)"))
     return out
@@ -358,7 +358,7 @@ def analyze_ptrace(rows):
 def analyze_hidden_modules(rows):
     """linux.hidden_modules -> kernel modules found by carving but absent from the module list.
     A NAMED carved module is a strong rootkit signal (High). An UNNAMED, address-only carve is
-    most often the carver hitting a non-module structure — surface it (no blindspot) but at Medium
+    most often the carver hitting a non-module structure - surface it (no blindspot) but at Medium
     'verify', since a real hidden module almost always retains its name field."""
     out = []
     for r in rows or []:
@@ -367,18 +367,18 @@ def analyze_hidden_modules(rows):
         if name and name not in ("-", "0x0"):
             out.append(_finding("High", "Hidden Kernel Module (carved)", name,
                                 f"Module '{name}' (addr {addr}) recovered by carving but missing "
-                                f"from the module list — rootkit hiding.",
+                                f"from the module list - rootkit hiding.",
                                 "T1014 (Rootkit), T1547.006 (Kernel Modules)"))
         elif addr:
             out.append(_finding("Medium", "Unnamed Carved Module (verify)", f"@{addr}",
-                                f"Address-only module struct (@{addr}) carved but unnamed — likely "
+                                f"Address-only module struct (@{addr}) carved but unnamed - likely "
                                 f"a carving artifact; verify it is not a name-stripped hidden module.",
                                 "T1014 (Rootkit)"))
     return out
 
 
 # NOTE: a derived "kernel-thread masquerade" check (bracketed argv[0] with extra tokens) was
-# removed after live validation — normal kthread names with spaces/dashes (`[kworker/u16:3-events]`)
+# removed after live validation - normal kthread names with spaces/dashes (`[kworker/u16:3-events]`)
 # tripped it. Without the (absent) process_spoofing plugin there is no reliable comm-vs-exe source,
 # so this heuristic was net false-positive. Re-add if a real exe/comm cross-source becomes available.
 
@@ -393,7 +393,7 @@ def _row_brief(r):
 
 def _analyze_anomaly_rows(rows, ftype, mitre, severity="High"):
     """These integrity plugins emit a row only when something is OFF (hooked/unexpected), so
-    each returned row is a finding. (Output columns vary by build — summarize the row.)"""
+    each returned row is a finding. (Output columns vary by build - summarize the row.)"""
     return [_finding(severity, ftype, (_row_brief(r)[:70] or "(kernel)"),
                      f"{ftype}: {_row_brief(r)}", mitre) for r in (rows or [])]
 
@@ -435,13 +435,13 @@ def analyze_check_idt(rows):
         if sym in ("", "UNKNOWN", "-", "HOOKED"):
             out.append(_finding("High", "IDT Hook (memory)", f"IDT[{idx}]",
                                 f"Interrupt-descriptor {idx} handler unresolved/hooked "
-                                f"(symbol='{sym}') — kernel rootkit.", "T1014 (Rootkit)"))
+                                f"(symbol='{sym}') - kernel rootkit.", "T1014 (Rootkit)"))
     return out
 
 
 def analyze_kthreads(rows):
     """linux.kthreads -> kernel thread whose handler is backed by NO module (and unresolved).
-    A handler inside a real module (dm_crypt, nvidia, …) is legitimate — only a handler that
+    A handler inside a real module (dm_crypt, nvidia, …) is legitimate - only a handler that
     belongs to no module AND resolves to no symbol points at injected/unbacked code."""
     out = []
     for r in rows or []:
@@ -453,7 +453,7 @@ def analyze_kthreads(rows):
         if sym in ("", "UNKNOWN", "-") and no_module:
             out.append(_finding("High", "Kernel Thread Hook (memory)", f"{name} (TID {tid})",
                                 f"Kernel thread '{name}' handler resolves to no module and no "
-                                f"symbol — unbacked/injected code (possible kthread hijack).",
+                                f"symbol - unbacked/injected code (possible kthread hijack).",
                                 "T1014 (Rootkit)"))
     return out
 
@@ -462,13 +462,13 @@ def analyze_ebpf(rows):
     """linux.ebpf -> loaded eBPF programs. Flag ALL of them (Medium/Indeterminate): every program
     type can be abused (kprobe/tracepoint/xdp for hooking, socket-filter/cgroup for traffic
     control), so filtering by type would tune out real vectors. The analyst confirms expected vs
-    not — modern rootkits/C2 (bpfdoor, TripleCross, ebpfkit) live here."""
+    not - modern rootkits/C2 (bpfdoor, TripleCross, ebpfkit) live here."""
     out = []
     for r in rows or []:
         typ = str(_get(r, "Type")).strip().lower()
         name, tag = _get(r, "Name"), _get(r, "Tag")
         out.append(_finding("Medium", "eBPF Program (memory)", f"{name} [{typ}]",
-                            f"Loaded eBPF program name='{name}' type='{typ}' tag='{tag}' — eBPF "
+                            f"Loaded eBPF program name='{name}' type='{typ}' tag='{tag}' - eBPF "
                             f"backs modern rootkits/C2; confirm it is expected.",
                             "T1014 (Rootkit), T1205 (Traffic Signaling)"))
     return out
@@ -490,19 +490,19 @@ def analyze_capabilities(rows):
         euid = str(_get(r, "EUID", "Euid")).strip()
         name, pid = _get(r, "Name", "Comm"), _get(r, "Pid", "PID")
         if euid in ("0", "", "-"):
-            continue                       # root has all caps — not an attack indicator
+            continue                       # root has all caps - not an attack indicator
         hits = [c for c in DANGEROUS_CAPS if c in eff]
         if hits:
             out.append(_finding("Medium", "Dangerous Capability (memory)", f"{name} (PID {pid})",
                                 f"Non-root process (euid={euid}) holds dangerous capabilities "
-                                f"({', '.join(hits)}) — privilege-escalation / container-escape "
+                                f"({', '.join(hits)}) - privilege-escalation / container-escape "
                                 f"surface.", "T1548 (Abuse Elevation Control)"))
     return out
 
 
 def analyze_mountinfo(rows):
     """linux.mountinfo -> bind-mounts shadowing a system path (file hiding). NOTE: tmpfs on /tmp,
-    /dev/shm, /run, /run/user/* is the NORMAL system layout, so tmpfs location is not flagged —
+    /dev/shm, /run, /run/user/* is the NORMAL system layout, so tmpfs location is not flagged -
     only a bind mount placed over a sensitive system path is anomalous."""
     out = []
     for r in rows or []:
@@ -511,7 +511,7 @@ def analyze_mountinfo(rows):
         src = str(_get(r, "MOUNT_SRC", "DEVNAME", "Source"))
         if re.match(r"/(?:etc|bin|sbin|usr|boot|proc|root)(?:/|$)", mp) and "bind" in opts:
             out.append(_finding("High", "Bind Mount Over System Path (memory)", mp,
-                                f"bind mount over {mp} (src={src}) — file shadowing / hiding.",
+                                f"bind mount over {mp} (src={src}) - file shadowing / hiding.",
                                 "T1564.001 (Hidden Files and Directories)"))
     return out
 
@@ -526,7 +526,7 @@ def analyze_library_list(rows):
         if "memfd:" in low or "(deleted)" in low or IMPLANT_EXEC_RE.match(path):
             out.append(_finding("High", "Suspicious Loaded Library (memory)", f"PID {pid}",
                                 f"Library loaded from an anomalous location: {path[:200]} "
-                                f"(memfd/deleted/implant dir) — library injection.",
+                                f"(memfd/deleted/implant dir) - library injection.",
                                 "T1574 (Hijack Execution Flow), T1620"))
     return out
 
@@ -547,7 +547,7 @@ def analyze_maps(rows):
 
 def analyze_pscallstack(rows):
     """linux.pscallstack (optional, heavy) -> stack frames returning into anonymous/unbacked
-    memory (no module/symbol) — a hallmark of injected/shellcode execution."""
+    memory (no module/symbol) - a hallmark of injected/shellcode execution."""
     out = []
     for r in rows or []:
         mod = str(_get(r, "Module")).strip()
@@ -556,12 +556,12 @@ def analyze_pscallstack(rows):
         if mod in ("", "-", "UNKNOWN") and name in ("", "-", "UNKNOWN"):
             out.append(_finding("Medium", "Anomalous Call Stack (memory)", f"{comm} (TID {tid})",
                                 f"Stack frame returns into unbacked memory (no module/symbol) "
-                                f"@ {_get(r, 'Address', 'Value')} — possible injected execution.",
+                                f"@ {_get(r, 'Address', 'Value')} - possible injected execution.",
                                 "T1055 (Process Injection)"))
     return out
 
 
-# YARA rule names that fire on benign/common content — suppress to keep signal high.
+# YARA rule names that fire on benign/common content - suppress to keep signal high.
 YARA_NOISE = re.compile(r"(base64|url|email|ipv4|domain|hex_|generic_|test_|eicar)",
                         re.IGNORECASE)
 
@@ -582,16 +582,16 @@ def analyze_yara(rows):
     """YARA hits (native scan OR per-process vol worker) -> findings. A rule hit in memory is a
     strong signal (malware family / tool signature). The self-test canary + known-noise rules are
     excluded. Native rows carry {Rule, Offset, Value(hex)}; the per-process worker adds PID/Process
-    plus ENRICHMENT — {Perms, Region(anon|file), Path, Strings} — the FP/TP disambiguator.
+    plus ENRICHMENT - {Perms, Region(anon|file), Path, Strings} - the FP/TP disambiguator.
 
     Context only ESCALATES or ANNOTATES, never downgrades (no blindspots): a hit in anonymous
     EXECUTABLE memory is injected/unbacked code -> Critical; a file-backed hit keeps its severity but
     is annotated with the backing path (could still be a trojanised binary) so the adjudicator/analyst
     decides; a rule that matched many processes is flagged as likely-shared-bytes (could also be a
-    library-injection campaign) — all surfaced, nothing cleared here."""
+    library-injection campaign) - all surfaced, nothing cleared here."""
     out = []
     # breadth: how many distinct PIDs each rule hit (a rule across many procs == common/shared bytes,
-    # OR an LD_PRELOAD-style injection — annotate, don't clear).
+    # OR an LD_PRELOAD-style injection - annotate, don't clear).
     rule_pids = {}
     for r in rows or []:
         rule = str(_get(r, "Rule", "Rule Name", "rule"))
@@ -616,9 +616,9 @@ def analyze_yara(rows):
         ftype = "Injected Code (memory YARA)" if anon_exec else "YARA Memory Match"
         # context clause
         if anon_exec:
-            loc = f"in ANONYMOUS EXECUTABLE memory ({perms}) — injected/unbacked code"
+            loc = f"in ANONYMOUS EXECUTABLE memory ({perms}) - injected/unbacked code"
         elif region == "file":
-            loc = (f"in file-backed {perms} mapping {path or '?'} — verify that on-disk file's "
+            loc = (f"in file-backed {perms} mapping {path or '?'} - verify that on-disk file's "
                    f"hash/package ownership (a rule grazing a loaded binary/library is often benign, "
                    f"but a trojanised binary is not)")
         elif region == "anon":
@@ -630,7 +630,7 @@ def analyze_yara(rows):
             details += f" Matched strings: {', '.join(str(s) for s in strings[:12])}."
         breadth = len(rule_pids.get(rule, ()))
         if breadth >= 3:
-            details += (f" NOTE: this rule matched {breadth} processes — likely common/shared bytes "
+            details += (f" NOTE: this rule matched {breadth} processes - likely common/shared bytes "
                         f"(e.g. interpreter/library content), but rule out a library-injection campaign.")
         if snippet:
             details += f" Bytes(hex): {str(snippet)[:96]}"
@@ -665,7 +665,7 @@ def correlate(findings):
     """(A) Join findings by PID and raise confidence where signals CONVERGE. To avoid false
     escalation on benign JIT+network processes (a browser legitimately has anon-exec memory AND
     external connections), require ≥1 inherently-strong signal PLUS ≥1 other distinct signal on
-    the same PID. Only ELEVATES (emits a new High finding) — never suppresses, so no blindspot."""
+    the same PID. Only ELEVATES (emits a new High finding) - never suppresses, so no blindspot."""
     by_pid = {}
     for f in findings:
         pid = _pid_of(f)
@@ -684,13 +684,13 @@ def correlate(findings):
                 f"{len(types)} independent memory signals converge on PID {pid}: "
                 f"{', '.join(sorted(types))}. A high-signal indicator "
                 f"({', '.join(sorted(strong))}) co-occurring with other anomalies is a "
-                f"high-confidence compromise pattern — prioritize for analyst review.",
+                f"high-confidence compromise pattern - prioritize for analyst review.",
                 "T1055 (Process Injection), T1059, T1071"))
     return out
 
 
 def dedup(findings):
-    """Collapse identical findings — e.g. a process with many sockets to the same IP yields one
+    """Collapse identical findings - e.g. a process with many sockets to the same IP yields one
     'External Connection' fact, not N. Keyed on content (Timestamp excluded). First-seen order."""
     seen, out = set(), []
     for f in findings:
@@ -705,7 +705,7 @@ def dedup(findings):
 def prioritize(findings):
     """(B) Stable-order findings by investigative priority so the few high-value items float to
     the top of a wide-net flood: correlated threats first, then by severity, then strong signals.
-    Pure ordering — nothing is dropped."""
+    Pure ordering - nothing is dropped."""
     sev = {"Critical": -1, "High": 0, "Medium": 1, "Low": 2}
     return sorted(findings, key=lambda f: (
         0 if f["Type"] == "Correlated Memory Threat" else 1,
@@ -760,7 +760,7 @@ def _vol_exe(explicit=None):
 
 
 def run_plugin(vol, image, plugin, symbols=None, extra=None, timeout=900, progress=False):
-    # `-q` suppresses Volatility's progress feedback — keep it for the fast plugins, but DROP it for
+    # `-q` suppresses Volatility's progress feedback - keep it for the fast plugins, but DROP it for
     # the long YARA scan so vol's native progress streams (plus a heartbeat) instead of looking hung.
     cmd = [vol, "-r", "json", "-f", image]
     if not progress:
@@ -784,7 +784,7 @@ def _run_with_progress(cmd, timeout):
     progresses instead of appearing stuck. stdout (the JSON) is still captured + parsed."""
     import threading
     import time
-    print("[mem]   YARA scan started — vol progress streams below; heartbeat every 30s …",
+    print("[mem]   YARA scan started - vol progress streams below; heartbeat every 30s …",
           file=sys.stderr, flush=True)
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, text=True)   # stderr inherits -> live
     start, stop = time.time(), threading.Event()
@@ -814,7 +814,7 @@ def _run_with_progress(cmd, timeout):
 def collect(image, vol=None, symbols=None, offline_dir=None, skip=(), yara_extra=None,
             yara_plugin="yarascan.YaraScan", yara_timeout=7200, deep=False):
     """yara_extra: the vol args selecting the ruleset, e.g. ["--yara-compiled-file", "x.yarc"]
-    (preferred — pre-compiled with externals so it actually loads) or ["--yara-file", src]."""
+    (preferred - pre-compiled with externals so it actually loads) or ["--yara-file", src]."""
     rows = {}
     plugins = list(PLUGINS)
     if deep or offline_dir:
@@ -837,7 +837,7 @@ def collect(image, vol=None, symbols=None, offline_dir=None, skip=(), yara_extra
             except (OSError, ValueError):
                 rows[plugin] = []
         elif plugin in YARA_PLUGINS:
-            # YARA is the long pole — its own (larger) timeout + a rolling progress log so the
+            # YARA is the long pole - its own (larger) timeout + a rolling progress log so the
             # multi-minute scan doesn't look hung after "compiled N rules".
             rows[plugin] = run_plugin(vol, image, plugin, symbols,
                                       extra=yara_extra, timeout=yara_timeout, progress=True)
@@ -855,7 +855,7 @@ def decompress_if_needed(image, quiet=False):
     conv = shutil.which("avml-convert") or (staged if os.access(staged, os.X_OK) else None)
     if not conv:
         raise RuntimeError("compressed image needs 'avml-convert' to decompress "
-                           "(stage it: Build-OfflineToolkit-Linux.sh --include-memory) — not found")
+                           "(stage it: Build-OfflineToolkit-Linux.sh --include-memory) - not found")
     out = re.sub(r"\.(lime\.)?compressed$", ".lime", image, flags=re.IGNORECASE)
     if not quiet:
         print(f"[mem] decompressing {os.path.basename(image)} -> {os.path.basename(out)}",
@@ -911,7 +911,7 @@ def _write_yara_results(out_dir, stamp, engine, image, rules_n, rules_failed, du
 def compile_yara_ruleset(yara_file, yara_dir, use_staged, out_dir, stamp, quiet=False,
                          include_generic=False):
     """Compile the requested YARA rules to a single COMPILED .yarc (Linux-curated by content +
-    externals declared). Used by BOTH engines — the native scanner loads it directly, and the vol
+    externals declared). Used by BOTH engines - the native scanner loads it directly, and the vol
     fallback passes it via --yara-compiled-file. Returns the .yarc path or None.
 
     Why compile ourselves: vol's --yara-file compiles raw source with no externals → a single
@@ -965,7 +965,7 @@ def main():
                          "ATTRIBUTION + per-process timeout + rolling resumable JSONL, scans mapped "
                          "process memory only (~80min on a desktop w/ browsers, resumable).")
     ap.add_argument("--yara-broad", action="store_true",
-                    help="also scan platform-generic rules (broader, but slower — generic Windows "
+                    help="also scan platform-generic rules (broader, but slower - generic Windows "
                          "byte-pattern rules match heavily in a full-image scan). Default: Linux-only.")
     ap.add_argument("--yara-proc-timeout", type=int, default=180,
                     help="per-process scan timeout in seconds (vol engine + native two-phase "
@@ -1023,7 +1023,7 @@ def main():
     # YARA scan runs POST-collect so its rows feed the same analyze() pipeline:
     #   native (default) = yara-python over the whole image (fast, full physical coverage, no PID)
     #   vol              = per-process worker via Volatility vmayarascan (PER-PID ATTRIBUTION,
-    #                      per-process timeout, ROLLING RESUMABLE JSONL) — the proven attributed path
+    #                      per-process timeout, ROLLING RESUMABLE JSONL) - the proven attributed path
     yara_dur, canary_override = 0, None
     if yarc and not args.offline_dir:
         import linux_yara
@@ -1044,14 +1044,14 @@ def main():
                 rows["_yara_timed_out"] = True
             # TWO-PHASE: the fast triage tells us WHICH signatures are present (no PID). If any fired,
             # follow up IMMEDIATELY with the per-process worker to ATTRIBUTE them to a PID and ENRICH
-            # each with VMA context (anon/file region, perms, backing path, matched strings) — the
+            # each with VMA context (anon/file region, perms, backing path, matched strings) - the
             # detail that separates injected code from a rule grazing a loaded library. Skipped on a
             # clean host (0 triage matches), so the common case stays fast.
             matched = {str(_get(r, "Rule", "rule")) for r in yrows
                        if str(_get(r, "Rule", "rule")) not in ("", CANARY_RULE)}
             if matched and args.yara_followup and vol:
                 print(f"[mem]   triage matched {len(matched)} rule(s); running per-process "
-                      f"enrichment (attribute + context) — rolling log: {jsonl}",
+                      f"enrichment (attribute + context) - rolling log: {jsonl}",
                       file=sys.stderr, flush=True)
                 jl = os.path.join(out_dir, f"_yara_followup_{args.stamp}.jsonl")
                 _s2 = _t.time()
@@ -1070,7 +1070,7 @@ def main():
                 except OSError:
                     pass
         else:                                       # vol: per-process worker (attributed, resumable)
-            print("[mem]   YARA per-process scan (engine=vol vmayarascan, per-PID attribution) — "
+            print("[mem]   YARA per-process scan (engine=vol vmayarascan, per-PID attribution) - "
                   f"rolling log: {jsonl}", file=sys.stderr, flush=True)
             _s = _t.time()
             subprocess.run([sys.executable, worker, image, yarc, jsonl,
@@ -1097,7 +1097,7 @@ def main():
             why = "timed out" if timed_out else "the ELF self-test canary never matched"
             findings.insert(0, _finding(
                 "High", "YARA Self-Test FAILED", "engine did not inspect memory",
-                f"YARA scan unreliable ({why}) — '0 YARA matches' is NOT a clean result. "
+                f"YARA scan unreliable ({why}) - '0 YARA matches' is NOT a clean result. "
                 f"Raise --yara-timeout, check yara-python, or try --yara-engine vol.", "N/A"))
         _write_yara_results(out_dir, args.stamp, args.yara_engine, image, yara_n, yara_failed,
                             yara_dur, timed_out, canary, yrows)

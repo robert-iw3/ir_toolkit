@@ -7,7 +7,7 @@
 **/__pycache__
 **/*.pyc
 
-# Collected evidence — never bake a collection into the image
+# Collected evidence - never bake a collection into the image
 reports/
 live_test/
 **/Evidence/

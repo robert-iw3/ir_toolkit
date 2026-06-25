@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# Build-OfflineToolkit-Linux.sh — stage OPTIONAL third-party tools for the Linux
+# Build-OfflineToolkit-Linux.sh - stage OPTIONAL third-party tools for the Linux
 # and cloud IR workflow BEFORE going to an isolated host. Run on an
 # INTERNET-CONNECTED machine. The Linux twin of Build-OfflineToolkit.ps1.
 #
@@ -33,7 +33,7 @@
 #                    into tools/symbols/ so OFFLINE memory analysis has it (needs the
 #                    matching debug vmlinux/dbgsym reachable while still connected)
 #
-# Every dependency — staged binary, vendored wheel, OR assumed-present system tool —
+# Every dependency - staged binary, vendored wheel, OR assumed-present system tool -
 # is recorded in tools/STAGED_MANIFEST.json so the offline host's inventory is explicit.
 # ==============================================================================
 set -uo pipefail
@@ -92,7 +92,7 @@ download() {  # url, dest
     if [[ "$FETCH" == "curl" ]]; then curl -fsSL "$1" -o "$2"; else wget -q "$1" -O "$2"; fi
 }
 
-stage_bin() {  # name, url, dest — download + chmod + record (honours --check-only)
+stage_bin() {  # name, url, dest - download + chmod + record (honours --check-only)
     local name="$1" url="$2" dest="$3"
     if [[ $CHECK_ONLY -eq 1 ]]; then
         [[ -f "$dest" ]] && record "$name" "$url" "$dest" "present" || record "$name" "$url" "" "not-staged"
@@ -128,7 +128,7 @@ fi
 
 # --- YARA rules: community packs + abuse.ch yaraify, staged for the memory --yara scan ---------
 # The analyzer (linux_yara.py) filters these to Linux/generic rules and compiles them with the
-# externals declared (so they actually load — see analyze_memory_linux.py).
+# externals declared (so they actually load - see analyze_memory_linux.py).
 yrules="${TOOLS_DIR}/yara_rules"
 stage_yara_pack() {  # name, url, subdir, within(substr filter, "" = flat zip like yaraify)
     local name="$1" url="$2" subdir="$3" within="$4"
@@ -208,7 +208,7 @@ if [[ $INCLUDE_CLOUD -eq 1 || $CHECK_ONLY -eq 1 ]]; then
             ver="$("$cli" "${vcmd[@]}" 2>&1 | head -1 | tr -d '"' | cut -c1-40)"
             record "cloud:${cli}" "system" "" "present (${ver})"
         else
-            record "cloud:${cli}" "system" "" "MISSING — install before the cloud workflow (or use the Docker image)"
+            record "cloud:${cli}" "system" "" "MISSING - install before the cloud workflow (or use the Docker image)"
         fi
     done
 fi
@@ -218,10 +218,10 @@ fi
 if [[ $CHECK_ONLY -eq 1 || $INCLUDE_MEMORY -eq 1 ]]; then
     probe() {  # binary, role
         command -v "$1" >/dev/null 2>&1 \
-            && record "sys:$1" "host" "" "present — $2" \
-            || record "sys:$1" "host" "" "absent — $2 (install on target if that capability is needed)"
+            && record "sys:$1" "host" "" "present - $2" \
+            || record "sys:$1" "host" "" "absent - $2 (install on target if that capability is needed)"
     }
-    probe python3   "core: every analyzer/report (stdlib only — no pip deps)"
+    probe python3   "core: every analyzer/report (stdlib only - no pip deps)"
     probe bash      "core: collection + eradication scripts"
     probe ip        "containment: network isolation"
     probe nft       "containment: firewall (nftables)"

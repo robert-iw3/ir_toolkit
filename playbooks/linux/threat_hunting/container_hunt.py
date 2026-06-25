@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-container_hunt.py — container runtime + Kubernetes workload forensics -> findings.
+container_hunt.py - container runtime + Kubernetes workload forensics -> findings.
 
 Closes the Collection gap: no docker/containerd/pod/EKS-AKS-GKE collection. Inspects
 container runtimes (docker / podman / nerdctl `inspect` JSON) and Kubernetes objects
@@ -10,7 +10,7 @@ container runtimes (docker / podman / nerdctl `inspect` JSON) and Kubernetes obj
 
 so container/K8s risks merge into Combined_Findings for adjudication. Focuses on real
 container-escape / privilege techniques (privileged, host namespaces, docker.sock and
-sensitive host mounts, dangerous capabilities, cluster-admin bindings) — not noise.
+sensitive host mounts, dangerous capabilities, cluster-admin bindings) - not noise.
 
 Read-only. Degrades gracefully: missing runtime/kubectl -> that source is skipped.
 
@@ -78,7 +78,7 @@ def analyze_container_inspect(data):
             s = src.rstrip("/") or "/"
             if "docker.sock" in s:
                 out.append(_finding("High", "Docker Socket Mount", name,
-                                    f"Container mounts the Docker socket ({src}) — full daemon control.",
+                                    f"Container mounts the Docker socket ({src}) - full daemon control.",
                                     "T1610 (Deploy Container)"))
             elif s in SENSITIVE_HOST_PATHS:
                 out.append(_finding("High", "Sensitive Host Mount", name,
@@ -161,7 +161,7 @@ def analyze_k8s_rbac(data):
             who = ", ".join(f"{s.get('kind')}:{s.get('name')}" for s in subs
                             if isinstance(s, dict)) or "(no subjects)"
             name = (crb.get("metadata") or {}).get("name", "unknown")
-            # System defaults bind cluster-admin to system:masters — flag non-system subjects.
+            # System defaults bind cluster-admin to system:masters - flag non-system subjects.
             non_system = [s for s in subs if isinstance(s, dict)
                           and not str(s.get("name", "")).startswith("system:")]
             sev = "High" if non_system else "Low"

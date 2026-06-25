@@ -9,7 +9,7 @@
     Includes built-in validation to ensure pre-existing explicit 'Allow' rules continue to function.
 
     Two-stage network posture:
-      • Analysis window (default): inbound Block, outbound ALLOW — so the C2/egress sensor can
+      • Analysis window (default): inbound Block, outbound ALLOW - so the C2/egress sensor can
         observe where the implant beacons and exfils to (beacons jitter / dwell for hours).
       • Follow-on (-BlockOutbound): after the egress-observation window closes, also set
         DefaultOutboundAction=Block to blackhole egress, keeping a management pinhole
@@ -54,7 +54,7 @@ param (
     # FOLLOW-ON outbound blackhole: after the egress-observation window has captured
     # where the implant beacons/exfils, set DefaultOutboundAction=Block to cut all
     # egress (a management pinhole is kept so the responder is not locked out). This
-    # is the deferred second stage — NOT used during the analysis window, when
+    # is the deferred second stage - NOT used during the analysis window, when
     # outbound is deliberately left open so the C2 sensor can observe beaconing.
     [switch]$BlockOutbound,
     [int[]]$AllowOutboundPort = @(),
@@ -205,26 +205,26 @@ try {
 # MIIcoQYJKoZIhvcNAQcCoIIckjCCHI4CAQExDzANBglghkgBZQMEAgEFADB5Bgor
 # BgEEAYI3AgEEoGswaTA0BgorBgEEAYI3AgEeMCYCAwEAAAQQH8w7YFlLCE63JNLG
 # KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCAoOgDuLrs4PRU8
-# sWtTxPR+TqrRTQ9W5mdLX56gBkxYA6CCFrQwggN2MIICXqADAgECAhBj3Isegven
-# qEj21ds5AZieMA0GCSqGSIb3DQEBCwUAMFMxGjAYBgNVBAsMEUluY2lkZW50IFJl
+# sWtTxPR+TqrRTQ9W5mdLX56gBkxYA6CCFrQwggN2MIICXqADAgECAhAcxe7C/TZF
+# rUKI1OYOaCvjMA0GCSqGSIb3DQEBCwUAMFMxGjAYBgNVBAsMEUluY2lkZW50IFJl
 # c3BvbnNlMRMwEQYDVQQKDApJUiBUb29sa2l0MSAwHgYDVQQDDBdJUiBUb29sa2l0
-# IENvZGUgU2lnbmluZzAeFw0yNjA2MjMxNDE2NTlaFw0zMTA2MjMxNDI2NTlaMFMx
+# IENvZGUgU2lnbmluZzAeFw0yNjA2MjQyMjQ1MTNaFw0zMTA2MjQyMjU1MTNaMFMx
 # GjAYBgNVBAsMEUluY2lkZW50IFJlc3BvbnNlMRMwEQYDVQQKDApJUiBUb29sa2l0
 # MSAwHgYDVQQDDBdJUiBUb29sa2l0IENvZGUgU2lnbmluZzCCASIwDQYJKoZIhvcN
-# AQEBBQADggEPADCCAQoCggEBAM3b6zgkW9zzqQraVSnj+a4zp1l4KkWs2NKNqvPP
-# p9Pyjhif7sY2FZyXnXbkKElZkNveSR84IkSBjIBC/9Q2gum1eM9nDmbnj2v5L+Nu
-# llMOkOjUC913DYNHmHdk/8FDJwAjl6mtsAWZwTvc7FUpyqGiD09yILSywsivvkDV
-# nE/qWzKgMRGflBJreqDUR5o0l0hLhowxG58ywKqElIJpwV+N1ngcfYIpJPO4XEHB
-# 6sSe0fkZralmnZdZ+sw6LRUpE7nMxmy6ZktNz51jXnm/oR7N9VbHUBOMtBLAFmny
-# CFddkOEV4z4Pz3yC0SOcgJXvoJ3yfPLzug7t5W+kRcNGmrECAwEAAaNGMEQwDgYD
-# VR0PAQH/BAQDAgeAMBMGA1UdJQQMMAoGCCsGAQUFBwMDMB0GA1UdDgQWBBQQFW0G
-# zu1Gz5VThEyg9LLMhDsLlDANBgkqhkiG9w0BAQsFAAOCAQEAGVSgMDhKb7EDBXTH
-# 3pTUUxUoQNNByOzeSepp+Wq5HpPEO7lS204uZSljF1a6QNjya4SsVE3o4+TR9CJm
-# uXqRvesj578tf9DQSl0iflg2rz9UGCXRVTazH8xMWOpt8fMlXbUf3xfYS4Wqena2
-# dl5JhRwvaDUmO5EJixsQwTiYS+vS5sG0TzMIT2N0dyCrA4eRinORCiUzTn3zYZe4
-# osCBOkhKbaiX6YkjzWhFGEarCNYwAYhleymgIy88BowoBYgwn1vx9G14hS9cEcHp
-# d/oHA9RE3wgiiYW2VCYWv+8GWrBv+WCruhrzagOTl6RURC1ctkiRl6MbQ9XENvQF
-# HPfs5TCCBY0wggR1oAMCAQICEA6bGI750C3n79tQ4ghAGFowDQYJKoZIhvcNAQEM
+# AQEBBQADggEPADCCAQoCggEBAKCRMj2g7ekVueQgTeNVDV/Xz94PBbxt0/9qalo3
+# ZcDg3e8VTErd0f6b8Ya8ibhn3tZ9zWKMpP3nuub3mlgEiO3Md4JhBx6N3bKukDN+
+# Nb3uNGCoSbJTnI13pA1dkqtu41wagDdtnPDYSs5+cidAlPhZgBjxuXdoiWKzAUNw
+# +dxDgaMmLxM0Qvp4z2kuOBes6C9Xd7twXNwi0Ov4pC1F0HAcKm7WCMtlRlX9i01k
+# WmZkARKuPQ3eHWg0e08aC4CldRauFArRf2lO9MzquFinnD2s25q8F/PiEeyWALIe
+# e/hE6L/bl/Z+5MR84dPFTfMXub9dsDsr++APaaYkZO04fTUCAwEAAaNGMEQwDgYD
+# VR0PAQH/BAQDAgeAMBMGA1UdJQQMMAoGCCsGAQUFBwMDMB0GA1UdDgQWBBQU6OnI
+# wgtlYKR4+fSkiuhgK5MUVDANBgkqhkiG9w0BAQsFAAOCAQEAnw0GGGlgOpVP5ag3
+# BvgHh4QYHOFColAEKbKGKDHMnvxsrlapVXCX69hnFv4701iiDn/DQirr/EUy1QRs
+# v4BrQwh4EGvTU9AT8mOxRbi6svr1IKdab2iSkNqW8GTvSK6ZCyQkJn/+KAOY8u7E
+# 9lO2+LM8DG2/1mgw/Ptg4jbVba/rPnLXkHnsydr2yhBw7miBEOIS9DBSul/wrxCV
+# VTLcnbB1YRuJpV+dj6+YCnZT7pO6qOToHp++ueGyuw8ul/qCnhxiv89Hu/T++Pyh
+# Qow09e6wDMKrbmdJD89KLTV8Zalq1sLskE8B4Q1TiWPknAr4f1V6rcJTH6BcoRMU
+# 4eKB9TCCBY0wggR1oAMCAQICEA6bGI750C3n79tQ4ghAGFowDQYJKoZIhvcNAQEM
 # BQAwZTELMAkGA1UEBhMCVVMxFTATBgNVBAoTDERpZ2lDZXJ0IEluYzEZMBcGA1UE
 # CxMQd3d3LmRpZ2ljZXJ0LmNvbTEkMCIGA1UEAxMbRGlnaUNlcnQgQXNzdXJlZCBJ
 # RCBSb290IENBMB4XDTIyMDgwMTAwMDAwMFoXDTMxMTEwOTIzNTk1OVowYjELMAkG
@@ -328,31 +328,31 @@ try {
 # y2ueIu9THFVkT+um1vshETaWyQo8gmBto/m3acaP9QsuLj3FNwFlTxq25+T4QwX9
 # xa6ILs84ZPvmpovq90K8eWyG2N01c4IhSOxqt81nMYIFQzCCBT8CAQEwZzBTMRow
 # GAYDVQQLDBFJbmNpZGVudCBSZXNwb25zZTETMBEGA1UECgwKSVIgVG9vbGtpdDEg
-# MB4GA1UEAwwXSVIgVG9vbGtpdCBDb2RlIFNpZ25pbmcCEGPcix6C96eoSPbV2zkB
-# mJ4wDQYJYIZIAWUDBAIBBQCggYQwGAYKKwYBBAGCNwIBDDEKMAigAoAAoQKAADAZ
+# MB4GA1UEAwwXSVIgVG9vbGtpdCBDb2RlIFNpZ25pbmcCEBzF7sL9NkWtQojU5g5o
+# K+MwDQYJYIZIAWUDBAIBBQCggYQwGAYKKwYBBAGCNwIBDDEKMAigAoAAoQKAADAZ
 # BgkqhkiG9w0BCQMxDAYKKwYBBAGCNwIBBDAcBgorBgEEAYI3AgELMQ4wDAYKKwYB
 # BAGCNwIBFTAvBgkqhkiG9w0BCQQxIgQgudT8fvktAnPKJ5rAN8cA9Mi+EHOmkkZn
-# PHEN/2vHD7kwDQYJKoZIhvcNAQEBBQAEggEAylSBox3+FlECb1Zt4LcncwFv0+LQ
-# lE1dnFxvUlmujRvytltU/z70EUWNGgIoQFGs3s9+x0DwnWDm0es9fa8ehWYAc7OH
-# dDY01o6FxRiPMJPds4nTAV5D1cgs9fXh/YZa7c7ITgYfDfBnD6G4ae3XhgL5bFi6
-# /Lmf9xOdoTCBkrgoluFuMh8BrJtpvWZVU2ONl4mAVrot5gjX4ZeULK7K8fc/VY4E
-# 8QoDCo0tVUD5bcS80EVRtGmtFDLd/8zPsK/34Qd56opAFXzzLizJop7zNifo3TSp
-# zS2YXM4KXibGFrrRWgpxOKeTbO9jZ0xm6mVB8//Ob5ohRW1TKWstm2p7uaGCAyYw
+# PHEN/2vHD7kwDQYJKoZIhvcNAQEBBQAEggEAgtYYWZt85sqBdEiXpCsj1tkD+jjN
+# f9qnK9SpZgBbaKaJ5a3Pvq64tgT0genhWSrU2D4ZR3yYsQFoBGo6VX2TNyEQMOk1
+# ufsBnFbUPve6rU72JCQr6Kd7NO+BwhU1jkBQDakFgViX8X3BvehHM+OrE0qp4ZLQ
+# 4t6dRbbPI6dKyaBMQhVKZU5l7GUMCdUPmoaqfV/awPUopfBXkg9CmPSH0/2NwPZd
+# 4GeoVJr96YMxSacW5G4bavYCkz2tjhpYUQFY2yqcc3DQZoSgELAA8fiFBxk6tqif
+# i2cOnxuYE0JPu3u7WNVlgQlrkI+3PxjgguzfgBSHxtcI4HABd3YAIl1t+KGCAyYw
 # ggMiBgkqhkiG9w0BCQYxggMTMIIDDwIBATB9MGkxCzAJBgNVBAYTAlVTMRcwFQYD
 # VQQKEw5EaWdpQ2VydCwgSW5jLjFBMD8GA1UEAxM4RGlnaUNlcnQgVHJ1c3RlZCBH
 # NCBUaW1lU3RhbXBpbmcgUlNBNDA5NiBTSEEyNTYgMjAyNSBDQTECEAqA7xhLjfEF
 # gtHEdqeVdGgwDQYJYIZIAWUDBAIBBQCgaTAYBgkqhkiG9w0BCQMxCwYJKoZIhvcN
-# AQcBMBwGCSqGSIb3DQEJBTEPFw0yNjA2MjMxNDI3MDZaMC8GCSqGSIb3DQEJBDEi
-# BCDbafD+QeHAHBA+YwtHKdSv3hSvvXB3eshXhIgyPmTKXTANBgkqhkiG9w0BAQEF
-# AASCAgAOe24z8YY9fXGgeeDORb+8lgbGi6fZI1p/USZ6JlA8F6OfRnHMLi4yswtl
-# nIIGNOkUG8yN8TBXWsSbamJcdx53H56SS5JuGmRf5gnSjrXLL3TPS3yeYO80n4tY
-# E3h9rHzImxFMT4qfpkAKuBEjwP3Hw8WrENevwu35fmmslczaWwn674fXiprUrO+t
-# sBUfadAcnHJn/poybEJWdeCU09PUpDEmmzQ7KO7TI5qs1ovSroNrxoPIphx1JyoZ
-# 4KGAHkpnRv8XPxQ5SB06i21nwn35VD8+UbLT4r2tcsn1AcbwKHwEpS3VdLw1shcb
-# GRDmwk/jLoXsBn2DttfGCXtsbPBkKdTy6domA4KCRw0XEqYHxRgUZTus0+D+KWzS
-# plWFUCfR5AnIWYhPo4o9HkEsc99FXNgW+GoV3+FxP0rFVQmM+vKAE6ucexFyv/Np
-# tL2ykHSdEr9xrNGQtTpgZzQT+PbRHTwbGLED3670hJp7PoFtvge6pnInOEG8Mnz0
-# MjIupwciN6k5vZMq1ZjSNlDACUqR54odVGSbEkZf+gVAPO3v1rkQACD4ZFK8eLGf
-# FSHeAc4iWZqjjDFhoPe8R3RT/k7aPT++5LNlS52QJRyreRNgU6q5Dec7cAKf4sji
-# Y0SCa4Ft3rb9G8fRXcHtOedDrN5echL347sLKPVZTOfHf9O/yw==
+# AQcBMBwGCSqGSIb3DQEJBTEPFw0yNjA2MjQyMjU1MzFaMC8GCSqGSIb3DQEJBDEi
+# BCCgjl4BRqZMA5W5GH8sP+Zq6MfErlAeC+q67CawBxTbZTANBgkqhkiG9w0BAQEF
+# AASCAgCpRWdoM5gDynZT9+uispznNu4w6lKUGduXx2jKXMYqptw9YqxEYX7/JFv8
+# 0S7PEfyl6LdVt22fPFHaTllxCkDkornUMPI3NUAZ3LLGQc0qRvwebWI1LhESKa3V
+# zC0uQuT5eJ4TRye57KTSokYLD/qEd4Y1hePvJDTdlDwKq6DFYo9EOJBwbxfpDyLD
+# dvJZucJSstImDeivpMe66LSnBd8leuN3+tiZJAsK5IsGToKmqrHhJuhET5uTLZHg
+# pWuQiJiWFjJtCzSkkBSNs7y799vVVVHICjVa2ut5RwQFEArZ/UCCqPhxTkc7Fqrd
+# vqpHqX5TeHQgJjzb9lYIepXWC1hx/UUWbaTg3cCzw/j6Kv2VRiIgdzhXHHGFoMom
+# 1tHZPsjqYmGEa1zjwQs6w/UyaEc55PxJugwYja7MU2pU7FhL8V2orMQYkj2IdGmp
+# HkLThCa63emJfnfjtYQCop2LRJh/5nUrOIkQHTFfms39omhXLD26PoM0hm1sCLBz
+# N7IieoooIKYnL1+zXO+s3MnX10RQJT59xFQax/Le1/PopyoBIdz+yTs1mDJaU/jE
+# sWPwDG8pe4Z8xUeUHuOmYN440U4ww22/DHL1eEmmo/g/MkI0sQkj1rm/hfkNaQuI
+# w8cx+Z9mHUzsT1baOb+T1VSIP6ufPIVgldAc2xKfICxoCuW5ew==
 # SIG # End signature block

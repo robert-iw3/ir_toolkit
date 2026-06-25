@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# Analyze-Memory-Linux.sh — single-run Linux memory analysis.
+# Analyze-Memory-Linux.sh - single-run Linux memory analysis.
 #
 # Spins up an EPHEMERAL Python venv with Volatility 3, builds the kernel symbol
 # table (ISF), runs analyze_memory_linux.py against the image, writes
 # Memory_Findings_<stamp>.json (optionally merging into Combined_Findings and
-# re-adjudicating), then TEARS the whole analysis environment down — leaving only
+# re-adjudicating), then TEARS the whole analysis environment down - leaving only
 # the findings behind.
 #
 # Usage:
@@ -15,7 +15,7 @@
 #                           [--keep-env] [--dry-run] [--quiet]
 #
 #   --symbols DIR   use a prebuilt ISF dir (skip building)
-#   --kernel VER    target kernel for symbol build (default: uname -r — set this if the
+#   --kernel VER    target kernel for symbol build (default: uname -r - set this if the
 #                   image is from a different kernel than the analyst box)
 #   --fetch-symbols acquire kernel debug symbols cross-distro: debuginfod (any distro) then
 #                   the distro package manager (apt/dnf/zypper). Alias: --install-dbgsym.
@@ -91,7 +91,7 @@ trap cleanup EXIT INT TERM
 log "image=${IMAGE} -> ${HOST_FOLDER} | kernel=${KERNEL} | yara=${YARA}"
 
 if [[ $DRYRUN -eq 1 ]]; then
-    log "DRY RUN — plan:"
+    log "DRY RUN - plan:"
     log "  1. python -m venv <tmp>; pip install volatility3 yara-python"
     log "  2. ${SYM_BUILDER} --kernel ${KERNEL}  (unless --symbols given)"
     log "  3. ${ANALYZER} --image ${IMAGE} --output-dir ${HOST_FOLDER} --stamp ${STAMP}$([[ $YARA -eq 1 ]] && echo ' --yara')"
@@ -114,7 +114,7 @@ if compgen -G "${WHEELS}/*.whl" >/dev/null 2>&1; then
     pip install --quiet --no-index --find-links "$WHEELS" volatility3 yara-python >/dev/null 2>&1 \
         || pip install --quiet volatility3 yara-python >/dev/null 2>&1
 else
-    log "installing volatility3 (+ yara-python) from PyPI — this can take a minute…"
+    log "installing volatility3 (+ yara-python) from PyPI - this can take a minute…"
     pip install --quiet volatility3 yara-python >/dev/null 2>&1
 fi
 if ! python -c "import volatility3" 2>/dev/null; then
@@ -144,7 +144,7 @@ if [[ -z "$SYMBOLS" ]]; then
         SYMBOLS="$built"
         log "symbols -> ${SYMBOLS}"
     else
-        log "symbol build failed — continuing; Volatility will try its bundled ISF cache."
+        log "symbol build failed - continuing; Volatility will try its bundled ISF cache."
         log "If linux.pslist reports 'no suitable symbols', install linux-image-${KERNEL}-dbgsym and re-run."
         SYMBOLS=""
     fi
@@ -170,7 +170,7 @@ if [[ $ADJUDICATE -eq 1 && -f "$MEM_FINDINGS" ]]; then
     COMBINED="$(ls -1t "${HOST_FOLDER}"/Combined_Findings_*.json 2>/dev/null | head -1)"
     if [[ -n "$COMBINED" ]]; then
         log "merging memory findings into $(basename "$COMBINED") + re-adjudicating..."
-        # Idempotent, content-deduped merge — re-running analysis no longer bloats Combined.
+        # Idempotent, content-deduped merge - re-running analysis no longer bloats Combined.
         "$PY" "${SCRIPT_DIR}/../../reporting/merge_findings.py" "$COMBINED" "$MEM_FINDINGS" \
             | sed 's/^/  /' || log "merge failed."
         if [[ -f "$ADJUDICATOR" ]]; then
@@ -179,7 +179,7 @@ if [[ $ADJUDICATE -eq 1 && -f "$MEM_FINDINGS" ]]; then
                 && log "re-adjudicated -> Adjudication_${STAMP}.json" || log "adjudication failed."
         fi
         # Regenerate IOCs + reports so memory/YARA findings reach IOCs.json, Incident_Report.md,
-        # and Attack_Graph.md — not just the adjudication. (system python; no venv deps)
+        # and Attack_Graph.md - not just the adjudication. (system python; no venv deps)
         RID="$(basename "$HOST_FOLDER")_${STAMP}"
         REP="${SCRIPT_DIR}/../../reporting"
         [[ -f "${REP}/build_iocs.py" ]] && \

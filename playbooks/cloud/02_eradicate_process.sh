@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# IR Cloud Playbook 02 — Cloud Workload Eradication (Stop/Terminate Instance)
+# IR Cloud Playbook 02 - Cloud Workload Eradication (Stop/Terminate Instance)
 #
 # Stops (not terminates, for forensics) the compromised cloud workload.
 # Instance data is preserved for forensic imaging before termination decision.
@@ -25,7 +25,7 @@ emit() { local s="$1"; local d="${2:-}"; echo "{\"phase\":\"eradication\",\"stat
 # Run a state-changing CLI command, or just print it under dry-run.
 run_or_plan() { if [[ "${DRY_RUN}" == "1" ]]; then log "[DRY-RUN] would: $*"; else "$@"; fi; }
 
-[[ -z "${TARGET}" ]] && { log "WARN: IR_TARGET not set — skipping"; emit "skipped" "no_target"; exit 0; }
+[[ -z "${TARGET}" ]] && { log "WARN: IR_TARGET not set - skipping"; emit "skipped" "no_target"; exit 0; }
 
 eradicate_aws() {
     local region="${IR_AWS_REGION:-us-east-1}"

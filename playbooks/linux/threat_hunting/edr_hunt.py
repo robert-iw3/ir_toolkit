@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-edr_hunt.py — Linux fileless / evasion hunt engine.
+edr_hunt.py - Linux fileless / evasion hunt engine.
 
 Inspects /proc, the loaded-module list, persistence locations and writable paths
 and emits structured findings in the common schema:
@@ -29,7 +29,7 @@ from collections import Counter
 FINDINGS = []
 # Executable/volatile locations an implant typically drops into.
 WRITABLE_DIRS = ("/tmp", "/var/tmp", "/dev/shm", "/run", "/var/run")
-# SUID binaries shipped by the base OS — anything SUID outside this set is noteworthy.
+# SUID binaries shipped by the base OS - anything SUID outside this set is noteworthy.
 SUID_BASELINE = {
     "su", "sudo", "mount", "umount", "passwd", "chsh", "chfn", "newgrp", "gpasswd",
     "pkexec", "fusermount", "fusermount3", "ping", "ping6", "mount.nfs",
@@ -96,7 +96,7 @@ def comm(pid):
 # --- Check 1: hidden processes (rootkit getdents hooking) ---------------------
 def is_thread_group_leader(pid):
     """True only for a real process (Tgid == Pid). Individual threads share the
-    leader's Tgid but have their own /proc/<tid>, so this excludes them — without
+    leader's Tgid but have their own /proc/<tid>, so this excludes them - without
     it, every thread (gmain/gdbus/pool-spawner...) looks like a 'hidden process'."""
     status = read_file(f"/proc/{pid}/status")
     if not status:

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# IR Cloud Playbook 05 — Cloud Host Restoration (Release Quarantine)
+# IR Cloud Playbook 05 - Cloud Host Restoration (Release Quarantine)
 #
 # Reverses the isolation applied by 01_contain_host.sh:
 #   AWS:   Restores original Security Groups from saved tags; removes quarantine SG
@@ -24,7 +24,7 @@ emit() { local s="$1"; local d="${2:-}"; echo "{\"phase\":\"restore\",\"status\"
 
 # Reverse the REVERSIBLE IAM revocations 03 journaled, on a false-positive verdict.
 reverse_iam_revocations() {
-    [[ -f "${ROLLBACK_JOURNAL}" ]] || { log "no persistence rollback journal — no IAM revocations to reverse"; return 0; }
+    [[ -f "${ROLLBACK_JOURNAL}" ]] || { log "no persistence rollback journal - no IAM revocations to reverse"; return 0; }
     PY="$(command -v python3 || command -v python)"
     while IFS=$'\t' read -r action a b; do
         case "${action}" in
@@ -41,7 +41,7 @@ reverse_iam_revocations() {
                 else az ad sp update --id "${a}" --set "accountEnabled=true" --output none 2>/dev/null \
                         && log "re-enabled Azure SP ${a}" || log "WARN: could not re-enable SP ${a}"; fi ;;
             lambda_delete)        # a=function b=backup -> cannot auto-recreate; point at the backup
-                log "MANUAL: Lambda ${a} was deleted — recreate from backup ${b} (aws lambda create-function)" ;;
+                log "MANUAL: Lambda ${a} was deleted - recreate from backup ${b} (aws lambda create-function)" ;;
         esac
     done < <("${PY}" -c "
 import json,sys
@@ -88,7 +88,7 @@ restore_aws() {
     fi
 
     if [[ -z "${original_sgs}" || "${original_sgs}" == "None" ]]; then
-        log "WARN: No pre-isolation SG record for ${instance_id} — manual restore required"
+        log "WARN: No pre-isolation SG record for ${instance_id} - manual restore required"
         emit "partial" "no_pre_isolation_sgs_saved"
         return 0
     fi

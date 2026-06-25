@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# IR Playbook 02 — Linux Process Eradication
+# IR Playbook 02 - Linux Process Eradication
 # Terminates malicious processes identified by the swarm. Kills by PID first
 # (precise), then by name (broader sweep), then quarantines binaries by hash.
 # Never targets PID 1 or critical system processes.
@@ -33,7 +33,7 @@ killed_procs=()
 quarantined_files=()
 errors=()
 
-# Protected processes — never kill these regardless of input
+# Protected processes - never kill these regardless of input
 PROTECTED_PROCS=(init systemd sshd auditd rsyslogd udevd dbus-daemon networkd)
 
 is_protected() {
@@ -52,7 +52,7 @@ kill_tree() {
     [[ "${root_pid}" =~ ^[0-9]+$ ]] || return 1
     [[ "${root_pid}" -le 1       ]] && return 1
 
-    # Protected-process guard by PID (resolve comm) — applies to all callers, not just by-name.
+    # Protected-process guard by PID (resolve comm) - applies to all callers, not just by-name.
     local rcomm
     rcomm=$(cat "/proc/${root_pid}/comm" 2>/dev/null || true)
     if [[ -n "${rcomm}" ]] && is_protected "${rcomm}"; then
@@ -123,7 +123,7 @@ for proc_name in "${PROC_LIST[@]}"; do
 done
 
 # -- Quarantine binaries by SHA256 hash ----------------------------------------
-# Search common implant staging locations — avoid scanning entire filesystem
+# Search common implant staging locations - avoid scanning entire filesystem
 SEARCH_PATHS=(/tmp /var/tmp /dev/shm /home /root /opt /var/www /srv
               /usr/local/bin /usr/local/sbin /usr/bin /usr/sbin)
 
@@ -174,7 +174,7 @@ while IFS= read -r pid; do
         for proc_name in "${PROC_LIST[@]}"; do
             proc_name="${proc_name// /}"
             [[ "${comm}" == "${proc_name}" ]] || continue
-            logger -t ir-playbook "ERADICATE-PROC: Killing fileless process PID ${pid} (${comm}) — deleted-on-disk indicator"
+            logger -t ir-playbook "ERADICATE-PROC: Killing fileless process PID ${pid} (${comm}) - deleted-on-disk indicator"
             kill_tree "${pid}" || true
         done
     fi
@@ -188,7 +188,7 @@ for _pid_maps in /proc/[0-9]*/maps; do
     [[ "${_pid}" =~ ^[0-9]+$ ]] || continue
     [[ "${_pid}" -le 1 ]] && continue
     if ! ls "/proc/${_pid}" &>/dev/null 2>&1; then
-        # RACE GUARD: a process exiting mid-scan also looks "hidden". Re-verify after a beat —
+        # RACE GUARD: a process exiting mid-scan also looks "hidden". Re-verify after a beat -
         # if maps is gone it was merely exiting (not a rootkit), so skip.
         sleep 0.2
         [[ -e "/proc/${_pid}/maps" ]] || continue
@@ -204,17 +204,17 @@ for _pid_maps in /proc/[0-9]*/maps; do
             [[ -n "${_pn}" && "${_basecomm}" == "${_pn}" ]] && _hidden_bad=true && break
         done
         if ${_hidden_bad}; then
-            logger -t ir-playbook "ERADICATE-PROC: Rootkit-hidden PID ${_pid} matches known-bad '${_basecomm}' — killing"
+            logger -t ir-playbook "ERADICATE-PROC: Rootkit-hidden PID ${_pid} matches known-bad '${_basecomm}' - killing"
             kill_tree "${_pid}" || errors+=("hidden_pid_kill_failed:${_pid}")
         else
-            logger -t ir-playbook "ERADICATE-PROC: Rootkit-hidden PID ${_pid} (${_comm}) — FLAGGED for analyst (not auto-killed)"
+            logger -t ir-playbook "ERADICATE-PROC: Rootkit-hidden PID ${_pid} (${_comm}) - FLAGGED for analyst (not auto-killed)"
             errors+=("hidden_pid_flagged:${_pid}")
         fi
     fi
 done
 
 # -- Anonymous RWX memory mapping detection (shellcode / process injection) ----
-# r-xp pages with device 00:00 and inode 0 mean no backing file — injected shellcode or reflective DLL.
+# r-xp pages with device 00:00 and inode 0 mean no backing file - injected shellcode or reflective DLL.
 # Kill only if the process already matches a known-bad indicator; otherwise log for analyst.
 while IFS= read -r _pid; do
     _maps="/proc/${_pid}/maps"
@@ -234,10 +234,10 @@ while IFS= read -r _pid; do
     [[ "${_exe}" == *"(deleted)"* ]] && _is_suspect=true
 
     if ${_is_suspect}; then
-        logger -t ir-playbook "ERADICATE-PROC: Killing PID ${_pid} (${_comm}) — anonymous rwx map + known-bad indicator"
+        logger -t ir-playbook "ERADICATE-PROC: Killing PID ${_pid} (${_comm}) - anonymous rwx map + known-bad indicator"
         kill_tree "${_pid}" || true
     else
-        logger -t ir-playbook "ERADICATE-PROC: Anonymous rwx mapping in PID ${_pid} (${_comm} / ${_exe}) — flagged for analyst"
+        logger -t ir-playbook "ERADICATE-PROC: Anonymous rwx mapping in PID ${_pid} (${_comm} / ${_exe}) - flagged for analyst"
         errors+=("anon_rwx:${_pid}:${_comm}")
     fi
 done < <(find /proc -maxdepth 1 -name '[0-9]*' -printf '%f\n' 2>/dev/null)

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# IR Cloud Playbook 00 — Cloud Forensic Collection
+# IR Cloud Playbook 00 - Cloud Forensic Collection
 #
 # Runs inside the n8n container (not via SSH). Pulls telemetry from cloud
 # provider APIs for the incident window and writes artifacts to /tmp/ir/.
@@ -91,7 +91,7 @@ collect_aws() {
         log "EC2 instance details → ${ARTIFACT_DIR}/ec2_instance.json"
     fi
 
-    # Disk-snapshot acquisition — evidence preservation BEFORE any eradication.
+    # Disk-snapshot acquisition - evidence preservation BEFORE any eradication.
     # Opt-in (creates billable EBS snapshots): enabled by --snapshot-disks -> IR_SNAPSHOT_DISKS=1.
     if [[ "${IR_SNAPSHOT_DISKS:-0}" == "1" && -n "${TARGET}" ]]; then
         log "Acquiring EBS disk snapshots for ${TARGET}..."
@@ -129,7 +129,7 @@ collect_aws() {
         --output json \
         > "${ARTIFACT_DIR}/security_groups.json" 2>/dev/null || true
 
-    # VPC Flow Logs for the incident window — network egress evidence / C2 confirmation.
+    # VPC Flow Logs for the incident window - network egress evidence / C2 confirmation.
     log "Pulling VPC flow logs..."
     aws ec2 describe-flow-logs --region "${region}" --output json \
         > "${ARTIFACT_DIR}/aws_flow_log_config.json" 2>/dev/null || true
@@ -178,7 +178,7 @@ collect_azure() {
     fi
 
     # NSG flow-log configuration (the flow records themselves live in a storage account /
-    # Log Analytics — collecting the config points the analyst at where the egress data is).
+    # Log Analytics - collecting the config points the analyst at where the egress data is).
     log "Pulling NSG flow-log configuration..."
     az network watcher flow-log list --location "${IR_AZURE_LOCATION:-eastus}" --output json \
         > "${ARTIFACT_DIR}/azure_flow_logs.json" 2>/dev/null || true
@@ -191,21 +191,21 @@ collect_azure() {
         > "${ARTIFACT_DIR}/azure_risky_users.json" 2>/dev/null || true
 
     # SaaS / identity (Entra + M365): the high-value identity-attack artifacts.
-    # OAuth delegated grants — illicit consent grant attack (mailbox/file/tenant reach).
+    # OAuth delegated grants - illicit consent grant attack (mailbox/file/tenant reach).
     log "Pulling OAuth consent grants..."
     az rest --method get \
         --url "https://graph.microsoft.com/v1.0/oauth2PermissionGrants?\$top=100" \
         --output json \
         > "${ARTIFACT_DIR}/azure_oauth_grants.json" 2>/dev/null || true
 
-    # Entra directory audit — SP credential adds, app consents, role grants, MFA/CA changes.
+    # Entra directory audit - SP credential adds, app consents, role grants, MFA/CA changes.
     log "Pulling Entra directory audit log..."
     az rest --method get \
         --url "https://graph.microsoft.com/v1.0/auditLogs/directoryAudits?\$top=200" \
         --output json \
         > "${ARTIFACT_DIR}/azure_directory_audit.json" 2>/dev/null || true
 
-    # Mailbox inbox rules — BEC auto-forward/redirect. Per-user via Graph; best-effort
+    # Mailbox inbox rules - BEC auto-forward/redirect. Per-user via Graph; best-effort
     # across the first page of users (full-tenant sweep is an analyst follow-up).
     log "Pulling mailbox inbox forwarding rules (best-effort)..."
     : > "${ARTIFACT_DIR}/azure_inbox_rules.json"
@@ -229,7 +229,7 @@ collect_azure() {
         echo ']}'
     } > "${ARTIFACT_DIR}/azure_inbox_rules.json" 2>/dev/null || true
 
-    # Disk-snapshot acquisition — evidence preservation BEFORE eradication (opt-in).
+    # Disk-snapshot acquisition - evidence preservation BEFORE eradication (opt-in).
     if [[ "${IR_SNAPSHOT_DISKS:-0}" == "1" && -n "${TARGET}" ]]; then
         log "Acquiring Azure managed-disk snapshots for ${TARGET}..."
         local rg_arg=(); [[ -n "${rg}" ]] && rg_arg=(--resource-group "${rg}")
@@ -290,7 +290,7 @@ collect_gcp() {
         --format=json \
         > "${ARTIFACT_DIR}/gcp_firewall_rules.json" 2>/dev/null || true
 
-    # VPC Flow Logs (Cloud Logging) for the window — network egress evidence / C2 confirmation.
+    # VPC Flow Logs (Cloud Logging) for the window - network egress evidence / C2 confirmation.
     log "Pulling VPC flow logs..."
     gcloud logging read \
         "timestamp>=\"${WINDOW_START}\" AND timestamp<=\"${WINDOW_END}\" AND logName:\"vpc_flows\"" \
@@ -299,7 +299,7 @@ collect_gcp() {
         > "${ARTIFACT_DIR}/gcp_vpc_flow_logs.json" 2>/dev/null || true
     log "VPC flow logs → ${ARTIFACT_DIR}/gcp_vpc_flow_logs.json"
 
-    # Disk-snapshot acquisition — evidence preservation BEFORE eradication (opt-in).
+    # Disk-snapshot acquisition - evidence preservation BEFORE eradication (opt-in).
     if [[ "${IR_SNAPSHOT_DISKS:-0}" == "1" && -n "${TARGET}" ]]; then
         log "Acquiring GCP disk snapshots for ${TARGET}..."
         local zone_arg=(); [[ -n "${IR_GCP_ZONE:-}" ]] && zone_arg=(--zone "${IR_GCP_ZONE}")

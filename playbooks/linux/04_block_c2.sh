@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# IR Playbook 04 — Linux C2 Blocking
+# IR Playbook 04 - Linux C2 Blocking
 # Adds host-level blocks for all known C2 infrastructure:
 #   • iptables/nftables rules DROP outbound connections to C2 IPs
 #   • /etc/hosts entries redirect C2 domains to 0.0.0.0
@@ -120,7 +120,7 @@ for c2_domain in "${DOMAIN_LIST[@]}"; do
     # Sinkhole the domain and common subdomains to 0.0.0.0
     echo "0.0.0.0 ${c2_domain} ${IR_BLOCK_TAG}" >> "${HOSTS_FILE}"
     echo "0.0.0.0 www.${c2_domain} ${IR_BLOCK_TAG}" >> "${HOSTS_FILE}"
-    echo "# IR C2 block ${c2_domain} — incident: ${INCIDENT_ID} — $(date -u)" >> "${HOSTS_FILE}"
+    echo "# IR C2 block ${c2_domain} - incident: ${INCIDENT_ID} - $(date -u)" >> "${HOSTS_FILE}"
     blocked_domains+=("${c2_domain}")
     logger -t ir-playbook "C2-BLOCK: Sinkholes ${c2_domain} → 0.0.0.0 in /etc/hosts"
 done
@@ -143,7 +143,7 @@ fi
 if command -v dnsmasq &>/dev/null && systemctl is-active dnsmasq &>/dev/null; then
     DNSMASQ_CONF="/etc/dnsmasq.d/ir-c2-block-${INCIDENT_ID}.conf"
     {
-        echo "# IR C2 sinkhole — incident ${INCIDENT_ID} — $(date -u)"
+        echo "# IR C2 sinkhole - incident ${INCIDENT_ID} - $(date -u)"
         for c2_domain in "${DOMAIN_LIST[@]}"; do
             printf 'address=/%s/0.0.0.0\n' "${c2_domain}"
         done

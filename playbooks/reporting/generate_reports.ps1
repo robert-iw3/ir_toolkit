@@ -329,7 +329,7 @@ $md.Add(""); $md.Add("---"); $md.Add("")
 
 # -- Memory YARA matches, clustered per process (rule + VAD context per PID) ----
 # A process can match several rules; collapse to one row per PID. Each rule carries
-# the VAD context (anon-exec = injected/unbacked → real; file-backed → verify signature)
+# the VAD context (anon-exec = injected/unbacked -> real; file-backed -> verify signature)
 # so an injected-code hit is distinguishable from a rule grazing a loaded DLL.
 $yaraMem = @($findings | Where-Object { (Field $_ @('Type')) -in @('YARA Match (Memory)','Injected Code (memory YARA)') })
 if ($yaraMem.Count) {
@@ -387,6 +387,108 @@ if ($techniques.Count) { $md.Add("ATT&CK      : " + (($techniques.Keys) -join ',
 $md.Add("``````"); $md.Add("")
 $md.Add("*Machine-readable IOC bundle: ``IOCs.json``. Attack correlation: ``Attack_Graph.md``.*")
 $md -join "`n" | Out-File -FilePath (Join-Path $HostFolder 'Incident_Report.md') -Encoding UTF8
+
+# -- YARA_Pivot_Report.md (separate report) ------------------------------------
+# Pivot each memory YARA hit and rank by TRUE-POSITIVE confidence (parity with
+# generate_reports.py correlate_yara_pivots): a named malware/APT-family signature, multiple
+# distinct rules on one PID, or a hit in injected/unbacked memory each raise it; a lone generic
+# rule (even with a path-spoof, which is FP-prone) stays 'investigate'. Nothing is suppressed.
+$yaraTypes = @('YARA Match (Memory)','Injected Code (memory YARA)')
+$injClass  = @('Injected Memory Region','Shellcode Thread (Memory)','Known Offensive Tool (Memory)','Hidden Process (Memory)')
+$genericRuleRe = '(?i)^(LOLBin|Hunting|Suspicious|Generic|Anomaly|PUA|Indicator|Heuristic|Heur|Method|SUSP|Tool|Multi|Capability)[_.]'
+$sevRank = @{ 'Critical' = 0; 'High' = 1; 'Medium' = 2; 'Low' = 3 }
+$byPid = [ordered]@{}
+foreach ($f in $findings) {
+    $blob = "$(Field $f @('Target')) $(Field $f @('Details'))"
+    $pm = [regex]::Match($blob, '\bPID (\d+)')
+    if ($pm.Success) {
+        $pid_ = $pm.Groups[1].Value
+        if (-not $byPid.Contains($pid_)) { $byPid[$pid_] = [System.Collections.Generic.List[object]]::new() }
+        [void]$byPid[$pid_].Add($f)
+    }
+}
+$pivots = [System.Collections.Generic.List[object]]::new()
+foreach ($pid_ in $byPid.Keys) {
+    $group = $byPid[$pid_]
+    $yara = @($group | Where-Object { (Field $_ @('Type')) -in $yaraTypes })
+    if (-not $yara.Count) { continue }                     # only pivot on PIDs with a YARA hit
+    $types = @($group | ForEach-Object { Field $_ @('Type') } | Sort-Object -Unique)
+    $procM = [regex]::Match("$(Field $group[0] @('Target'))", '\bPID \d+ \(([^)]+)\)')
+    $proc = if ($procM.Success) { $procM.Groups[1].Value } else { '' }
+    $rules = [System.Collections.Generic.List[string]]::new()
+    foreach ($f in $yara) {
+        $d = Field $f @('Details')
+        $r = ([regex]::Match($d, 'Rule:\s*([^|]+?)\s*\|')).Groups[1].Value.Trim()
+        if (-not $r) { $r = ([regex]::Match($d, 'Rule:\s*(.+)$')).Groups[1].Value.Trim() }
+        if ($r -and -not $rules.Contains($r)) { [void]$rules.Add($r) }
+    }
+    $named = @($rules | Where-Object { $_ -notmatch $genericRuleRe })
+    $injected = [bool](@($yara | Where-Object { (Field $_ @('Type')) -eq 'Injected Code (memory YARA)' -or (Field $_ @('Details')) -match 'anon-exec' }).Count)
+    $injSig = @($types | Where-Object { $injClass -contains $_ })
+    $otherStrong = @($types | Where-Object { $_ -notin $yaraTypes -and $injClass -notcontains $_ -and $_ -eq 'Process Path Spoofing (Memory)' })
+    $signals = @($group | Where-Object { (Field $_ @('Type')) -notin $yaraTypes })
+    # confidence score - what makes this a likely TRUE positive
+    $score = 0; $reasons = [System.Collections.Generic.List[string]]::new()
+    if ($named.Count)   { $score += 3; [void]$reasons.Add("named malware/APT signature ($($named -join ', '))") }
+    if ($rules.Count -ge 2) { $score += 2; [void]$reasons.Add("$($rules.Count) distinct rules corroborate on one PID") }
+    if ($injected)      { $score += 3; [void]$reasons.Add("hit lands in injected/unbacked executable memory") }
+    if ($injSig.Count)  { $score += 3; [void]$reasons.Add("co-occurs with injection evidence ($($injSig -join ', '))") }
+    if ($otherStrong.Count) { $score += 1; [void]$reasons.Add("co-occurs with $($otherStrong -join ', ')") }
+    $isTp = ($score -ge 3)
+    $pvSev = ($group | ForEach-Object { Field $_ @('Severity') } | Where-Object { $_ } |
+            Sort-Object { $sevRank[$_] } | Select-Object -First 1)
+    if (-not $pvSev) { $pvSev = 'High' }
+    [void]$pivots.Add([pscustomobject]@{
+        Pid = $pid_; Proc = $proc; Rules = $rules; Named = $named; Signals = $signals;
+        Severity = $pvSev; Score = $score; Reasons = $reasons; TruePositive = $isTp
+    })
+}
+if ($pivots.Count) {
+    $pivots = @($pivots | Sort-Object @{E={if($_.TruePositive){0}else{1}}}, @{E={-$_.Score}}, @{E={$sevRank[$_.Severity]}})
+    $tps = @($pivots | Where-Object { $_.TruePositive })
+    $yp = [System.Collections.Generic.List[string]]::new()
+    $yp.Add("# Memory YARA - Hit Pivot & Eradication Scope - $HostName"); $yp.Add("")
+    $yp.Add("**Incident:** $IncidentId * **Host:** $HostName * **Generated:** $(Get-Date -Format 'yyyy-MM-dd')"); $yp.Add("")
+    $yp.Add("$($pivots.Count) process(es) with a memory YARA hit * **$($tps.Count) true-positive-class** (review/eradicate first)."); $yp.Add("")
+    $yp.Add("> Ranked by **true-positive confidence** from hit quality - a named malware/APT-family signature, multiple distinct rules on one PID, or a hit in injected/unbacked memory each raise it; a lone generic/LOLBin rule (even alongside a path-spoof, which is FP-prone) stays *investigate*. **Nothing is suppressed** - lower-confidence hits are ranked below, not hidden."); $yp.Add("")
+    $yp.Add("---"); $yp.Add("")
+    foreach ($p in $pivots) {
+        $tag = if ($p.TruePositive) { " - **Likely True Positive**" } else { " - _investigate_" }
+        $title = "PID $($p.Pid)" + $(if ($p.Proc) { " ($($p.Proc))" } else { "" })
+        $yp.Add("## $title$tag"); $yp.Add("")
+        $tier = if ($p.TruePositive) { 'true-positive-class' } else { 'investigate' }
+        $yp.Add("- **Confidence:** $($p.Score) ($tier)  *  **Severity:** $($p.Severity)  *  **YARA rules:** $($p.Rules.Count)")
+        $ruleList = if ($p.Rules.Count) { ($p.Rules | ForEach-Object { "``$_``" }) -join ', ' } else { '(unparsed)' }
+        $namedTxt = if ($p.Named.Count) { "  *  **named:** " + (($p.Named | ForEach-Object { "``$_``" }) -join ', ') } else { '' }
+        $yp.Add("- **Rules matched:** $ruleList$namedTxt"); $yp.Add("")
+        if ($p.Reasons.Count) {
+            if ($p.TruePositive) { $yp.Add("**Why true-positive-class:** $(($p.Reasons) -join '; ').") }
+            else { $yp.Add("**Signal:** $(($p.Reasons) -join '; ') - not yet confirmed.") }
+            $yp.Add("")
+        }
+        if ($p.Signals.Count) {
+            $yp.Add("**Other memory signals on this PID:**"); $yp.Add("")
+            $yp.Add("| Signal | Detail |"); $yp.Add("|---|---|")
+            foreach ($s in $p.Signals) {
+                $det = (Field $s @('Details')) -replace '\|','/'
+                $yp.Add("| $(Field $s @('Type')) | $det |")
+            }
+            $yp.Add("")
+        }
+        if ($p.TruePositive) {
+            $yp.Add("**Eradication scope - enrich this PID:** pull handles (dropped files, registry persistence, mutexes, named pipes), loaded/injected modules, network endpoints (C2 to block), process lineage, and carve the matched region for offline C2-config extraction. See ``Memory_Enrichment_*.json`` for this PID's full footprint."); $yp.Add("")
+        }
+        $yp.Add("---"); $yp.Add("")
+    }
+    $yp.Add("_Hit-context detail (region / perms / backing path / matched strings) is in ``Memory_Findings_*.json``; per-PID clustering is also summarized in ``Incident_Report.md`` section 5._"); $yp.Add("")
+    $yp -join "`n" | Out-File -FilePath (Join-Path $HostFolder 'YARA_Pivot_Report.md') -Encoding UTF8
+    Write-Host "[+] YARA_Pivot_Report.md  ($($pivots.Count) hit PID(s), $($tps.Count) true-positive-class)" -ForegroundColor Green
+    # Machine-readable TP PID list so the workflow can auto-run per-PID memory enrichment.
+    if ($tps.Count) {
+        $tpOut = @($tps | ForEach-Object { [ordered]@{ pid = [int]$_.Pid; proc = $_.Proc; score = $_.Score; rules = @($_.Rules) } })
+        ConvertTo-Json @($tpOut) -Depth 5 | Out-File -FilePath (Join-Path $HostFolder 'YARA_Pivot_TP.json') -Encoding UTF8
+    }
+}
 
 # -- Attack_Graph.md -----------------------------------------------------------
 # Design: cluster findings by LOCATION (parent directory or process family) so
@@ -724,27 +826,27 @@ Write-Host "[+] IOCs.json  ($($relays.Count) C2 relay(s))" -ForegroundColor Gree
 # SIG # Begin signature block
 # MIIcoQYJKoZIhvcNAQcCoIIckjCCHI4CAQExDzANBglghkgBZQMEAgEFADB5Bgor
 # BgEEAYI3AgEEoGswaTA0BgorBgEEAYI3AgEeMCYCAwEAAAQQH8w7YFlLCE63JNLG
-# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCAPddNViGXfT5oq
-# nU3TZN9JAOYcE9BrPTb5gpoFa5hxdKCCFrQwggN2MIICXqADAgECAhBj3Isegven
-# qEj21ds5AZieMA0GCSqGSIb3DQEBCwUAMFMxGjAYBgNVBAsMEUluY2lkZW50IFJl
+# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCDveRfD9POeniob
+# N5zQzgG34akFkdNN+tx3ouF8n0ixwKCCFrQwggN2MIICXqADAgECAhAcxe7C/TZF
+# rUKI1OYOaCvjMA0GCSqGSIb3DQEBCwUAMFMxGjAYBgNVBAsMEUluY2lkZW50IFJl
 # c3BvbnNlMRMwEQYDVQQKDApJUiBUb29sa2l0MSAwHgYDVQQDDBdJUiBUb29sa2l0
-# IENvZGUgU2lnbmluZzAeFw0yNjA2MjMxNDE2NTlaFw0zMTA2MjMxNDI2NTlaMFMx
+# IENvZGUgU2lnbmluZzAeFw0yNjA2MjQyMjQ1MTNaFw0zMTA2MjQyMjU1MTNaMFMx
 # GjAYBgNVBAsMEUluY2lkZW50IFJlc3BvbnNlMRMwEQYDVQQKDApJUiBUb29sa2l0
 # MSAwHgYDVQQDDBdJUiBUb29sa2l0IENvZGUgU2lnbmluZzCCASIwDQYJKoZIhvcN
-# AQEBBQADggEPADCCAQoCggEBAM3b6zgkW9zzqQraVSnj+a4zp1l4KkWs2NKNqvPP
-# p9Pyjhif7sY2FZyXnXbkKElZkNveSR84IkSBjIBC/9Q2gum1eM9nDmbnj2v5L+Nu
-# llMOkOjUC913DYNHmHdk/8FDJwAjl6mtsAWZwTvc7FUpyqGiD09yILSywsivvkDV
-# nE/qWzKgMRGflBJreqDUR5o0l0hLhowxG58ywKqElIJpwV+N1ngcfYIpJPO4XEHB
-# 6sSe0fkZralmnZdZ+sw6LRUpE7nMxmy6ZktNz51jXnm/oR7N9VbHUBOMtBLAFmny
-# CFddkOEV4z4Pz3yC0SOcgJXvoJ3yfPLzug7t5W+kRcNGmrECAwEAAaNGMEQwDgYD
-# VR0PAQH/BAQDAgeAMBMGA1UdJQQMMAoGCCsGAQUFBwMDMB0GA1UdDgQWBBQQFW0G
-# zu1Gz5VThEyg9LLMhDsLlDANBgkqhkiG9w0BAQsFAAOCAQEAGVSgMDhKb7EDBXTH
-# 3pTUUxUoQNNByOzeSepp+Wq5HpPEO7lS204uZSljF1a6QNjya4SsVE3o4+TR9CJm
-# uXqRvesj578tf9DQSl0iflg2rz9UGCXRVTazH8xMWOpt8fMlXbUf3xfYS4Wqena2
-# dl5JhRwvaDUmO5EJixsQwTiYS+vS5sG0TzMIT2N0dyCrA4eRinORCiUzTn3zYZe4
-# osCBOkhKbaiX6YkjzWhFGEarCNYwAYhleymgIy88BowoBYgwn1vx9G14hS9cEcHp
-# d/oHA9RE3wgiiYW2VCYWv+8GWrBv+WCruhrzagOTl6RURC1ctkiRl6MbQ9XENvQF
-# HPfs5TCCBY0wggR1oAMCAQICEA6bGI750C3n79tQ4ghAGFowDQYJKoZIhvcNAQEM
+# AQEBBQADggEPADCCAQoCggEBAKCRMj2g7ekVueQgTeNVDV/Xz94PBbxt0/9qalo3
+# ZcDg3e8VTErd0f6b8Ya8ibhn3tZ9zWKMpP3nuub3mlgEiO3Md4JhBx6N3bKukDN+
+# Nb3uNGCoSbJTnI13pA1dkqtu41wagDdtnPDYSs5+cidAlPhZgBjxuXdoiWKzAUNw
+# +dxDgaMmLxM0Qvp4z2kuOBes6C9Xd7twXNwi0Ov4pC1F0HAcKm7WCMtlRlX9i01k
+# WmZkARKuPQ3eHWg0e08aC4CldRauFArRf2lO9MzquFinnD2s25q8F/PiEeyWALIe
+# e/hE6L/bl/Z+5MR84dPFTfMXub9dsDsr++APaaYkZO04fTUCAwEAAaNGMEQwDgYD
+# VR0PAQH/BAQDAgeAMBMGA1UdJQQMMAoGCCsGAQUFBwMDMB0GA1UdDgQWBBQU6OnI
+# wgtlYKR4+fSkiuhgK5MUVDANBgkqhkiG9w0BAQsFAAOCAQEAnw0GGGlgOpVP5ag3
+# BvgHh4QYHOFColAEKbKGKDHMnvxsrlapVXCX69hnFv4701iiDn/DQirr/EUy1QRs
+# v4BrQwh4EGvTU9AT8mOxRbi6svr1IKdab2iSkNqW8GTvSK6ZCyQkJn/+KAOY8u7E
+# 9lO2+LM8DG2/1mgw/Ptg4jbVba/rPnLXkHnsydr2yhBw7miBEOIS9DBSul/wrxCV
+# VTLcnbB1YRuJpV+dj6+YCnZT7pO6qOToHp++ueGyuw8ul/qCnhxiv89Hu/T++Pyh
+# Qow09e6wDMKrbmdJD89KLTV8Zalq1sLskE8B4Q1TiWPknAr4f1V6rcJTH6BcoRMU
+# 4eKB9TCCBY0wggR1oAMCAQICEA6bGI750C3n79tQ4ghAGFowDQYJKoZIhvcNAQEM
 # BQAwZTELMAkGA1UEBhMCVVMxFTATBgNVBAoTDERpZ2lDZXJ0IEluYzEZMBcGA1UE
 # CxMQd3d3LmRpZ2ljZXJ0LmNvbTEkMCIGA1UEAxMbRGlnaUNlcnQgQXNzdXJlZCBJ
 # RCBSb290IENBMB4XDTIyMDgwMTAwMDAwMFoXDTMxMTEwOTIzNTk1OVowYjELMAkG
@@ -848,31 +950,31 @@ Write-Host "[+] IOCs.json  ($($relays.Count) C2 relay(s))" -ForegroundColor Gree
 # y2ueIu9THFVkT+um1vshETaWyQo8gmBto/m3acaP9QsuLj3FNwFlTxq25+T4QwX9
 # xa6ILs84ZPvmpovq90K8eWyG2N01c4IhSOxqt81nMYIFQzCCBT8CAQEwZzBTMRow
 # GAYDVQQLDBFJbmNpZGVudCBSZXNwb25zZTETMBEGA1UECgwKSVIgVG9vbGtpdDEg
-# MB4GA1UEAwwXSVIgVG9vbGtpdCBDb2RlIFNpZ25pbmcCEGPcix6C96eoSPbV2zkB
-# mJ4wDQYJYIZIAWUDBAIBBQCggYQwGAYKKwYBBAGCNwIBDDEKMAigAoAAoQKAADAZ
+# MB4GA1UEAwwXSVIgVG9vbGtpdCBDb2RlIFNpZ25pbmcCEBzF7sL9NkWtQojU5g5o
+# K+MwDQYJYIZIAWUDBAIBBQCggYQwGAYKKwYBBAGCNwIBDDEKMAigAoAAoQKAADAZ
 # BgkqhkiG9w0BCQMxDAYKKwYBBAGCNwIBBDAcBgorBgEEAYI3AgELMQ4wDAYKKwYB
-# BAGCNwIBFTAvBgkqhkiG9w0BCQQxIgQgceJeiiIi5ERNCHt+rCTC/z5C4zKJEwnX
-# 2Icmsj3+I0IwDQYJKoZIhvcNAQEBBQAEggEAvAfuVhGNJX8XOZYpeNLTbnmD+jj9
-# fg8xZkdighayIGCMmTAUgcQvxph1L0muxg6AEj5wzELFAA7YKjYiH0udMLPL36vm
-# 0ffSNvTRxgdaUfb0qGFKdHmua9rZXudOp9ZVa/TDyJ2eutSRYrkMpGHHGL/PBpNt
-# k1tswXbGTIrawBi/b1dKNYXfyYvT5Frmh4P4J5CngCpBtqGf4H4Fhpwxqy9uK2TR
-# 63eEly4kk5eoA1deu3vIeCFYcSAouHK1kL5SLOa+eqDaexMAMdF12uwyfnpb656T
-# kiuE5SNaZGKN6LeQ1086BkWA6/VQulcQ6iCosuETYkW7P4NC+APJRasuDqGCAyYw
+# BAGCNwIBFTAvBgkqhkiG9w0BCQQxIgQg5seL9IPD2ed1y2KmkMy7OhVD8HF1Bsb5
+# oU1bhYi4iXIwDQYJKoZIhvcNAQEBBQAEggEAi6BGTF4Ij23Hoh3gjpw9gLE0a5ZJ
+# +hCnn3yRx5fwvgnm+qF0w2bQPQBf+9SuCbyjzOBLvIT3mEqfmG3mQO56VYD072pQ
+# 8HjPZa1h/5Fav+2ipZ4CJnpAymfj6AmwKLD9KdmKjRZEBRCu1d72wj+xuknjAEZi
+# Mi/22VxkOJNrA3ycPhOotKkKQYOILdfM4G/oOgiHduuCwnrD4I1w6xUkXL3vxG+q
+# ILYwIsTYgoirqFPoljFrkphIiHaEA4qfRjYKPZmSZDhAPq82HCxpNJKv85fTOWLa
+# EXkpR97F+ySZJaszSw+Cd1fMyTwdDuDRH/Cn7oub/W0QvZ7Bu+icA525u6GCAyYw
 # ggMiBgkqhkiG9w0BCQYxggMTMIIDDwIBATB9MGkxCzAJBgNVBAYTAlVTMRcwFQYD
 # VQQKEw5EaWdpQ2VydCwgSW5jLjFBMD8GA1UEAxM4RGlnaUNlcnQgVHJ1c3RlZCBH
 # NCBUaW1lU3RhbXBpbmcgUlNBNDA5NiBTSEEyNTYgMjAyNSBDQTECEAqA7xhLjfEF
 # gtHEdqeVdGgwDQYJYIZIAWUDBAIBBQCgaTAYBgkqhkiG9w0BCQMxCwYJKoZIhvcN
-# AQcBMBwGCSqGSIb3DQEJBTEPFw0yNjA2MjMxNDI3MDNaMC8GCSqGSIb3DQEJBDEi
-# BCA+VxZ5ARvGPbVwGdEPpy+SE0bvnXYLKP/N2IIP4wiIaTANBgkqhkiG9w0BAQEF
-# AASCAgABHHc7JrJxYJKGgu5CyLlrRv6O4nke2fbfmSpQEjfG+7LoSCYNwNCLMI5O
-# Vrfo6J8bCQgt7BXzROZyS4Kq5o9PVv4G3xV0COwyxcXrkuA1jRRD6+xPzyzCoFy+
-# JzYrU9Rx0wKKbXn7KQBdtF6XNNhRE2+Wdlr+AFAP6Ny/thYouMIlpp3QjimkZWpw
-# 2FZwYI+r5U0o3i1st9nVnuoJbVDhEM972Vx/LQxzX9IhB1AGTOXb7nsxfKhASua2
-# 0Ek0o8ixaDMTNZdS9UmwZSLMfpTJq6J84PHkebZDNJR8t9GjM3jKReTDIebsFlYS
-# 54PDNqYQ0Zcho9KgJ3JQ9QkfV2C0208MxYn9zxC1b7ttzRywwW6GujCOLJqzgEpo
-# 121P6Z/6QcFvsln8+Of2vwFJ/ki7J2hfCQDr92FZY1tps8Hvu1W4lqSFpWj58Ypa
-# uSD9Zu0Slka9M1LuCj/xjO+VQcQGrCmVkOlraw1fWoDdEJMVZwhB6H1cwMlFabpB
-# BPTDLFgmIUatYqpx2UOtlVobCK/4mWFfbKCkOGahh68hAi0pccB5R9x90iYWY0f5
-# 9F8G2T4YLWhrb2tiR1oPRwjaAsdobvQCkR7fUqNctvJMKGm72XbKOtiW1SGQ1Gly
-# MxmsG7lgqRNtR+5naPSB3lsXSdj5c764m+fOfujrc/kU55Sb+A==
+# AQcBMBwGCSqGSIb3DQEJBTEPFw0yNjA2MjQyMjU1MjFaMC8GCSqGSIb3DQEJBDEi
+# BCAYw11zOCOsn2//J/FwTMgLZUmeR4JgYgw+7x6aZXUV8DANBgkqhkiG9w0BAQEF
+# AASCAgCkQyOOuURuuzVp0QhLAminz3XmFtL3x5iQq71Qc5qf75NWTo2Ptgn2PV4W
+# +uBZWDHQ0szVe7Vu0/+KD0JdmvbaOwgDPS8M3gvvYu3Jp2STy2saE43uGx1r9zZw
+# h++2CfDH4KJFnHiYy10Vpoie5sjLiYCYr7e5Ewwl5LUdU30v/5s0CyteDS1tPez+
+# tElH6pkV9ohuc4Idzh8HptVRNP0sidBFZmrnV6cogi/tb4CyU9XDNCuqK9SB8cZ2
+# AnNzQ/J2ZQ1SKVeExOMHBSiUAX2yPZw684s6mTONmjf6aYtcP+YgX7oMgaC5kj96
+# J9ii+WiMi6iPWwngzXG442sx6+VNwZQZ3us+TRj3lv2Izxe9rFRaJQFxkjO8x35d
+# Bv/Kn13tigvSkng/wSyOZVNG4/IVFbUa5dBZ0ocAPgTuaZBIvLdUy1OpRE21uvt7
+# xsRVN/7sbETWftDmqR+taqEUXQCeDNvOTzck7MC3Q5nCxBWTYRW1YcZlM1HGep0Z
+# MKnWoUxCGZhqYxh5W8cvUIfFnbuFhTRxA6VF3JUYxzbekrV+XUuL60IpH0COXcpw
+# chxeVmWcP5BOC0NA/6cNa7glW516vQQKk+HwbdVcSeVNkRgdDQRTDltqXcfjxww7
+# oKj8KOKx7qyqG8br6bscD9ZyzG04HxKbOz93rNRz6czhyqr9Pg==
 # SIG # End signature block

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-remote_access_triage.py — Linux remote-access / RMM / reverse-shell triage.
+remote_access_triage.py - Linux remote-access / RMM / reverse-shell triage.
 
 Read-only. Emits findings in the common schema
 {Timestamp, Severity, Type, Target, Details, MITRE}.
@@ -108,7 +108,7 @@ def check_rmm():
             continue
         for tool, (rx, port) in RMM_CATALOG.items():
             if rx.search(hay):
-                # Custom relay (non-vendor host) is the high-signal tell — generalize the
+                # Custom relay (non-vendor host) is the high-signal tell - generalize the
                 # ScreenConnect h=<relay> trick: surface any host=/server=/--relay token.
                 relay = ""
                 m = re.search(r"(?:h=|host=|--server[= ]|server=|relay[= ])([\w.\-]+)", cmd, re.I)

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-correlate_campaign.py — cross-host campaign correlation.
+correlate_campaign.py - cross-host campaign correlation.
 
 Each host folder's IOCs.json is an island. This scans a directory of host folders,
 finds indicators (C2 endpoints, file hashes, RAT tools) shared by more than one

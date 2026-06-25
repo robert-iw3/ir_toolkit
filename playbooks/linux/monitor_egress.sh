@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# IR Playbook — Linux Egress Observation Sensor + Deferred Outbound Blackhole
+# IR Playbook - Linux Egress Observation Sensor + Deferred Outbound Blackhole
 #
 # WHY THIS EXISTS
 #   Inbound is locked down during containment, but outbound is deliberately left
@@ -16,7 +16,7 @@
 #   confirm the blackhole fired. See WORKFLOW-LINUX.md "Egress observation".
 #
 #   OPTIONAL. Observation tolerates continued exfil during the window. For a
-#   DATA-SENSITIVE host, do NOT observe — fully isolate the network stack first
+#   DATA-SENSITIVE host, do NOT observe - fully isolate the network stack first
 #   (01_contain_host.sh = inbound+outbound) and skip this (--no-egress-monitor):
 #   eliminating further data loss outranks mapping the C2 when the data matters.
 #
@@ -88,7 +88,7 @@ snapshot() {
             _is_external "$dst" && printf '%s | tcp | -> %s:%s | conntrack\n' "$ts" "$dst" "$dport" >> "$LOG"
         done
     fi
-    # ss adds the owning PID/process — invaluable attribution for the beacon.
+    # ss adds the owning PID/process - invaluable attribution for the beacon.
     if command -v ss &>/dev/null; then
         ss -Htunp state established 2>/dev/null | while read -r proto _ _ _ local peer procinfo; do
             local dip="${peer%:*}" dport="${peer##*:}"
@@ -105,7 +105,7 @@ start)
     mkdir -p "$STATE_DIR"; chmod 700 "$STATE_DIR"
     { echo "START_EPOCH=$(date +%s)"; echo "WINDOW_HOURS=${WINDOW_HOURS}";
       echo "INTERVAL_MIN=${INTERVAL_MIN}"; echo "MGMT_IPS=${MGMT_IPS}"; } > "$META"
-    : > "$LOG"; echo "# IR egress observation — incident ${INCIDENT_ID} — started $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$LOG"
+    : > "$LOG"; echo "# IR egress observation - incident ${INCIDENT_ID} - started $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$LOG"
     # one cron entry every minute drives both polling and window-expiry/blackhole
     printf '* * * * * root %s --tick --incident %s >> %s/cron.err 2>&1\n' \
         "$SELF" "$INCIDENT_ID" "$STATE_DIR" > "$CRON_FILE"
@@ -141,7 +141,7 @@ blackhole)
     if command -v iptables &>/dev/null && iptables -L &>/dev/null 2>&1; then
         iptables-save > "${STATE_DIR}/iptables-pre-blackhole.rules" 2>/dev/null || true
         # Keep loopback + local DNS + management reachability; DROP all other egress
-        # (cuts the beacon's established C2 too — the point of the blackhole).
+        # (cuts the beacon's established C2 too - the point of the blackhole).
         iptables -C OUTPUT -o lo -j ACCEPT 2>/dev/null || iptables -I OUTPUT 1 -o lo -j ACCEPT
         iptables -A OUTPUT -d 127.0.0.0/8 -p udp --dport 53 -j ACCEPT
         IFS=',' read -ra _m <<< "${MGMT_IPS}"

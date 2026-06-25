@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-clock_context.py — capture host clock / timezone context and normalize timestamps to UTC.
+clock_context.py - capture host clock / timezone context and normalize timestamps to UTC.
 
 Closes the Collection gap: timelines mix local and UTC, and per-host clock skew is never
-captured — so cross-host correlation silently misaligns. This records, at collection time:
+captured - so cross-host correlation silently misaligns. This records, at collection time:
   - the host timezone + UTC offset,
   - whether the clock is NTP-synchronized,
   - the measured skew between the host clock and a trusted reference (the responder's
@@ -83,7 +83,7 @@ def capture(reference_epoch=None, host_epoch=None):
             host_epoch, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "ntp_synchronized": ntp_synchronized(),
         "skew_seconds": None,
-        "skew_note": "no trusted reference supplied — skew unmeasured",
+        "skew_note": "no trusted reference supplied - skew unmeasured",
     }
     if reference_epoch is not None:
         skew = round(host_epoch - float(reference_epoch), 3)
@@ -92,7 +92,7 @@ def capture(reference_epoch=None, host_epoch=None):
             rec["skew_note"] = "host clock within 2s of reference"
         else:
             rec["skew_note"] = (f"host clock is {abs(skew):.1f}s "
-                                f"{'ahead of' if skew > 0 else 'behind'} the reference — "
+                                f"{'ahead of' if skew > 0 else 'behind'} the reference - "
                                 f"adjust this host's timestamps before cross-host correlation")
     return rec
 

@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""merge_findings.py — idempotently merge one findings file into another (in place).
+"""merge_findings.py - idempotently merge one findings file into another (in place).
 
 Used by Analyze-Memory-Linux.sh to fold Memory_Findings_*.json into Combined_Findings_*.json
-before re-adjudication. De-duplicates by finding CONTENT — (Type, Target, Details, Severity,
-MITRE) — because the Timestamp is set at analysis time and so differs between runs. Without this,
+before re-adjudication. De-duplicates by finding CONTENT - (Type, Target, Details, Severity,
+MITRE) - because the Timestamp is set at analysis time and so differs between runs. Without this,
 re-running the analysis kept appending the same memory findings (the Combined file ballooned).
 
     merge_findings.py <combined.json> <new.json>   # writes deduped union back to <combined.json>

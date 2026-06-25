@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-adjudicate.py — Linux finding adjudication + evidence acquisition.
+adjudicate.py - Linux finding adjudication + evidence acquisition.
 
 Consumes Combined_Findings_<stamp>.json, enriches every finding with on-host
 context, assigns a Verdict + Confidence, and acquires Evidence/ bundles for

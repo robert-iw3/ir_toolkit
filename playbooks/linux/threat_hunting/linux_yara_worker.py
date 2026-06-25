@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Per-process Linux memory YARA scan — Volatility 3 driven IN-PROCESS (init once, loop tasks).
+"""Per-process Linux memory YARA scan - Volatility 3 driven IN-PROCESS (init once, loop tasks).
 
   • per-PID attribution            (each hit carries task.tgid + comm)
   • PER-PROCESS TIMEOUT            (a slow/huge process aborts between VMAs; the scan keeps going)
   • ROLLING, RESUMABLE JSONL       ({"t":"start","pid"} → {"t":"result",...}); a crash/stop leaves a
                                     record so a re-run skips finished + the in-flight (crasher) PID
   • per-process ELF canary         (the canary in the compiled ruleset must fire for a process that
-                                    has mapped memory — proves the engine actually read it)
+                                    has mapped memory - proves the engine actually read it)
 
 Usage:
   linux_yara_worker.py <image> <compiled.yarc> <results.jsonl> <symbols_dir|->
@@ -19,7 +19,7 @@ import sys
 import time
 
 CANARY_RULE_NAME = "IRToolkit_Canary_ELF"
-SANITY_VMA = 256 * 1024 * 1024           # skip individual VMAs > 256MB (giant file-backed mappings —
+SANITY_VMA = 256 * 1024 * 1024           # skip individual VMAs > 256MB (giant file-backed mappings -
                                          # libs/fonts/heap; malware lives in small anon RWX regions)
 PROC_BYTE_BUDGET = 768 * 1024 * 1024     # cap total bytes scanned per process so a multi-GB IDE/
                                          # browser process is bounded (the full-coverage path is the
@@ -39,7 +39,7 @@ def build_context(image, symbols):
     def _quiet_progress(_pct=None, _desc=None):       # avoid flooding the rolling log during init
         return None
 
-    # Minimal in-memory file handler — construct_plugin requires an open_method class, but pslist
+    # Minimal in-memory file handler - construct_plugin requires an open_method class, but pslist
     # never dumps a file so it is never actually instantiated.
     class _NullFileHandler(io.BytesIO, interfaces.plugins.FileHandlerInterface):
         def __init__(self, preferred_filename):
@@ -70,7 +70,7 @@ def _task_name(task):
 
 
 def _matched_string_ids(match):
-    """The yara STRING identifiers that actually fired (e.g. '$elf_magic' vs '$c2_url') — the single
+    """The yara STRING identifiers that actually fired (e.g. '$elf_magic' vs '$c2_url') - the single
     best FP/TP tell: a rule that only matched a generic anchor (ELF magic) is noise; one that matched
     a specific C2/behaviour string is real."""
     out = set()
@@ -87,7 +87,7 @@ def _matched_string_ids(match):
 
 
 def _vma_context(ctx, task, vma):
-    """(perms, region, path) for the VMA a match landed in — the disambiguator. region is 'anon'
+    """(perms, region, path) for the VMA a match landed in - the disambiguator. region is 'anon'
     (no backing file → injected/JIT/heap) or 'file' (mapped from disk → likely benign lib/binary)."""
     try:
         perms = vma.get_protection()

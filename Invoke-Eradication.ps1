@@ -415,6 +415,29 @@ if (-not $NoFirewallRestore) {
     Write-Host "`n[i] Firewall restore skipped (-NoFirewallRestore)." -ForegroundColor Yellow
 }
 
+# -- Memory-derived eradication scope (from per-TP enrichment, merged into IOCs.json) ----------
+# Surfaces the implant's full memory footprint so eradication is complete: dropped files, registry
+# persistence, implant mutexes, and the related PID chain. C2 from memory is already folded into
+# c2_endpoints above and re-blocked with the rest. Reported (not auto-deleted) so the analyst
+# confirms each artifact - these are recovered from a memory image and warrant a look before removal.
+if (-not $IocPath) { $IocPath = Join-Path $HostFolder 'IOCs.json' }
+if ($IocPath -and (Test-Path -LiteralPath $IocPath)) {
+    $me = $null
+    try { $me = (Get-Content -LiteralPath $IocPath -Raw | ConvertFrom-Json).memory_eradication } catch {}
+    if ($me) {
+        Write-Host "`n=== Memory-derived eradication scope (review before removal) ===" -ForegroundColor Cyan
+        $files = @($me.files_to_remove); $keys = @($me.registry_keys_to_remove)
+        $muts  = @($me.mutexes);         $pids = @($me.implicated_pids)
+        if ($files.Count) { Write-Host "  Dropped files to remove:" -ForegroundColor Yellow; $files | ForEach-Object { Write-Host "    $_" -ForegroundColor Gray } }
+        if ($keys.Count)  { Write-Host "  Registry persistence to remove:" -ForegroundColor Yellow; $keys | ForEach-Object { Write-Host "    $_" -ForegroundColor Gray } }
+        if ($muts.Count)  { Write-Host "  Implant mutexes (host-survey IOC):" -ForegroundColor Yellow; $muts | ForEach-Object { Write-Host "    $_" -ForegroundColor Gray } }
+        if ($pids.Count)  { Write-Host "  Implicated PIDs (terminate/forensic-preserve): $($pids -join ', ')" -ForegroundColor Yellow }
+        if (-not ($files.Count -or $keys.Count -or $muts.Count -or $pids.Count)) {
+            Write-Host "  (no memory-derived artifacts recorded)" -ForegroundColor Gray
+        }
+    }
+}
+
 Write-Host "`n=== Eradication summary ($mode) ===" -ForegroundColor Green
 $actions | Group-Object Status | Select-Object @{N='Status';E={$_.Name}}, Count | Format-Table -AutoSize
 Write-Host "[+] $jsonOut" -ForegroundColor Green
@@ -424,27 +447,27 @@ if (-not $Apply) { Write-Host "[i] DRY-RUN: nothing changed. Re-run with -Apply 
 # SIG # Begin signature block
 # MIIcoQYJKoZIhvcNAQcCoIIckjCCHI4CAQExDzANBglghkgBZQMEAgEFADB5Bgor
 # BgEEAYI3AgEEoGswaTA0BgorBgEEAYI3AgEeMCYCAwEAAAQQH8w7YFlLCE63JNLG
-# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCBYM53n/DrmE5ze
-# 8DVx93NdURGNXmTu3y/tZAji6xEq7qCCFrQwggN2MIICXqADAgECAhBj3Isegven
-# qEj21ds5AZieMA0GCSqGSIb3DQEBCwUAMFMxGjAYBgNVBAsMEUluY2lkZW50IFJl
+# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCDZQid8PoouyyGu
+# i3Y4rqKyY81MMlipZ6u9tFRHJLa9aKCCFrQwggN2MIICXqADAgECAhAcxe7C/TZF
+# rUKI1OYOaCvjMA0GCSqGSIb3DQEBCwUAMFMxGjAYBgNVBAsMEUluY2lkZW50IFJl
 # c3BvbnNlMRMwEQYDVQQKDApJUiBUb29sa2l0MSAwHgYDVQQDDBdJUiBUb29sa2l0
-# IENvZGUgU2lnbmluZzAeFw0yNjA2MjMxNDE2NTlaFw0zMTA2MjMxNDI2NTlaMFMx
+# IENvZGUgU2lnbmluZzAeFw0yNjA2MjQyMjQ1MTNaFw0zMTA2MjQyMjU1MTNaMFMx
 # GjAYBgNVBAsMEUluY2lkZW50IFJlc3BvbnNlMRMwEQYDVQQKDApJUiBUb29sa2l0
 # MSAwHgYDVQQDDBdJUiBUb29sa2l0IENvZGUgU2lnbmluZzCCASIwDQYJKoZIhvcN
-# AQEBBQADggEPADCCAQoCggEBAM3b6zgkW9zzqQraVSnj+a4zp1l4KkWs2NKNqvPP
-# p9Pyjhif7sY2FZyXnXbkKElZkNveSR84IkSBjIBC/9Q2gum1eM9nDmbnj2v5L+Nu
-# llMOkOjUC913DYNHmHdk/8FDJwAjl6mtsAWZwTvc7FUpyqGiD09yILSywsivvkDV
-# nE/qWzKgMRGflBJreqDUR5o0l0hLhowxG58ywKqElIJpwV+N1ngcfYIpJPO4XEHB
-# 6sSe0fkZralmnZdZ+sw6LRUpE7nMxmy6ZktNz51jXnm/oR7N9VbHUBOMtBLAFmny
-# CFddkOEV4z4Pz3yC0SOcgJXvoJ3yfPLzug7t5W+kRcNGmrECAwEAAaNGMEQwDgYD
-# VR0PAQH/BAQDAgeAMBMGA1UdJQQMMAoGCCsGAQUFBwMDMB0GA1UdDgQWBBQQFW0G
-# zu1Gz5VThEyg9LLMhDsLlDANBgkqhkiG9w0BAQsFAAOCAQEAGVSgMDhKb7EDBXTH
-# 3pTUUxUoQNNByOzeSepp+Wq5HpPEO7lS204uZSljF1a6QNjya4SsVE3o4+TR9CJm
-# uXqRvesj578tf9DQSl0iflg2rz9UGCXRVTazH8xMWOpt8fMlXbUf3xfYS4Wqena2
-# dl5JhRwvaDUmO5EJixsQwTiYS+vS5sG0TzMIT2N0dyCrA4eRinORCiUzTn3zYZe4
-# osCBOkhKbaiX6YkjzWhFGEarCNYwAYhleymgIy88BowoBYgwn1vx9G14hS9cEcHp
-# d/oHA9RE3wgiiYW2VCYWv+8GWrBv+WCruhrzagOTl6RURC1ctkiRl6MbQ9XENvQF
-# HPfs5TCCBY0wggR1oAMCAQICEA6bGI750C3n79tQ4ghAGFowDQYJKoZIhvcNAQEM
+# AQEBBQADggEPADCCAQoCggEBAKCRMj2g7ekVueQgTeNVDV/Xz94PBbxt0/9qalo3
+# ZcDg3e8VTErd0f6b8Ya8ibhn3tZ9zWKMpP3nuub3mlgEiO3Md4JhBx6N3bKukDN+
+# Nb3uNGCoSbJTnI13pA1dkqtu41wagDdtnPDYSs5+cidAlPhZgBjxuXdoiWKzAUNw
+# +dxDgaMmLxM0Qvp4z2kuOBes6C9Xd7twXNwi0Ov4pC1F0HAcKm7WCMtlRlX9i01k
+# WmZkARKuPQ3eHWg0e08aC4CldRauFArRf2lO9MzquFinnD2s25q8F/PiEeyWALIe
+# e/hE6L/bl/Z+5MR84dPFTfMXub9dsDsr++APaaYkZO04fTUCAwEAAaNGMEQwDgYD
+# VR0PAQH/BAQDAgeAMBMGA1UdJQQMMAoGCCsGAQUFBwMDMB0GA1UdDgQWBBQU6OnI
+# wgtlYKR4+fSkiuhgK5MUVDANBgkqhkiG9w0BAQsFAAOCAQEAnw0GGGlgOpVP5ag3
+# BvgHh4QYHOFColAEKbKGKDHMnvxsrlapVXCX69hnFv4701iiDn/DQirr/EUy1QRs
+# v4BrQwh4EGvTU9AT8mOxRbi6svr1IKdab2iSkNqW8GTvSK6ZCyQkJn/+KAOY8u7E
+# 9lO2+LM8DG2/1mgw/Ptg4jbVba/rPnLXkHnsydr2yhBw7miBEOIS9DBSul/wrxCV
+# VTLcnbB1YRuJpV+dj6+YCnZT7pO6qOToHp++ueGyuw8ul/qCnhxiv89Hu/T++Pyh
+# Qow09e6wDMKrbmdJD89KLTV8Zalq1sLskE8B4Q1TiWPknAr4f1V6rcJTH6BcoRMU
+# 4eKB9TCCBY0wggR1oAMCAQICEA6bGI750C3n79tQ4ghAGFowDQYJKoZIhvcNAQEM
 # BQAwZTELMAkGA1UEBhMCVVMxFTATBgNVBAoTDERpZ2lDZXJ0IEluYzEZMBcGA1UE
 # CxMQd3d3LmRpZ2ljZXJ0LmNvbTEkMCIGA1UEAxMbRGlnaUNlcnQgQXNzdXJlZCBJ
 # RCBSb290IENBMB4XDTIyMDgwMTAwMDAwMFoXDTMxMTEwOTIzNTk1OVowYjELMAkG
@@ -548,31 +571,31 @@ if (-not $Apply) { Write-Host "[i] DRY-RUN: nothing changed. Re-run with -Apply 
 # y2ueIu9THFVkT+um1vshETaWyQo8gmBto/m3acaP9QsuLj3FNwFlTxq25+T4QwX9
 # xa6ILs84ZPvmpovq90K8eWyG2N01c4IhSOxqt81nMYIFQzCCBT8CAQEwZzBTMRow
 # GAYDVQQLDBFJbmNpZGVudCBSZXNwb25zZTETMBEGA1UECgwKSVIgVG9vbGtpdDEg
-# MB4GA1UEAwwXSVIgVG9vbGtpdCBDb2RlIFNpZ25pbmcCEGPcix6C96eoSPbV2zkB
-# mJ4wDQYJYIZIAWUDBAIBBQCggYQwGAYKKwYBBAGCNwIBDDEKMAigAoAAoQKAADAZ
+# MB4GA1UEAwwXSVIgVG9vbGtpdCBDb2RlIFNpZ25pbmcCEBzF7sL9NkWtQojU5g5o
+# K+MwDQYJYIZIAWUDBAIBBQCggYQwGAYKKwYBBAGCNwIBDDEKMAigAoAAoQKAADAZ
 # BgkqhkiG9w0BCQMxDAYKKwYBBAGCNwIBBDAcBgorBgEEAYI3AgELMQ4wDAYKKwYB
-# BAGCNwIBFTAvBgkqhkiG9w0BCQQxIgQgTdGLpNI3/i1EvXuupfvsSRDKUQaSNzFw
-# CnSb46EqBbkwDQYJKoZIhvcNAQEBBQAEggEAf7NpP9ljvY981xPVvIYJt/Wldf/N
-# JHMoaJ8KodSu+JTlkxhXz5migVUHczMjz5IcaqMFu5N5a/rZszlD9J628YxUvuYE
-# VJoNQrxcHhn+QRsepaEaf4Fy9sZ6RCmpys2sN1JmmCGxD4Mqgd3qpa6m+b8J1FoX
-# wjp4Ax+WebL5ghGEKFiunX49xo/iBCEzYjeB12rGCvwYYQ6Zdlby/ITYInHdvatx
-# cwHc3t16iUHLQcVLBWA+iHXsiA9pp6/bmCe7EsBkjs+mgXjQSz3egzQ2Iv7/MKXz
-# jGc2xWJVU/CVm0oUgcDaXR3Xg1Kt4ffCa60IlnYF6auDn9fzNDvUluUyxqGCAyYw
+# BAGCNwIBFTAvBgkqhkiG9w0BCQQxIgQgNpsBNX+asJK0v30RAE3rpxR9DGqWanyt
+# 60ikuhpBMXMwDQYJKoZIhvcNAQEBBQAEggEAPPOPGTHjkDWBwRWaZXY4BpEBaILs
+# 3wQ/lKygBh5TQJMlPtcKlOC51jPjF8U31NykXj5eNh3k0c+SofUd7WDPkwcS/sx3
+# MVPlAKdgxgXwAxzDUBMZEVYW0Vixm6TxAxvJs0M4fqNceNgxSS4S2D6zWnVTzkka
+# FmMCzyXrPX3YIJvskNF6dnNDu8o/g+0hUm8l9FUML9LT3BuA9BfSW7f+39dr4Q1R
+# 5h2A8B3uTV5P8WdwKbx5JmEPoSNko8XsQDZzg3jkHC4XZC2iDA9sTbvlqUagO5M/
+# 2CAXRS9OYOOCsVmTnxvjFE82OrISFjp4J2rFV4SQALiF1O0F2C2f70LZeKGCAyYw
 # ggMiBgkqhkiG9w0BCQYxggMTMIIDDwIBATB9MGkxCzAJBgNVBAYTAlVTMRcwFQYD
 # VQQKEw5EaWdpQ2VydCwgSW5jLjFBMD8GA1UEAxM4RGlnaUNlcnQgVHJ1c3RlZCBH
 # NCBUaW1lU3RhbXBpbmcgUlNBNDA5NiBTSEEyNTYgMjAyNSBDQTECEAqA7xhLjfEF
 # gtHEdqeVdGgwDQYJYIZIAWUDBAIBBQCgaTAYBgkqhkiG9w0BCQMxCwYJKoZIhvcN
-# AQcBMBwGCSqGSIb3DQEJBTEPFw0yNjA2MjMxNDI3MDJaMC8GCSqGSIb3DQEJBDEi
-# BCBIzn9usL8+9J/noMGdGK/eDADNOTZjMo3kCF7ALrypQDANBgkqhkiG9w0BAQEF
-# AASCAgAfp+g9KEQ9TouqhYCKIJlfSLvWll0GZjmbYeTEY3CZJpgHbnPFVqdFZU8g
-# akX8BDfEisCYg4z09OGWzJ4hYpW9za0pkuX5T5u4d+O3cgKtxEbr0lfGfsWt69uE
-# L3C41XvQ2Ec5C2sR4bl65RB8Nc/PcwWBkAt/Ys5QvoWthgaXQYK81OsyXSHItgo+
-# c9Lf9IYUkWtB39xi7N/EdOBlPAuWZCl23JtRRpwAUItODN9N84WUPfh8ckH1SJ5d
-# kPJ3AMM9HcLjrfWqjS8oWXkHV+5fX7LdBhhDMQdmq1jfIVZlpXQlMjKxkRdL24Gl
-# 1tkihXOe5VI5UfcJoII9l5MydG3BafL7wGqfzSXsfVJQOMbSfFS+rEAcemFL4agT
-# JiLSGVEO5EVveGR4KAy5MWhbUv9AzVLKVt5vC23XG9/dz+2dTprv85W4IcEIFguC
-# zrpXEcwH68y70SvdzhDULjbUuUlHrBR8p3IKdNPMjdn+RPa1uMnJ0eQ91vLyh5A4
-# MHSpFf9D++zApqWhNAH+UIQj4xLt1yVKQGHL7/Af1Fgk+I3fpub/4lAZe0BJpi8Z
-# Cp8O6vJPbzR++o+W4UssNTqIYeuWm4ahAgjm7Cvu/ABz6qe6+twG/hguzMg93b2J
-# zgYwwIFLv7Dh0QZOz2fIuEPRApLnGa0vqV5hN+aK2AsGHQ5K4w==
+# AQcBMBwGCSqGSIb3DQEJBTEPFw0yNjA2MjQyMjU1MThaMC8GCSqGSIb3DQEJBDEi
+# BCCGG9qWQMiIh78J6xFCORYN9BmwSXxxalmk9UBSy9fgvjANBgkqhkiG9w0BAQEF
+# AASCAgBMi8fJyYKkRVZEzpvhySgR3zTPL0GTEkaUv5gVWX3VJDWlQbbbLvwodD/w
+# nrbjkPO4RfEROL69xJ11RzEFiTAmpi5by8YpBR6UaHwY4GOqf4qvDvGoHw+LyNAJ
+# qKJZbEpHbXOXnm6IBkC8BM9FhKp+fUv5lzj+Dlonu5lro1n3/PrVwNMkx4O4iQMf
+# f9yH5BlZ+XrXbva99/2+8m9X+QCHxiyBHlHOZc3XaWqPLRHlHFsVdQrA5cqRrJMQ
+# Vf1y/xDRmkKeyJ6nWHnLtJkIqE3BfeoEmF3lyGJQti+II6VnFTp6PpH8otJKMQ+N
+# AkhLhU9J7y9xyZJNI6w3WEnlbvSSn0ZYjky4+/dlAjdZdbgI9Q4ttsNiFSPv97Be
+# G67sC+voNoUwiCGicTVyvwNMhBtnYykMWkD6mCC5FhFJ1KpjNdT70FU3MKXSF2WD
+# oqPaVioWuRH/v20RSJnAXvB6wXG3JP5cGgdvtorjTaYgTpKDmsmkso+u4EyKIf7a
+# /ITYkituwxgRTQ+V2/HOAjZ9I/F6l+2bgRMNhILXr1dIWA+7wwC0QwlDliei+IfH
+# 03hcpnzXYNfvUtSUCcHKarm+lOeyIhj6M+n0FetpIHTbhI+5YzYSZPZnTifEoMq3
+# LQEG8FwW3OrMySMW5ZppFEr+Jppmkd6V8+vO11krWTLm41DNTg==
 # SIG # End signature block

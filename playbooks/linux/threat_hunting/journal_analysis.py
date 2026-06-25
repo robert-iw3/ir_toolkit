@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-journal_analysis.py — Linux systemd-journal / syslog -> findings engine.
+journal_analysis.py - Linux systemd-journal / syslog -> findings engine.
 
 The Linux analog of the Windows Invoke-EventLogAnalysis.ps1. The forensics phase
 collects the journal raw; nothing turned it into adjudicable findings. This reads a
@@ -47,14 +47,14 @@ MAX_FINDINGS = 500                # safety cap so a noisy journal can't explode 
 # reference is worth surfacing.
 IMPLANT_RE = re.compile(r"(?:^|[\s=\"'(,:])(/tmp/|/var/tmp/|/dev/shm/)")
 # Runtime dirs (/run, /var/run) DO hold legitimate state (/run/user/<uid>, /run/systemd,
-# /run/lock). Do NOT blanket-match them — that floods on benign systemd units. Flag only
+# /run/lock). Do NOT blanket-match them - that floods on benign systemd units. Flag only
 # when an attacker payload is implied: a hidden file, or a script/binary under the runtime
 # dir. This keeps /run/var-run as a real detection surface (attackers use tmpfs) WITHOUT
-# the noise — no blindspot, just precision.
+# the noise - no blindspot, just precision.
 RUNTIME_RE = re.compile(
     r"(?:/run/|/var/run/)\S*?(?:/\.[\w.-]+|\.(?:sh|bash|py|pl|rb|elf|bin|so|ko|out))\b")
 # Download-to-interpreter cradle: curl/wget/fetch piped or chained into a shell/interpreter
-# (the classic `curl http://x | bash` payload pull). Bare curl/wget is NOT matched here —
+# (the classic `curl http://x | bash` payload pull). Bare curl/wget is NOT matched here -
 # that's a C2-beacon question for network analysis, not a cron-text signal.
 DOWNLOAD_CRADLE_RE = re.compile(
     r"\b(?:curl|wget|fetch)\b[^\n|;&]*[|;&]+\s*(?:[\w/]*sh|bash|python[0-9.]*|perl|ruby|php)\b",
@@ -130,7 +130,7 @@ def parse_journal_text(text):
 # ── detection core (pure: records -> findings) ───────────────────────────────
 def analyze(records, window_seconds=DEFAULT_WINDOW_SECONDS,
             brute_threshold=DEFAULT_BRUTE_THRESHOLD):
-    """Return a list of finding dicts. Pure function — unit-testable in isolation."""
+    """Return a list of finding dicts. Pure function - unit-testable in isolation."""
     findings = []
 
     def add(severity, ftype, target, details, mitre):
@@ -246,7 +246,7 @@ def analyze(records, window_seconds=DEFAULT_WINDOW_SECONDS,
                 add("High", "Audit Logging Disabled",
                     f"{ident} @ {when}", msg.strip(),
                     "T1562.001 (Impair Defenses: Disable or Modify Tools)")
-        # Explicit MAC-disable events. NOTE: "unconfined" is intentionally NOT matched —
+        # Explicit MAC-disable events. NOTE: "unconfined" is intentionally NOT matched -
         # `profile="unconfined"` appears in routine AppArmor audit records (100s/host) and
         # is not a disable event. "apparmor ... disabled/unloaded" IS a real tamper signal.
         if re.search(r"SELinux:\s*Disabled", msg) or "enforcing=0" in msg or \

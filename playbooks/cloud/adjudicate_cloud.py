@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-adjudicate_cloud.py — cloud finding normalization + adjudication.
+adjudicate_cloud.py - cloud finding normalization + adjudication.
 
 Closes the cloud "no real analysis" gap: parses the provider telemetry that
 00_collect_forensics.sh wrote (AWS GuardDuty, Azure Activity/risky-users, GCP SCC)
@@ -24,7 +24,7 @@ VERDICT_RANK = {"False Positive": 0, "Likely False Positive": 1,
                 "Indeterminate": 2, "Likely True Positive": 3, "True Positive": 4}
 HIGH_SEV = {"HIGH", "CRITICAL", "SEV_HIGH", "8", "9", "10"}
 
-# OAuth/Graph delegated scopes that grant mailbox/file/tenant reach — the payload of
+# OAuth/Graph delegated scopes that grant mailbox/file/tenant reach - the payload of
 # an illicit-consent-grant attack. Lower-cased for comparison.
 HIGH_RISK_OAUTH_SCOPES = {
     "mail.read", "mail.readwrite", "mail.send", "mail.read.shared", "mail.readwrite.shared",
@@ -239,7 +239,7 @@ def normalize_flow_logs(flow_text, c2_ips):
         if ip and ip in text:
             out.append(_finding(
                 "Cloud Network Flow to C2", ip,
-                f"Known C2 IP {ip} observed in collected VPC/NSG flow logs — confirms "
+                f"Known C2 IP {ip} observed in collected VPC/NSG flow logs - confirms "
                 f"network communication (not just an asserted indicator).",
                 "T1071 (Application Layer Protocol)", "True Positive", "High"))
     return out

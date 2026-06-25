@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# IR Cloud Playbook 04 — Cloud C2 Channel Blocking
+# IR Cloud Playbook 04 - Cloud C2 Channel Blocking
 #
 # Blocks outbound connections to known C2 IPs at the cloud network layer:
 #   AWS:   Network ACL deny rules + Security Group egress revocation
@@ -23,7 +23,7 @@ log()  { echo "[$(date -u +%H:%M:%SZ)] [c2block/${PROVIDER}] $*" | tee -a "${ART
 emit() { local s="$1"; local d="${2:-}"; echo "{\"phase\":\"c2_blocking\",\"status\":\"${s}\",\"detail\":\"${d}\",\"provider\":\"${PROVIDER}\"}"; }
 
 [[ -z "${C2_IPS}" && -z "${C2_DOMAINS}" ]] && \
-    { log "No C2 IPs or domains provided — skipping"; emit "skipped" "no_iocs"; exit 0; }
+    { log "No C2 IPs or domains provided - skipping"; emit "skipped" "no_iocs"; exit 0; }
 
 block_aws() {
     local region="${IR_AWS_REGION:-us-east-1}"
@@ -37,7 +37,7 @@ block_aws() {
         --query 'Reservations[0].Instances[0].VpcId' \
         --output text 2>/dev/null)
     [[ "${vpc_id}" == "None" || -z "${vpc_id}" ]] && vpc_id="${IR_AWS_VPC_ID:-}"
-    [[ -z "${vpc_id}" ]] && { log "WARN: VPC ID unknown — skipping NACL rules"; }
+    [[ -z "${vpc_id}" ]] && { log "WARN: VPC ID unknown - skipping NACL rules"; }
 
     # Network ACL deny for each C2 IP
     if [[ -n "${vpc_id}" && -n "${C2_IPS}" ]]; then

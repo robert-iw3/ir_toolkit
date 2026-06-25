@@ -75,9 +75,13 @@ param(
     [switch]$IncludeYaraRules,
     [switch]$IncludeVolatility,
     [switch]$IncludeMemProcFS,
+    [switch]$IncludeCapa,
+    [switch]$IncludeFloss,
     [switch]$StageSymbols,
     [string]$VolExeUrl   = '',   # leave blank to auto-resolve from GitHub API; override if needed
-    [string]$WinPmemUrl  = 'https://github.com/Velocidex/WinPmem/releases/download/v4.0.rc1/winpmem_mini_x64_rc2.exe'
+    [string]$WinPmemUrl  = 'https://github.com/Velocidex/WinPmem/releases/download/v4.0.rc1/winpmem_mini_x64_rc2.exe',
+    [string]$CapaUrl     = 'https://github.com/mandiant/capa/releases/download/v7.4.0/capa-v7.4.0-windows.zip',
+    [string]$FlossUrl    = 'https://github.com/mandiant/flare-floss/releases/download/v3.1.1/floss-v3.1.1-windows.zip'
 )
 
 Set-StrictMode -Version Latest
@@ -265,7 +269,7 @@ if ($IncludeYaraRules) {
             Url    = 'https://yaraify.abuse.ch/yarahub/yaraify-rules.zip'
             SubDir = 'abusech'
             Filter = '*.yar'
-            Within = ''           # flat zip (rules at the root) — keep all .yar
+            Within = ''           # flat zip (rules at the root) - keep all .yar
         }
         @{
             Name   = 'Elastic'
@@ -312,6 +316,66 @@ if ($IncludeYaraRules) {
             Write-Host "    FAILED: $($_.Exception.Message)" -ForegroundColor Yellow
             Save-Hash $src.Name $src.Url $null "failed: $($_.Exception.Message)"
         }
+    }
+}
+
+# --- capa standalone (optional, -IncludeCapa) -------------------------------
+# capa identifies capabilities/ATT&CK in the injected regions memory_enrich.py carves. The
+# standalone build bundles its rules, so capa.exe alone is enough; memory_enrich auto-runs it
+# (tools\capa\capa.exe) over each carved shellcode region.
+if ($IncludeCapa) {
+    Write-Host "[*] capa (standalone) ..." -ForegroundColor Cyan
+    $capaDir = Join-Path $ToolsDir 'capa'
+    New-Item -ItemType Directory -Path $capaDir -Force | Out-Null
+    $capaZip = Join-Path $tmp 'capa.zip'
+    $capaEx  = Join-Path $tmp 'capa_ex'
+    $dst     = Join-Path $capaDir 'capa.exe'
+    try {
+        Invoke-WebRequest -Uri $CapaUrl -OutFile $capaZip -UseBasicParsing -TimeoutSec 300 -ErrorAction Stop
+        Expand-Archive -LiteralPath $capaZip -DestinationPath $capaEx -Force
+        $exe = Get-ChildItem -LiteralPath $capaEx -Recurse -Filter 'capa.exe' -ErrorAction SilentlyContinue |
+               Select-Object -First 1
+        if ($exe) {
+            Copy-Item -LiteralPath $exe.FullName -Destination $dst -Force
+            Write-Host "    -> capa.exe staged to tools\capa\" -ForegroundColor Green
+            Save-Hash 'capa' $CapaUrl $dst 'ok'
+        } else {
+            Write-Host "    FAILED: capa.exe not found in archive" -ForegroundColor Yellow
+            Save-Hash 'capa' $CapaUrl $null 'no-capa-exe-in-zip'
+        }
+    } catch {
+        Write-Host "    FAILED: $($_.Exception.Message)" -ForegroundColor Yellow
+        Save-Hash 'capa' $CapaUrl $null "failed: $($_.Exception.Message)"
+    }
+}
+
+# --- FLOSS standalone (optional, -IncludeFloss) -----------------------------
+# FLOSS (FLARE Obfuscated String Solver) complements capa: it extracts static + stack + tight +
+# decoded strings from the injected regions memory_enrich.py carves, recovering an implant's
+# deobfuscated config/strings that plain `strings`/capa miss. memory_enrich auto-runs tools\floss\floss.exe.
+if ($IncludeFloss) {
+    Write-Host "[*] FLOSS (standalone) ..." -ForegroundColor Cyan
+    $flossDir = Join-Path $ToolsDir 'floss'
+    New-Item -ItemType Directory -Path $flossDir -Force | Out-Null
+    $flossZip = Join-Path $tmp 'floss.zip'
+    $flossEx  = Join-Path $tmp 'floss_ex'
+    $dst      = Join-Path $flossDir 'floss.exe'
+    try {
+        Invoke-WebRequest -Uri $FlossUrl -OutFile $flossZip -UseBasicParsing -TimeoutSec 300 -ErrorAction Stop
+        Expand-Archive -LiteralPath $flossZip -DestinationPath $flossEx -Force
+        $exe = Get-ChildItem -LiteralPath $flossEx -Recurse -Filter 'floss.exe' -ErrorAction SilentlyContinue |
+               Select-Object -First 1
+        if ($exe) {
+            Copy-Item -LiteralPath $exe.FullName -Destination $dst -Force
+            Write-Host "    -> floss.exe staged to tools\floss\" -ForegroundColor Green
+            Save-Hash 'floss' $FlossUrl $dst 'ok'
+        } else {
+            Write-Host "    FAILED: floss.exe not found in archive" -ForegroundColor Yellow
+            Save-Hash 'floss' $FlossUrl $null 'no-floss-exe-in-zip'
+        }
+    } catch {
+        Write-Host "    FAILED: $($_.Exception.Message)" -ForegroundColor Yellow
+        Save-Hash 'floss' $FlossUrl $null "failed: $($_.Exception.Message)"
     }
 }
 
@@ -536,27 +600,27 @@ $manifest | Select-Object Name, Status, File | Format-Table -AutoSize
 # SIG # Begin signature block
 # MIIcoQYJKoZIhvcNAQcCoIIckjCCHI4CAQExDzANBglghkgBZQMEAgEFADB5Bgor
 # BgEEAYI3AgEEoGswaTA0BgorBgEEAYI3AgEeMCYCAwEAAAQQH8w7YFlLCE63JNLG
-# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCCjbGwtUf+wlSo3
-# Pynw7BXhBx1zhylx/jz3ACV/J4PjtqCCFrQwggN2MIICXqADAgECAhBj3Isegven
-# qEj21ds5AZieMA0GCSqGSIb3DQEBCwUAMFMxGjAYBgNVBAsMEUluY2lkZW50IFJl
+# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCBgUEjSoflW9C63
+# pfI9zR6gg6T0LSidk8odBMFDd7yJ/6CCFrQwggN2MIICXqADAgECAhAcxe7C/TZF
+# rUKI1OYOaCvjMA0GCSqGSIb3DQEBCwUAMFMxGjAYBgNVBAsMEUluY2lkZW50IFJl
 # c3BvbnNlMRMwEQYDVQQKDApJUiBUb29sa2l0MSAwHgYDVQQDDBdJUiBUb29sa2l0
-# IENvZGUgU2lnbmluZzAeFw0yNjA2MjMxNDE2NTlaFw0zMTA2MjMxNDI2NTlaMFMx
+# IENvZGUgU2lnbmluZzAeFw0yNjA2MjQyMjQ1MTNaFw0zMTA2MjQyMjU1MTNaMFMx
 # GjAYBgNVBAsMEUluY2lkZW50IFJlc3BvbnNlMRMwEQYDVQQKDApJUiBUb29sa2l0
 # MSAwHgYDVQQDDBdJUiBUb29sa2l0IENvZGUgU2lnbmluZzCCASIwDQYJKoZIhvcN
-# AQEBBQADggEPADCCAQoCggEBAM3b6zgkW9zzqQraVSnj+a4zp1l4KkWs2NKNqvPP
-# p9Pyjhif7sY2FZyXnXbkKElZkNveSR84IkSBjIBC/9Q2gum1eM9nDmbnj2v5L+Nu
-# llMOkOjUC913DYNHmHdk/8FDJwAjl6mtsAWZwTvc7FUpyqGiD09yILSywsivvkDV
-# nE/qWzKgMRGflBJreqDUR5o0l0hLhowxG58ywKqElIJpwV+N1ngcfYIpJPO4XEHB
-# 6sSe0fkZralmnZdZ+sw6LRUpE7nMxmy6ZktNz51jXnm/oR7N9VbHUBOMtBLAFmny
-# CFddkOEV4z4Pz3yC0SOcgJXvoJ3yfPLzug7t5W+kRcNGmrECAwEAAaNGMEQwDgYD
-# VR0PAQH/BAQDAgeAMBMGA1UdJQQMMAoGCCsGAQUFBwMDMB0GA1UdDgQWBBQQFW0G
-# zu1Gz5VThEyg9LLMhDsLlDANBgkqhkiG9w0BAQsFAAOCAQEAGVSgMDhKb7EDBXTH
-# 3pTUUxUoQNNByOzeSepp+Wq5HpPEO7lS204uZSljF1a6QNjya4SsVE3o4+TR9CJm
-# uXqRvesj578tf9DQSl0iflg2rz9UGCXRVTazH8xMWOpt8fMlXbUf3xfYS4Wqena2
-# dl5JhRwvaDUmO5EJixsQwTiYS+vS5sG0TzMIT2N0dyCrA4eRinORCiUzTn3zYZe4
-# osCBOkhKbaiX6YkjzWhFGEarCNYwAYhleymgIy88BowoBYgwn1vx9G14hS9cEcHp
-# d/oHA9RE3wgiiYW2VCYWv+8GWrBv+WCruhrzagOTl6RURC1ctkiRl6MbQ9XENvQF
-# HPfs5TCCBY0wggR1oAMCAQICEA6bGI750C3n79tQ4ghAGFowDQYJKoZIhvcNAQEM
+# AQEBBQADggEPADCCAQoCggEBAKCRMj2g7ekVueQgTeNVDV/Xz94PBbxt0/9qalo3
+# ZcDg3e8VTErd0f6b8Ya8ibhn3tZ9zWKMpP3nuub3mlgEiO3Md4JhBx6N3bKukDN+
+# Nb3uNGCoSbJTnI13pA1dkqtu41wagDdtnPDYSs5+cidAlPhZgBjxuXdoiWKzAUNw
+# +dxDgaMmLxM0Qvp4z2kuOBes6C9Xd7twXNwi0Ov4pC1F0HAcKm7WCMtlRlX9i01k
+# WmZkARKuPQ3eHWg0e08aC4CldRauFArRf2lO9MzquFinnD2s25q8F/PiEeyWALIe
+# e/hE6L/bl/Z+5MR84dPFTfMXub9dsDsr++APaaYkZO04fTUCAwEAAaNGMEQwDgYD
+# VR0PAQH/BAQDAgeAMBMGA1UdJQQMMAoGCCsGAQUFBwMDMB0GA1UdDgQWBBQU6OnI
+# wgtlYKR4+fSkiuhgK5MUVDANBgkqhkiG9w0BAQsFAAOCAQEAnw0GGGlgOpVP5ag3
+# BvgHh4QYHOFColAEKbKGKDHMnvxsrlapVXCX69hnFv4701iiDn/DQirr/EUy1QRs
+# v4BrQwh4EGvTU9AT8mOxRbi6svr1IKdab2iSkNqW8GTvSK6ZCyQkJn/+KAOY8u7E
+# 9lO2+LM8DG2/1mgw/Ptg4jbVba/rPnLXkHnsydr2yhBw7miBEOIS9DBSul/wrxCV
+# VTLcnbB1YRuJpV+dj6+YCnZT7pO6qOToHp++ueGyuw8ul/qCnhxiv89Hu/T++Pyh
+# Qow09e6wDMKrbmdJD89KLTV8Zalq1sLskE8B4Q1TiWPknAr4f1V6rcJTH6BcoRMU
+# 4eKB9TCCBY0wggR1oAMCAQICEA6bGI750C3n79tQ4ghAGFowDQYJKoZIhvcNAQEM
 # BQAwZTELMAkGA1UEBhMCVVMxFTATBgNVBAoTDERpZ2lDZXJ0IEluYzEZMBcGA1UE
 # CxMQd3d3LmRpZ2ljZXJ0LmNvbTEkMCIGA1UEAxMbRGlnaUNlcnQgQXNzdXJlZCBJ
 # RCBSb290IENBMB4XDTIyMDgwMTAwMDAwMFoXDTMxMTEwOTIzNTk1OVowYjELMAkG
@@ -660,31 +724,31 @@ $manifest | Select-Object Name, Status, File | Format-Table -AutoSize
 # y2ueIu9THFVkT+um1vshETaWyQo8gmBto/m3acaP9QsuLj3FNwFlTxq25+T4QwX9
 # xa6ILs84ZPvmpovq90K8eWyG2N01c4IhSOxqt81nMYIFQzCCBT8CAQEwZzBTMRow
 # GAYDVQQLDBFJbmNpZGVudCBSZXNwb25zZTETMBEGA1UECgwKSVIgVG9vbGtpdDEg
-# MB4GA1UEAwwXSVIgVG9vbGtpdCBDb2RlIFNpZ25pbmcCEGPcix6C96eoSPbV2zkB
-# mJ4wDQYJYIZIAWUDBAIBBQCggYQwGAYKKwYBBAGCNwIBDDEKMAigAoAAoQKAADAZ
+# MB4GA1UEAwwXSVIgVG9vbGtpdCBDb2RlIFNpZ25pbmcCEBzF7sL9NkWtQojU5g5o
+# K+MwDQYJYIZIAWUDBAIBBQCggYQwGAYKKwYBBAGCNwIBDDEKMAigAoAAoQKAADAZ
 # BgkqhkiG9w0BCQMxDAYKKwYBBAGCNwIBBDAcBgorBgEEAYI3AgELMQ4wDAYKKwYB
-# BAGCNwIBFTAvBgkqhkiG9w0BCQQxIgQg6brG5Up8UCw86TShAEqL0bCZhPznRdH8
-# rhzqwfggg5owDQYJKoZIhvcNAQEBBQAEggEAE/QUtM8U2JU/82grB9+31BoP3THB
-# LSzvd9OoGu8bQVq5LoiilS/4rUkrvDSVvwiCpAcOLfeMrthNHNPbMnWGck1qC5dk
-# miYrZQD5Hw+pzrqXzewS4MkCx0ifTQiLa/BHfRiDWLvugbgePaxCou6rRTCu6MEe
-# ru47ah4tJxtpd0K3MZUSBEYXWYcTP7vjthMak8+utksoxPlloqyZ+08fwDle0PrH
-# oGHdGV9f5c5XZK9R0ay+iKiLrhjPuoCtOLcVJoz/zw2SrZhVlwzYGj4jtfOsqVz6
-# plI14y064QifguXzIPcABv4aiQkVN7ZEvvo0ovnY+TSl8EhNbEBsaLiFo6GCAyYw
+# BAGCNwIBFTAvBgkqhkiG9w0BCQQxIgQg74DTA0xy1z+CNZflqsuACaLmR8tvea3E
+# CtjfyaMg8wIwDQYJKoZIhvcNAQEBBQAEggEAZUwBfBZiwp2doPy8HlU/TSCfqY+P
+# n545v6BwXd6lfFcECr46an2xdfLJktbNUYP279fTTHnKD91D4ET402JOFEysAyVT
+# BbBUFOgJFBvjzSfgyBQm7PEoni1NmfFd6AVscWZvh9nkLnY2JmWRbA7ltu2qdiD7
+# gOXvNB7cIV4FivmQ9VIJX7z3Z/V7wLGY//YMBrlU2mNMOD9IOZxxa7uhsM3Te+Da
+# wh5WGW2822GbDvaAFpvSNgceQPiFNOmr2KTKjm/GB+flNpxR9Iwb4ImzTQADvsjp
+# okCaisKohBXGADCxCB+zzwwiAfi3bpTlL8ewb8vX8Qxlh+LZ+HZozpnwzqGCAyYw
 # ggMiBgkqhkiG9w0BCQYxggMTMIIDDwIBATB9MGkxCzAJBgNVBAYTAlVTMRcwFQYD
 # VQQKEw5EaWdpQ2VydCwgSW5jLjFBMD8GA1UEAxM4RGlnaUNlcnQgVHJ1c3RlZCBH
 # NCBUaW1lU3RhbXBpbmcgUlNBNDA5NiBTSEEyNTYgMjAyNSBDQTECEAqA7xhLjfEF
 # gtHEdqeVdGgwDQYJYIZIAWUDBAIBBQCgaTAYBgkqhkiG9w0BCQMxCwYJKoZIhvcN
-# AQcBMBwGCSqGSIb3DQEJBTEPFw0yNjA2MjMxNDI3MDJaMC8GCSqGSIb3DQEJBDEi
-# BCC6GhCgxgxGBTTNwIEUJAMFq3eIX6s+MgHHvsX2JYQ2BjANBgkqhkiG9w0BAQEF
-# AASCAgBK6GBGSJYKSq+VoAWAWl8wNCil5BLpNSGubRp1vTcpw+fQJ/jrFXPb/if+
-# byadEz4yNOVcLh1x4txP5pWhHwagXDaZAi1TZ3+TxtdktAE1FT3Z3xDh9xVPwH1A
-# qwLZFi+L0wGX4ssyu7YUd2STkluov+Dio81jx8M9uKcn1w3euN2pSnL6EJRK2RTp
-# E0pQnhP5tb6vE7Rcd64lC8ImdXNyjgSTSCwT/CyzrON2wDIid1iDA6mAP4Jd8q5F
-# a0VyhClLVo5Cz6kHtmSbNL1A4wVi6GBuVD0Vvpbn23/lw2lijYkl4MuO5Lg1YRly
-# qC1dxNhZI3xqW3ygN0M3+kHQmSCTsx3FY0HblB28Y7wyCO1uNMFmhY0wI3M6mKCT
-# wbecHSDPN4YrJza1U1ka0egPQsWtbbuH456K1ZDe9+zIAVhyT0YbCwV5d2USjt2w
-# xPrQb5RCnq5ysdE1qyQVj9rz8za10mlWbuu/Aeds2c4HZpGLnBertVwaUpHbfaqS
-# 7WXRWAp4VIKOy2EeeBZmlqIxwDzrRSEtau8JH7jB4noBOGEw6esI1Wnq34BV3AWo
-# fBNgj3n1duoMHcLsmdyoAXCM4UiHBN/oW5pIHYOEdWJtSWQqL7GMfwZ5rHqvmhgp
-# sO7XVGTyjmgdTwUyBoGhsUpC0jPc0g1Sue2KlBDIO9nUAPynvg==
+# AQcBMBwGCSqGSIb3DQEJBTEPFw0yNjA2MjQyMjU1MThaMC8GCSqGSIb3DQEJBDEi
+# BCCgmKf/Dgpp4/1KneOlfkxwm3hlwbvG8LNloljPmRQHujANBgkqhkiG9w0BAQEF
+# AASCAgBUK686vWyI3tpffP5ik/MchENmadJlsYLOs5eI8Qry/Y+jo02GaiW5Z516
+# qwtZTMqwEyrKu1k6Ypo16RbYHa4xOAnHgLS4wi958FX3hQ5OANvxoR4cNO8Ian69
+# zFs54aAFYjFLTQGM1lfHwRGw2utmjO/wCXRLg2fOSh+eaGnDLPbePRu0i4BLiXk0
+# a6EXNxc910LadqJe3TzkImSNtBmnrJWFOSCI0FWPQxOyig2YFYbOjbCLqQGt4j6b
+# ArOlqcBlTcLgi2+Ma1I1QelH/NlepsfW63If+JIKedDQfcoHdIywPrbND70by8J1
+# XKFVOp7pm004UUCM7JKdknD23x6MoFceiYE3vPzoC3cRjZPchkCC+yy9vHLGh0zy
+# RRmxnNI+t6yT5kHaKdB2Y6C628kERO0ND6RT/OSKUdkuWklzEkCbNq5YQKCRhFTa
+# N4DL/5aBtS03Qrusq5tt4kaaLc1CEroQuhVm+9fcGM6vkmRiaLZalboKZ5o8f+J3
+# SN9S/vJBhjtjvikIzaDddyJQJTE9w5TVV9x6Iq7A3G7Q/yHbsugxonbQzEUciZ/6
+# eeGLJIKay0JlFlTi6X2ZDWWtqcnlWaSKoVac2KM4asXmGgya4ktAxuk6hssEpIda
+# 8Xa2EQqc7Wd1CiFUNUrxduEgeJusuwocjpIc1kCrLg63XEn5yw==
 # SIG # End signature block

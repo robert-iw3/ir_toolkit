@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# IR Playbook 00 — Linux Forensics Collection
+# IR Playbook 00 - Linux Forensics Collection
 # Captures a full system snapshot before any eradication action disturbs state.
 # Must run FIRST in every engagement. Output: compressed archive in /var/ir/.
 # ==============================================================================
@@ -18,7 +18,7 @@ logger -t ir-playbook "FORENSICS: Collection started for incident ${INCIDENT_ID}
 ps auxf                                      > "${WORK_DIR}/process_tree.txt"        2>/dev/null || true
 ps -eo pid,ppid,user,stat,comm,args          > "${WORK_DIR}/process_full.txt"        2>/dev/null || true
 
-# Hash every running process binary — fast indicator cross-reference
+# Hash every running process binary - fast indicator cross-reference
 while IFS= read -r pid; do
     exe=$(readlink -f "/proc/${pid}/exe" 2>/dev/null) || continue
     [[ -f "${exe}" ]] || continue
@@ -61,7 +61,7 @@ find /etc/cron.d /etc/cron.daily /etc/cron.hourly /etc/cron.weekly /var/spool/cr
      -type f 2>/dev/null | xargs ls -la      > "${WORK_DIR}/cron_files.txt"          2>/dev/null || true
 cat /etc/crontab                             >> "${WORK_DIR}/cron_files.txt"         2>/dev/null || true
 
-# Systemd units — all states, highlight non-standard paths
+# Systemd units - all states, highlight non-standard paths
 systemctl list-units --all --no-pager        > "${WORK_DIR}/systemd_units.txt"       2>/dev/null || true
 systemctl list-unit-files --no-pager         > "${WORK_DIR}/systemd_unit_files.txt"  2>/dev/null || true
 find /etc/systemd /usr/local/lib/systemd /home -name '*.service' -o -name '*.timer'  2>/dev/null \
@@ -89,7 +89,7 @@ done > "${WORK_DIR}/shell_init_files.txt" 2>/dev/null || true
 cat /etc/ld.so.preload                       > "${WORK_DIR}/ld_so_preload.txt"        2>/dev/null || true
 ldconfig -p                                  > "${WORK_DIR}/ldconfig_cache.txt"       2>/dev/null || true
 
-# SUID/SGID binaries (quick check — compare with baseline in full investigation)
+# SUID/SGID binaries (quick check - compare with baseline in full investigation)
 find / -perm /6000 -type f 2>/dev/null       > "${WORK_DIR}/suid_sgid_files.txt"                || true
 
 # -- File system artifacts -----------------------------------------------------

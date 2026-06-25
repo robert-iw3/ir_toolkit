@@ -1,7 +1,7 @@
 # YARA Findings Analysis Workflow (Windows + Linux)
 
 How the IR Toolkit scans memory with YARA, **what context it gathers per hit**, and the explicit
-logic — with worked examples — for deciding whether a match is **benign** or a **true positive
+logic - with worked examples - for deciding whether a match is **benign** or a **true positive
 without a doubt**. The guiding rule throughout: **context only escalates or annotates, it never
 silently clears** (no blindspots). A match is *contextualised*, never *deleted*.
 
@@ -13,7 +13,7 @@ and [WORKFLOW-WINDOWS.md](WORKFLOW-WINDOWS.md) for the per-platform memory pipel
 ## Why a raw YARA hit is not a verdict
 
 YARA matches **bytes**. A rule named `ELF_Mirai` or `Cobalt_Strike` firing tells you those bytes are
-present in memory — **not** that the malware is running. The same bytes legitimately appear in:
+present in memory - **not** that the malware is running. The same bytes legitimately appear in:
 
 - a **loaded library / interpreter** (a compiler holds every CPU-architecture name; Python's string
   table holds "download", "exec", "socket"…),
@@ -40,7 +40,7 @@ flowchart TD
     T --> Q{"canary fired?
     any match?"}:::decision
     Q -->|canary never fired| U["UNTRUSTED
-    '0 matches' is NOT clean — re-scan"]:::phase
+    '0 matches' is NOT clean - re-scan"]:::phase
     Q -->|no match, canary OK| CLEAN["trusted clean"]:::step
     Q -->|match| E["③ ENRICH per hit
     PID · region · perms · path · strings · breadth"]:::step
@@ -49,7 +49,7 @@ flowchart TD
     corroborate: malfind/VAD · C2 · parent · persistence"]:::tool
     D -->|file-backed| V["verify backing file
     Linux: hash/package · Windows: Authenticode+hash"]:::step
-    V --> O[/"Incident report — Memory forensics & YARA
+    V --> O[/"Incident report - Memory forensics & YARA
     + adjudication funnel"/]:::artifact
     TP --> O
 
@@ -71,7 +71,7 @@ Rules are filtered by **what they reference**, not by filename:
 - **Windows** (`memory_yara.py`): drop non-Windows rules; declare externals; compile with `yarac64`.
 
 A **canary rule** is compiled in (ELF magic on Linux, MZ/DOS-stub on Windows). If the canary never
-matches, the engine never inspected memory — so **"0 matches" is reported as UNTRUSTED, not clean**.
+matches, the engine never inspected memory - so **"0 matches" is reported as UNTRUSTED, not clean**.
 This is the single most important integrity check: it makes a silent scan failure loud.
 
 > Historical bug this prevents: passing raw rule source to Volatility's `--yara-file` compiled with
@@ -79,9 +79,9 @@ This is the single most important integrity check: it makes a silent scan failur
 > with **zero** rules → reported a false "clean." The canary turns that into an explicit UNTRUSTED.
 
 ### ② Triage scan
-- **Linux native (default):** `yara-python` mmaps the whole image, one pass — **full physical
+- **Linux native (default):** `yara-python` mmaps the whole image, one pass - **full physical
   coverage** (kernel + free pages), fast, but no PID yet.
-- **Windows:** MemProcFS (`vmmpyc`, C-backed) scans **per-process** directly — fast + already
+- **Windows:** MemProcFS (`vmmpyc`, C-backed) scans **per-process** directly - fast + already
   attributed.
 
 ### ③ Enrich per hit (the disambiguator)
@@ -97,7 +97,7 @@ For every match the toolkit records:
 | **Breadth** | distinct PIDs per rule | distinct PIDs per rule | shared-lib bytes vs injection campaign |
 
 On Linux this is a **two-phase** flow: the fast triage says *what* is present, then a per-process
-worker (Volatility driven as a library — init the image once, loop tasks in-process) **follows up
+worker (Volatility driven as a library - init the image once, loop tasks in-process) **follows up
 automatically on the hits** to attribute + enrich them. Windows is already per-process so it enriches
 in the single pass. Both stream a rolling `_yara_results_<stamp>.jsonl` and write a
 `_yara_results_<stamp>.json` summary, surfaced in the report's **Memory forensics & YARA** section.
@@ -123,25 +123,25 @@ can't reach "without a doubt."
                                    ┌────────────────┐  ┌───────────────────────────────┐
                                    │ TRUE POSITIVE  │  │ region == file/image (on disk)│
                                    │  (injected/    │  └──────┬────────────────────────┘
-                                   │  unbacked exec)│        │
-                                   └───────┬────────┘  ┌─────▼──────────────────────────┐
+                                   │  unbacked exec)│         │
+                                   └───────┬────────┘  ┌──────▼─────────────────────────┐
                                            │           │ verify backing file:           │
                               corroborate  │           │  hash/package (Linux)          │
                               (malfind/VAD,│           │  Authenticode+hash (Windows)   │
                                C2, parent, │           └───────────┬────────────────────┘
                                persistence)│         clean         │   tampered/unsigned/unknown
                                            ▼           ▼           ▼
-                                     TP — DECLARE    BENIGN-     SUSPICIOUS — escalate,
+                                     TP - DECLARE    BENIGN-     SUSPICIOUS - escalate,
                                                      with-       keep investigating
                                                      context
 ```
 
-### Rule A — Trust gate (always first)
+### Rule A - Trust gate (always first)
 If the canary did **not** fire for the scan (Linux global) or for the process (per-process), the
 result is **UNTRUSTED**. "0 matches" means nothing. Raise the timeout / fix the engine / re-scan.
 
-### Rule B — Anonymous + executable ⇒ true positive *without a doubt*
-A match in **unbacked, executable** memory has no legitimate on-disk origin — it is code that was
+### Rule B - Anonymous + executable ⇒ true positive *without a doubt*
+A match in **unbacked, executable** memory has no legitimate on-disk origin - it is code that was
 **written into memory at runtime**: process injection, reflective DLL/`.so` loading, a Cobalt Strike
 beacon, shellcode. This is automatically **escalated to Critical** and typed *"Injected Code (memory
 YARA)"*. The combination *region=anon/Private + perms include `x` + a malware-family rule* is as close
@@ -149,14 +149,14 @@ to certain as memory forensics gets.
 
 > Make it airtight by **corroborating** on the same PID: `linux.malfind` / Windows VAD-injection
 > already flags anon-exec regions; add external C2 (`sockstat`/netstat), an anomalous parent, or a
-> persistence hook and you have an undeniable, multi-signal true positive. The toolkit's correlation
-> engine emits `Correlated Memory Threat` exactly when a YARA hit converges with another signal on one
-> PID.
+> persistence hook and you have an undeniable, multi-signal true positive. On Windows the toolkit
+> ranks every hit by **true-positive confidence** and writes a dedicated `YARA_Pivot_Report.md` - see
+> [§⑤ Pivoting on a true positive](#-pivoting-on-a-true-positive--eradication-scope).
 
-### Rule C — File-backed ⇒ verify the file, don't assume
+### Rule C - File-backed ⇒ verify the file, don't assume
 A match in a **file-backed** region (`file` on Linux, `Image`/`Mapped` on Windows) means the rule hit
 the bytes of a file on disk. That is *usually* benign (a rule grazing a loaded library) **but not
-always** — a **trojanised binary** or a **patched DLL** is exactly a real attack that lives in a
+always** - a **trojanised binary** or a **patched DLL** is exactly a real attack that lives in a
 file-backed mapping. So the rule is: **identify the file and verify it.**
 
 - **Linux:** is the path a packaged file? `dpkg -S <path>` / `rpm -qf`, compare against the package's
@@ -166,37 +166,104 @@ file-backed mapping. So the rule is: **identify the file and verify it.**
   Signed Microsoft/`%SystemRoot%` DLL, valid signature → benign. Unsigned, in `%TEMP%`, hash unknown,
   or signature invalid → **suspicious**, keep going.
 
-### Rule D — Matched-string specificity
+### Rule D - Matched-string specificity
 Look at **which strings fired**. Generic *anchors* (ELF magic `$elf_magic`, MZ header, CPU-arch names
 `$arch`, broad keyword strings) → the rule is matching structure/common text → low-confidence on its
 own. **Specific** strings (a hard-coded C2 URL, a unique mutex, a known key schedule, a builder
 watermark) → high-confidence, even before location analysis.
 
-### Rule E — Breadth
+### Rule E - Breadth
 One rule matching **many unrelated processes** usually means it matched **shared bytes** (a library or
-interpreter loaded everywhere) → likely benign — **but** an `LD_PRELOAD` / AppInit / injected-into-
+interpreter loaded everywhere) → likely benign - **but** an `LD_PRELOAD` / AppInit / injected-into-
 everything campaign also looks like this, so it is a *note*, never a clearance. One rule in **one
 unusual** process is more concerning than the same rule across every GUI app.
 
 ---
 
+## ⑤ Pivoting on a true positive → eradication scope
+
+Identifying *which* PID is a true positive is only half the job - eradication has to remove the implant's
+**entire footprint**, or it comes back. On Windows the toolkit does this in two automatic stages.
+
+**Stage 1 - rank by true-positive confidence (`YARA_Pivot_Report.md`).** Every YARA-hit PID is scored on
+*hit quality*, not raw signal-count: a **named malware/tool-family signature** (a family/tool name, not a
+generic technique rule), **multiple distinct rules** on one PID, or a hit in **injected/unbacked memory**
+each raise confidence; a lone generic/LOLBin rule - even alongside an FP-prone signal like a device-path
+"path-spoof" - stays *investigate*. True positives lead the report; **nothing is suppressed**, lower-
+confidence hits are only ranked below. This is what stops a flood of benign `svchost`s from burying the
+one real implant.
+
+**Stage 2 - extract the full footprint (`Memory_Enrichment_*.json`, auto-run during `-Adjudicate`).** For
+each true positive, `memory_enrich.py` pulls from the image everything that PID touched:
+
+| Pulled from memory | Eradication use |
+|---|---|
+| **Handles → files** (`%TEMP%`/Public drops) | files to delete |
+| **Handles → registry** (Run/Winlogon/AppInit, IFEO-with-image, Service ImagePath) | persistence to remove |
+| **Handles → mutexes** (bare high-entropy = implant lock) | host-survey IOC + lock to clear |
+| **Injected exec regions** | **carved to `_region_<pid>_<addr>.bin`** + extracted **decode candidates** (base64/hex/high-entropy) for offline **capa** (capabilities/ATT&CK) and **CyberChef** (encodings vary per case - base64, hex, gzip, XOR, RC4, custom) |
+| **Network** | C2 endpoints to block |
+| **Lineage** (parent + children) | the rest of the foothold |
+
+Output: `Memory_Enrichment_*.json` + an analyst work sheet `Memory_Enrichment.md` (capa capabilities per
+carved region, plus the **decode candidates to paste into CyberChef**). **capa** auto-runs over each carved
+region when staged (`Build-OfflineToolkit.ps1 -IncludeCapa` → `tools/capa/`); otherwise the report prints
+the exact offline command. The eradication artifacts are merged into `IOCs.json`, and a detailed chain is
+appended to `Attack_Graph.md`.
+
+> A registry/IFEO **handle being open is not persistence** - every process's loader opens the IFEO root,
+> and a service host holds hundreds of `Services\*` config handles. Only specific autostart vectors are
+> flagged; persistence *values* are corroborated by the dedicated persistence snapshot. Same lesson as the
+> path-spoof FP: an *open handle* or an *unnormalised path* is not a verdict. The enrichment **extracts**
+> encoded blobs but does not decode them, and it does not manufacture candidates from DLL/identifier
+> runs - when a benign process's region holds nothing encoded, it correctly reports nothing.
+
+The recovered files / keys / mutexes / C2 / implicated-PID chain are merged into **`IOCs.json`** so
+`Invoke-Eradication.ps1` blocks the C2 and surfaces the removal scope (analyst-gated; nothing auto-deletes).
+
+### Corroborate until it's confirmed - what this exposed in a real-world investigation
+
+On a live image, the pivot ranked **three** YARA hits true-positive-class - all on *benign-looking* Windows
+host processes (a shell-experience host, a service host, a browser webview). **capa found no capabilities**
+in the carved regions, and a naive read would have dismissed them as rule grazes. The corroboration loop
+settled all three - and the decisive step was matched-string specificity (Rule D), *not* capa:
+
+| Hit (rule) | Process | The matched string the tool surfaced | Verdict |
+|---|---|---|---|
+| `REDLEAVES_CoreImplant_UniqueStrings` | shell host | `red_autumnal_leaves_dllmain.dll` + in-memory RTTI `CmdRedirector` / `MappingSlave` / `GHttp` / `SIComm` | **Confirmed** - APT10 RedLeaves core implant |
+| `WiltedTulip_Windows_UM_Task` | service host | `svchost64.swp",checkUpdate` (the payload + export), with `Msfpayloads_msf_5` adjacent | **Confirmed** - scheduled-task persistence, Metasploit-built |
+| `CoinMiner_Strings` | browser webview | `stratum+tcp://<pool>:7333 -u <wallet> -p x`, with `Vidar.AM` adjacent | **Confirmed** - coinminer **+** Vidar stealer |
+
+The enrichment then auto-recovered the **eradication scope** into `IOCs.json` with zero analyst effort: the
+mining-pool C2 + the crypto wallet (parsed from the `-u` argument), the implant mutex, the dropped `%TEMP%`
+payload, and the implicated parent/child PID chain.
+
+> **The lesson worth keeping:** *capa returning nothing is not "clean."* The implant evidence lived in
+> process **strings**, not in capa-matchable code. The unique-string match is the cheapest and strongest
+> discriminator - so the tool records *which* strings fired (and a bytes snippet) and lets the verdict be
+> self-evident. Equally, it does **not** invent IOCs: bare heap IPs that collide with crypto OIDs, benign
+> CDN domains, GUIDs/SIDs, and the user's own account email are all filtered out - only the adversary
+> indicators reach `IOCs.json`.
+
+---
+
 ## Worked examples
 
-### Linux — BENIGN (proven), from a real `reports/ubuntu-main` scan
+### Linux - BENIGN (proven), from a real `reports/ubuntu-main` scan
 ```
-ELF_Mirai  — PID 4225 (Xwayland), 4357 (ibus-x11), 4358 (mutter-x11)
+ELF_Mirai  - PID 4225 (Xwayland), 4357 (ibus-x11), 4358 (mutter-x11)
    region = file / r-x
    path   = /usr/lib/x86_64-linux-gnu/libLLVM.so.20.1
    strings= $arch $archx $arch3 ...   (CPU-architecture names)
 ```
 **Decision:** Rule B → no (file-backed, not anon). Rule C → `libLLVM.so` is a packaged, unmodified
-library. Rule D → only generic *arch-name* strings fired — Mirai checks target CPU arch, and LLVM (a
+library. Rule D → only generic *arch-name* strings fired - Mirai checks target CPU arch, and LLVM (a
 compiler) literally contains every arch name. Rule E → matched every GUI process because they all load
-Mesa/LLVM. **Verdict: benign false positive, with proof** — surfaced and annotated ("verify
+Mesa/LLVM. **Verdict: benign false positive, with proof** - surfaced and annotated ("verify
 hash/package"), not deleted.
 
 ```
-TH_Generic_MassHunt_Linux_Malware  — PID 1825 networkd-dispat, 2039 firewalld, 2387 unattended-upgr
+TH_Generic_MassHunt_Linux_Malware  - PID 1825 networkd-dispat, 2039 firewalld, 2387 unattended-upgr
    region = file / r--    (read-only, NOT executable)
    path   = /usr/bin/python3.13
    strings= $dl1 $exec3 $net1 $priv1 ...   (download/exec/network/priv keywords)
@@ -204,40 +271,40 @@ TH_Generic_MassHunt_Linux_Malware  — PID 1825 networkd-dispat, 2039 firewalld,
 **Decision:** read-only, file-backed, in the **Python interpreter** these daemons run on; the rule's
 keyword strings matched Python's static string table. **Benign**, proven by location + read-only perms.
 
-### Linux — TRUE POSITIVE shape (what a real hit looks like)
+### Linux - TRUE POSITIVE shape (what a real hit looks like)
 ```
-Linux_Trojan_Gafgyt — PID 1337 (sh)
+Linux_Trojan_Gafgyt - PID 1337 (sh)
    region = anon / rwx          ← unbacked, writable+executable
    path   = (none)
    strings= $c2_host $cmd_handler   ← specific behaviour strings
    + linux.malfind flags the same RWX region · + sockstat shows 1337 → 185.x.x.x:443
 ```
 **Decision:** Rule B fires (anon + exec) → Critical "Injected Code." Corroborated by malfind + external
-C2 on the same PID → `Correlated Memory Threat`. **True positive without a doubt — declare and
+C2 on the same PID → `Correlated Memory Threat`. **True positive without a doubt - declare and
 eradicate.**
 
-### Windows — BENIGN
+### Windows - BENIGN
 ```
-Cobalt_Strike_Beacon — PID 6120 (chrome.exe)
+Cobalt_Strike_Beacon - PID 6120 (chrome.exe)
    region = Image / RX
    path   = C:\Program Files\Google\Chrome\Application\chrome.dll  (Authenticode: Google, valid)
    strings= $sleep_pattern  (generic)
 ```
 **Decision:** file-backed Image, **validly signed** Google binary, only a generic string → benign FP.
-Annotate ("signed, hash known-good"), do not clear blindly — re-confirm the signature is valid.
+Annotate ("signed, hash known-good"), do not clear blindly - re-confirm the signature is valid.
 
-### Windows — TRUE POSITIVE
+### Windows - TRUE POSITIVE
 ```
-Cobalt_Strike_Beacon — PID 5308 (SecHealthUI.exe)
+Cobalt_Strike_Beacon - PID 5308 (SecHealthUI.exe)
    region = Private / RWX        ← injected, no backing image
    path   = (none)
    strings= $beacon_config $checkin_uri   ← specific
    + VAD-injection flag on the same region · + parent is winword.exe · + beacon to relay.example-c2:443
 ```
 **Decision:** Private+RWX (injected) + specific Cobalt config strings + injected-VAD + macro-style
-parent + C2 = undeniable. **True positive — declare.**
+parent + C2 = undeniable. **True positive - declare.**
 
-### Windows — from a real-world run of this tool (what was found + what proves it)
+### Windows - from a real-world run of this tool (what was found + what proves it)
 
 ***Windows Defender (full & offline scan) found nothing, along with Trend Micro "Maximum" Security.***
 
@@ -245,36 +312,36 @@ parent + C2 = undeniable. **True positive — declare.**
 
 A live `Analyze-Memory.ps1` run over a captured memory image of a suspected-compromise host produced
 **104 YARA matches across 102 processes**. Raw, that is undifferentiated noise. The per-hit VAD
-context separates the real implants from rule grazes **with no analyst guesswork** — and the report
+context separates the real implants from rule grazes **with no analyst guesswork** - and the report
 renders it inline. Here is what was found and what proves it.
 
-**The four true positives — rule strings in ANONYMOUS (unbacked) memory:**
+**The four true positives - rule strings in ANONYMOUS (unbacked) memory:**
 ```
-REDLEAVES_CoreImplant_UniqueStrings — PID 13680 (ShellExperienceHost)   region = anon / rw-
-WiltedTulip_Windows_UM_Task         — PID 3464  (svchost.exe)           region = anon / rw-
-CoinMiner_Strings                   — PID 13816 (msedgewebview2)        region = anon / rw-
-LOLBin_Mshta_Scriptlet              — PID 13680 (ShellExperienceHost)   region = anon / rw-
+REDLEAVES_CoreImplant_UniqueStrings - PID 13680 (ShellExperienceHost)   region = anon / rw-
+WiltedTulip_Windows_UM_Task         - PID 3464  (svchost.exe)           region = anon / rw-
+CoinMiner_Strings                   - PID 13816 (msedgewebview2)        region = anon / rw-
+LOLBin_Mshta_Scriptlet              - PID 13680 (ShellExperienceHost)   region = anon / rw-
 ```
-**What proves it:** the matched strings live in **anonymous, unbacked memory** — there is no on-disk
+**What proves it:** the matched strings live in **anonymous, unbacked memory** - there is no on-disk
 file they could have been read from, so they are the implant's own runtime strings, not a signature
 grazing a loaded module. REDLEAVES (APT10) and WiltedTulip are **family-specific** rules (Rule D), and
 a specific family rule firing in unbacked memory is a true positive. *(Perms here are `rw-`, not
 `rwx`; the **anon/unbacked location + family-rule specificity** is what's decisive. An `anon + rwx`
 hit would additionally trip Rule B and be auto-typed "Injected Code (memory YARA)" → Critical.)*
 
-**The noise — the SAME rule, FILE-BACKED on signed DLLs (the ~100× `LOLBin_BITS_Drop` cluster):**
+**The noise - the SAME rule, FILE-BACKED on signed DLLs (the ~100× `LOLBin_BITS_Drop` cluster):**
 ```
-LOLBin_BITS_Drop — PID 620  (svchost.exe)   file-backed -wx C:\...\shlwapi.dll  -- verify signature
-LOLBin_BITS_Drop — PID 11272(iCloudCKKS)    file-backed -wx C:\...\zlib1.dll    -- verify signature
-LOLBin_BITS_Drop — PID 11020(msedge.exe)    file-backed -wx C:\...\SHLWAPI.dll  -- verify signature
+LOLBin_BITS_Drop - PID 620  (svchost.exe)   file-backed -wx C:\...\shlwapi.dll  -- verify signature
+LOLBin_BITS_Drop - PID 11272(iCloudCKKS)    file-backed -wx C:\...\zlib1.dll    -- verify signature
+LOLBin_BITS_Drop - PID 11020(msedge.exe)    file-backed -wx C:\...\SHLWAPI.dll  -- verify signature
    ... ~100 hits, nearly all file-backed on Microsoft/vendor-signed system DLLs
 ```
-**What proves it benign:** one rule fired across ~100 processes (Rule E — breadth) and almost every
-hit is **file-backed on a signed system DLL** (Rule C) — the rule's BITS strings live inside
+**What proves it benign:** one rule fired across ~100 processes (Rule E - breadth) and almost every
+hit is **file-backed on a signed system DLL** (Rule C) - the rule's BITS strings live inside
 `shlwapi.dll` / `zlib1.dll`, which load nearly everywhere. Verify those DLL signatures and the cluster
 clears as false positive.
 
-**Takeaway for the analyst:** without enrichment this host reads as "104 YARA matches" — flat and
+**Takeaway for the analyst:** without enrichment this host reads as "104 YARA matches" - flat and
 unactionable. With the VAD context, the **four real implants (all `anon`)** stand out at a glance
 against the **~100 file-backed false positives**, and the proof (region / perms / backing file) is on
 the same line in the report. That is the difference between a 2-hour triage and a 2-minute one.
@@ -291,9 +358,9 @@ the same line in the report. That is the difference between a 2-hour triage and 
 | **Matched strings** | generic anchors (magic, arch, keywords) | specific (C2 URL, mutex, config) |
 | **Breadth** | one rule across many shared-lib loaders | one rule in one unusual process |
 | **Corroboration** | no other signal on the PID | malfind/VAD-inject + C2 + parent + persistence |
-| **Canary** | fired (trusted) | fired (trusted) — *never trust a hit from an UNTRUSTED scan* |
+| **Canary** | fired (trusted) | fired (trusted) - *never trust a hit from an UNTRUSTED scan* |
 
 **Bottom line:** anonymous executable memory + a specific malware-family string + at least one
 corroborating signal on the same PID = **true positive without a doubt**. File-backed + generic strings
-+ a verified-clean packaged/signed file = **benign** — but always *verified*, never *assumed*, and
++ a verified-clean packaged/signed file = **benign** - but always *verified*, never *assumed*, and
 always still surfaced with its context for the adjudicator and analyst.

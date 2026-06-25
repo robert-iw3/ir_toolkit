@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# IR Playbook 06 — Linux False-Positive Restore (rollback)
+# IR Playbook 06 - Linux False-Positive Restore (rollback)
 # Reverses the containment/eradication applied during an investigation that the
 # swarm later judged a FALSE POSITIVE:
 #   • restores the pre-containment firewall ruleset saved by 01_contain_host.sh

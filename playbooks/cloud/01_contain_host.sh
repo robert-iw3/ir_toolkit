@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# IR Cloud Playbook 01 — Cloud Host Containment (Network Isolation)
+# IR Cloud Playbook 01 - Cloud Host Containment (Network Isolation)
 #
 # Runs inside the n8n container. Isolates the affected cloud workload by:
 #   AWS:   Attaching a quarantine Security Group (deny-all except mgmt CIDR)
 #   Azure: Adding deny-all NSG inbound/outbound rules for the target IP
 #   GCP:   Creating deny-all ingress/egress VPC firewall rule for the target IP
 #
-# Idempotent — safe to re-run. Preserves management access.
+# Idempotent - safe to re-run. Preserves management access.
 # ==============================================================================
 set -uo pipefail
 
@@ -45,7 +45,7 @@ contain_aws() {
             --output text 2>/dev/null)
     fi
     [[ "${instance_id}" == "None" || -z "${instance_id}" ]] && \
-        { log "WARN: No EC2 instance found for ${TARGET} — skipping SG isolation"; emit "skipped" "instance_not_found"; return 0; }
+        { log "WARN: No EC2 instance found for ${TARGET} - skipping SG isolation"; emit "skipped" "instance_not_found"; return 0; }
 
     local vpc_id
     vpc_id=$(aws ec2 describe-instances \
@@ -68,7 +68,7 @@ contain_aws() {
         qsg_id=$(aws ec2 create-security-group \
             --region "${region}" \
             --group-name "${qsg_name}" \
-            --description "IR quarantine — deny-all except management (${INCIDENT_ID})" \
+            --description "IR quarantine - deny-all except management (${INCIDENT_ID})" \
             --vpc-id "${vpc_id}" \
             --query 'GroupId' --output text)
 
@@ -217,7 +217,7 @@ contain_gcp() {
         --priority=900 \
         --description="IR auto-isolation: ${INCIDENT_ID}" \
         --quiet 2>/dev/null || \
-    log "WARN: Ingress rule may already exist — continuing"
+    log "WARN: Ingress rule may already exist - continuing"
 
     # Deny egress to attacker IP
     gcloud compute firewall-rules create "${rule_out}" \
@@ -230,7 +230,7 @@ contain_gcp() {
         --priority=900 \
         --description="IR auto-isolation: ${INCIDENT_ID}" \
         --quiet 2>/dev/null || \
-    log "WARN: Egress rule may already exist — continuing"
+    log "WARN: Egress rule may already exist - continuing"
 
     log "CONTAINED: VPC firewall deny rules created for ${TARGET}"
     emit "success" "vpc_fw_rules_${rule_in}_${rule_out}"

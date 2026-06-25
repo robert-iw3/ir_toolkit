@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# IR Toolkit — Playbook Containment Runner
+# IR Toolkit - Playbook Containment Runner
 # Runs containment and eradication playbooks
 # against the affected endpoint or cloud workload.
 # Returns a JSON result summary to stdout.
@@ -11,9 +11,9 @@
 #     [MALICIOUS_HASHES] [MALICIOUS_PATHS] [C2_DOMAINS]
 #
 # Platform:
-#   "linux"   — SSH to TARGET, run playbooks/linux/*.sh
-#   "windows" — SSH → PowerShell to TARGET, run playbooks/windows/*.ps1
-#   "cloud"   — Run playbooks/cloud/*.sh LOCALLY (no SSH) using cloud CLIs
+#   "linux"   - SSH to TARGET, run playbooks/linux/*.sh
+#   "windows" - SSH → PowerShell to TARGET, run playbooks/windows/*.ps1
+#   "cloud"   - Run playbooks/cloud/*.sh LOCALLY (no SSH) using cloud CLIs
 #               Requires: IR_CLOUD_PROVIDER=aws|azure|gcp
 #               AWS extra: IR_AWS_REGION, IR_AWS_VPC_ID
 #               Azure extra: IR_AZURE_SUBSCRIPTION, IR_AZURE_RESOURCE_GROUP
@@ -72,7 +72,7 @@ emit_phase() {
     local detail="${3:-}"
     PHASE_RESULTS["${phase}"]="${status}"
     PHASES_ORDER+=("${phase}")
-    echo "[$(date -u +%H:%M:%SZ)] [${phase}] ${status}${detail:+ — ${detail}}" >&2
+    echo "[$(date -u +%H:%M:%SZ)] [${phase}] ${status}${detail:+ - ${detail}}" >&2
 }
 
 # ── Core SSH executor ─────────────────────────────────────────────────────────
@@ -137,7 +137,7 @@ run_windows_playbook() {
     fi
 }
 
-# ── Cloud playbook executor — runs scripts LOCALLY (no SSH) ──────────────────
+# ── Cloud playbook executor - runs scripts LOCALLY (no SSH) ──────────────────
 # Cloud containment scripts use the aws/az/gcloud CLIs inside this container.
 # The IR_CLOUD_PROVIDER, IR_TARGET, and provider-specific vars must be
 # exported in the environment before calling run_containment.sh cloud.

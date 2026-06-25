@@ -1,4 +1,4 @@
-# IR Toolkit — Offline Incident Response Workflow
+# IR Toolkit - Offline Incident Response Workflow
 
 Single-command incident response for **Windows**, **Linux**, and **Cloud** (AWS / Azure / GCP).
 
@@ -14,17 +14,17 @@ This file is the summary. The detailed, per-platform operating instructions live
 
 ## Executive summary
 
-This toolkit is purpose-built to **steer incident responders and forensic analysts to the right path** — not to make the call for them.
+This toolkit is purpose-built to **steer incident responders and forensic analysts to the right path** - not to make the call for them.
 
 Every collection phase casts the widest possible net. Raw findings from process memory, event logs / journald, file entropy, network connections, registry keys, Amcache/ShimCache execution history, and YARA signatures are gathered without pre-filtering. The subsequent analysis phases then refine that down to the handful of findings that have real investigative value:
 
-1. **Collection** — snapshot everything without judgment. Processes, drivers, network state, logs, memory, execution history, files, persistence. Nothing is excluded at collection time.
-2. **Detection** — score-based alerting across all collected data (LOLBin score ≥3, entropy ≥7.2, process hidden from standard API, execution from user-writable paths). Detection logic is never suppressed by publisher or vendor name — a Microsoft-signed binary in `AppData\Roaming` is still flagged.
-3. **Adjudication** — on-host context enrichment. Every raw finding is verified against its concrete artifact: signature chain, file existence, install path, binary hash. The verdict ladder is **False Positive → Likely False Positive → Indeterminate → Likely True Positive → True Positive**. A validly signed binary in a user-writable path earns **Indeterminate**, not clearance.
-4. **"Likely True Positive" is the actionable signal.** The adjudicator surfaces findings where the evidence pattern is anomalous but a final call requires analyst context. The toolkit tells you *what to look at* — the analyst confirms whether it is a threat.
-5. **Refinement loop** — findings flow detectors → adjudication → reports → eradication. The attack graph clusters TP-class findings into a renderable kill chain (12–15 nodes max). Evidence bundles are written for every TP-class finding.
+1. **Collection** - snapshot everything without judgment. Processes, drivers, network state, logs, memory, execution history, files, persistence. Nothing is excluded at collection time.
+2. **Detection** - score-based alerting across all collected data (LOLBin score ≥3, entropy ≥7.2, process hidden from standard API, execution from user-writable paths). Detection logic is never suppressed by publisher or vendor name - a Microsoft-signed binary in `AppData\Roaming` is still flagged.
+3. **Adjudication** - on-host context enrichment. Every raw finding is verified against its concrete artifact: signature chain, file existence, install path, binary hash. The verdict ladder is **False Positive → Likely False Positive → Indeterminate → Likely True Positive → True Positive**. A validly signed binary in a user-writable path earns **Indeterminate**, not clearance.
+4. **"Likely True Positive" is the actionable signal.** The adjudicator surfaces findings where the evidence pattern is anomalous but a final call requires analyst context. The toolkit tells you *what to look at* - the analyst confirms whether it is a threat.
+5. **Refinement loop** - findings flow detectors → adjudication → reports → eradication. The attack graph clusters TP-class findings into a renderable kill chain (12–15 nodes max). Evidence bundles are written for every TP-class finding.
 
-**Design principle for filtering:** only exclude things that are physically impossible threat vectors. Everything else surfaces with context and confidence; the analyst makes the call. **No network dependency during collection** — tools, YARA rules, and dependencies are staged to USB in advance; the target host is never contacted by the toolkit.
+**Design principle for filtering:** only exclude things that are physically impossible threat vectors. Everything else surfaces with context and confidence; the analyst makes the call. **No network dependency during collection** - tools, YARA rules, and dependencies are staged to USB in advance; the target host is never contacted by the toolkit.
 
 ---
 
@@ -39,27 +39,27 @@ collection  →  analysis  →  reporting  →  memory forensics  →  eradicati
 
 All three platforms follow this shape. Each platform's workflow doc has its own end-to-end
 diagram and specifics: [Windows](WORKFLOW-WINDOWS.md) · [Linux](WORKFLOW-LINUX.md) · [Cloud](WORKFLOW-CLOUD.md).
-Cross-cutting: [WORKFLOW-YARA.md](WORKFLOW-YARA.md) — how memory YARA hits are enriched (region /
+Cross-cutting: [WORKFLOW-YARA.md](WORKFLOW-YARA.md) - how memory YARA hits are enriched (region /
 perms / backing file / matched strings) and the logic, with examples, for calling a finding benign vs
 a true positive without a doubt.
 
-> ### ⚠️ Capture and analyze memory — it is imperative, not optional
+> ### ⚠️ Capture and analyze memory - it is imperative, not optional
 >
 > For any serious investigation, **capture volatile memory first and analyze it.** Memory is the
 > only place that holds evidence which *never touches disk*:
-> - **Fileless / in-memory-only malware** — reflective loading, `memfd_create`, packed/decrypted-
+> - **Fileless / in-memory-only malware** - reflective loading, `memfd_create`, packed/decrypted-
 >   in-RAM payloads. A disk-and-logs-only investigation **does not see these at all.**
-> - **Process injection & live C2** — injected code regions, established attacker connections,
+> - **Process injection & live C2** - injected code regions, established attacker connections,
 >   and the decoded commands behind obfuscated one-liners exist only in RAM.
-> - **Rootkit ground truth** — kernel rootkits actively hide processes, modules, and hooks from
+> - **Rootkit ground truth** - kernel rootkits actively hide processes, modules, and hooks from
 >   the *live* OS; raw memory exposes them by cross-referencing kernel structures (DKOM).
-> - **Cleartext secrets** — credentials, keys, and tokens that are encrypted on disk sit
+> - **Cleartext secrets** - credentials, keys, and tokens that are encrypted on disk sit
 >   decrypted in memory.
-> - **Anti-forensics resilience** — a present attacker can wipe logs and tamper disk artifacts;
+> - **Anti-forensics resilience** - a present attacker can wipe logs and tamper disk artifacts;
 >   the memory image reflects the machine's true state at the instant of capture.
 >
 > RAM is the **most volatile** evidence (RFC 3227 order of volatility): once the host is rebooted
-> or powered off, it is **gone forever** — acquisition is a one-shot. Skipping memory means a
+> or powered off, it is **gone forever** - acquisition is a one-shot. Skipping memory means a
 > forensic analysis that is incomplete by construction and can be actively deceived. Memory
 > capture + analysis is wired into every platform here (Windows: MemProcFS; Linux: Volatility 3).
 
@@ -70,16 +70,16 @@ a true positive without a doubt.
 Every platform writes per-host evidence to `reports/<HOSTNAME>/`. The report generator
 (`playbooks/reporting/generate_reports.{py,ps1}`) reads the per-host folder and emits:
 
-- **`Incident_Report.md`** — severity, ATT&CK chain, true-positive findings, adjudication funnel, remediation, IOC appendix.
-- **`Attack_Graph.md`** — Mermaid graph reconstructing the chain of events from the findings (each TP finding a node, ordered along the kill chain, coloured by tactic, C2 branching off). Built from whatever findings exist, so different incidents render different graphs.
-- **`Retrospective.md`** — objective post-incident review with kill-chain coverage and gap analysis.
-- **`Timeline.md`** — chronological events, labelling **activity** time vs **detection** time.
-- **`IOCs.json`** — C2 endpoints, file hashes, tools, ATT&CK techniques (emitted in analysis, consumed by eradication).
-- **`Principals.json`** — implicated accounts for credential revocation.
-- **`_clock.json`** — host timezone / UTC offset / NTP-sync / clock-skew (timeline normalization).
-- **`_custody_*.json` + `_custody_log.jsonl`** — chain-of-custody seal of the sha256 manifest (operator identity + GPG/OpenSSL/HMAC signature; `evidence_custody.py --verify` detects tamper).
+- **`Incident_Report.md`** - severity, ATT&CK chain, true-positive findings, adjudication funnel, remediation, IOC appendix.
+- **`Attack_Graph.md`** - Mermaid graph reconstructing the chain of events from the findings (each TP finding a node, ordered along the kill chain, coloured by tactic, C2 branching off). Built from whatever findings exist, so different incidents render different graphs.
+- **`Retrospective.md`** - objective post-incident review with kill-chain coverage and gap analysis.
+- **`Timeline.md`** - chronological events, labelling **activity** time vs **detection** time.
+- **`IOCs.json`** - C2 endpoints, file hashes, tools, ATT&CK techniques (emitted in analysis, consumed by eradication).
+- **`Principals.json`** - implicated accounts for credential revocation.
+- **`_clock.json`** - host timezone / UTC offset / NTP-sync / clock-skew (timeline normalization).
+- **`_custody_*.json` + `_custody_log.jsonl`** - chain-of-custody seal of the sha256 manifest (operator identity + GPG/OpenSSL/HMAC signature; `evidence_custody.py --verify` detects tamper).
 
-The optional **AI incident review** (`llm_incident_review.py`) writes `LLM_Incident_Review.{md,json}` — advisory only (`source=LLM`), redaction-first, configurable frontier/local/provider-native model (see [WORKFLOW-CLOUD.md](WORKFLOW-CLOUD.md)).
+The optional **AI incident review** (`llm_incident_review.py`) writes `LLM_Incident_Review.{md,json}` - advisory only (`source=LLM`), redaction-first, configurable frontier/local/provider-native model (see [WORKFLOW-CLOUD.md](WORKFLOW-CLOUD.md)).
 
 `IOCs.json` is emitted in the **analysis** stage so eradication's C2 re-block never depends on
 reports being generated. Every orchestrator writes a uniform `_status.json`
@@ -93,7 +93,7 @@ finds indicators shared by more than one host and emits `Campaign_Report.md` + `
 ## AI incident review (optional, advisory)
 
 `playbooks/reporting/llm_incident_review.py` runs an LLM over a `reports/<host>/` collection and
-writes `LLM_Incident_Review.{md,json}` — a triage summary, likely attack narrative, analyst pivots,
+writes `LLM_Incident_Review.{md,json}` - a triage summary, likely attack narrative, analyst pivots,
 and Indeterminate-resolution suggestions. **Advisory only**: it never changes adjudicated verdicts;
 output is flagged `source=LLM`.
 
@@ -105,7 +105,7 @@ Configurable, no SDK dependency (stdlib-only, so it stages to an air-gapped anal
 ANTHROPIC_API_KEY=… python3 playbooks/reporting/llm_incident_review.py \
     --host-folder reports/<host> --provider anthropic --model claude-sonnet-4-6
 
-# Local / offline (Ollama, vLLM, LM Studio, llama.cpp, OpenRouter, …) — any OpenAI-compatible API
+# Local / offline (Ollama, vLLM, LM Studio, llama.cpp, OpenRouter, …) - any OpenAI-compatible API
 python3 playbooks/reporting/llm_incident_review.py --host-folder reports/<host> \
     --provider openai-compatible --base-url http://localhost:11434/v1 --model llama3.1 --no-redact
 ```
@@ -113,7 +113,7 @@ python3 playbooks/reporting/llm_incident_review.py --host-folder reports/<host> 
 **Guardrails:** internal identifiers (private IPs, usernames, hostnames, emails) are redacted to
 placeholders before any frontier call (reversible map kept locally, never sent); evidence is wrapped
 in untrusted-data delimiters with an anti-prompt-injection system prompt; output enums are validated.
-Redaction is on by default — `--no-redact` only for a local model you trust.
+Redaction is on by default - `--no-redact` only for a local model you trust.
 
 ---
 
@@ -123,14 +123,14 @@ Run on an internet-connected machine before deploying to an isolated host. Both 
 a sha256 `tools/STAGED_MANIFEST.json`. The core workflow runs offline without any of these;
 they only enable optional depth (memory capture, YARA, extended persistence).
 
-- **Windows** — `Build-OfflineToolkit.ps1 [-IncludeMemory] [-IncludeYaraRules] [-IncludeMemProcFS] [-IncludeVolatility] [-StageSymbols]`
+- **Windows** - `Build-OfflineToolkit.ps1 [-IncludeMemory] [-IncludeYaraRules] [-IncludeMemProcFS] [-IncludeVolatility] [-StageSymbols]`
   Memory capture: `go-winpmem` (AFF4) → analyst-side analysis via **MemProcFS + Python 3.12 embeddable** (AFF4 native, no driver install) or **Volatility 3** (raw/dmp). `Build-OfflineToolkit.ps1 -IncludeMemProcFS` stages MemProcFS, Python 3.12, sqlite3, and Dokany MSI into `tools/`.
 
   Full recommended staging for a Windows deployment:
   ```powershell
   .\Build-OfflineToolkit.ps1 -IncludeMemory -IncludeYaraRules -IncludeMemProcFS -IncludeVolatility
   ```
-- **Linux** — `Build-OfflineToolkit-Linux.sh [--include-memory] [--include-cloud] [--stage-symbols] [--check-only]`
+- **Linux** - `Build-OfflineToolkit-Linux.sh [--include-memory] [--include-cloud] [--stage-symbols] [--check-only]`
   (memory analysis: **Volatility 3** wheels + `dwarf2json` + kernel ISF, vendored for offline use)
 
 See each platform's workflow doc and [DEPENDENCIES.md](DEPENDENCIES.md) for the full dependency

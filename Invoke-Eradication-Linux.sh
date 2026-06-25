@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# Invoke-Eradication-Linux.sh — adjudication-driven eradication orchestrator.
+# Invoke-Eradication-Linux.sh - adjudication-driven eradication orchestrator.
 #
 # Closes the IR loop: reads the Adjudication_<stamp>.json produced by
 # Invoke-IRCollection-Linux.sh, extracts indicators from the true-positive-class
@@ -10,7 +10,7 @@
 #                           ├─ persistence file paths        ─→ 03_eradicate_persistence.sh
 #                           └─ C2 IPs / domains              ─→ 04_block_c2.sh
 #
-# DRY-RUN by default — prints the plan and the derived indicators, changes
+# DRY-RUN by default - prints the plan and the derived indicators, changes
 # nothing. Pass --apply to execute. Writes Eradication_<stamp>.{json,md}.
 #
 # Usage:
@@ -49,7 +49,7 @@ INCIDENT_ID="$(basename "$HOST_FOLDER")_${RUN_STAMP}"
 # --- Extract indicators from the true-positive-class findings ------------------
 # SECURITY: finding content (process names, paths, C2 hosts) is attacker-influenceable, so it is
 # NEVER shell-eval'd. Python prints 7 newline-delimited values; bash `read`s them as literal
-# strings — no eval. Each value is stripped of newlines/commas so it stays one safe data line.
+# strings - no eval. Each value is stripped of newlines/commas so it stays one safe data line.
 {
     read -r PIDS; read -r PROCS; read -r HASHES
     read -r PATHS; read -r C2_IPS; read -r C2_DOMAINS; read -r TP_COUNT
@@ -176,7 +176,7 @@ json.dump(rep, open(out, "w"), indent=2)
 PYR
 
 {
-    echo "# Eradication report — ${INCIDENT_ID}"
+    echo "# Eradication report - ${INCIDENT_ID}"
     echo
     echo "| | |"; echo "|---|---|"
     echo "| Source | \`$(basename "$ADJ")\` |"
@@ -192,10 +192,10 @@ PYR
     echo "- **C2 IPs:** ${C2_IPS:-none}"
     echo "- **C2 domains:** ${C2_DOMAINS:-none}"
     echo
-    [[ $APPLY -eq 0 ]] && echo "> DRY-RUN — no changes made. Re-run with \`--apply\` to execute. Rollback journal enables \`06_restore.sh\` if a verdict is later overturned."
+    [[ $APPLY -eq 0 ]] && echo "> DRY-RUN - no changes made. Re-run with \`--apply\` to execute. Rollback journal enables \`06_restore.sh\` if a verdict is later overturned."
 } > "$REPORT_MD"
 
 echo
 echo "Report: ${REPORT_MD}"
 echo "        ${REPORT_JSON}"
-[[ $APPLY -eq 0 ]] && echo "DRY-RUN complete — nothing changed. Add --apply to execute."
+[[ $APPLY -eq 0 ]] && echo "DRY-RUN complete - nothing changed. Add --apply to execute."

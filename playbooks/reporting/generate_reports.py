@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-generate_reports.py — automated incident reporting + attack-graph correlation.
+generate_reports.py - automated incident reporting + attack-graph correlation.
 
 Consumes a completed per-host collection folder (the folder produced by
 Invoke-IRCollection.ps1 / Invoke-IRCollection-Linux.sh) and emits, with no
@@ -11,7 +11,7 @@ human authoring:
     Attack_Graph.md      Mermaid attack graph correlating the whole intrusion
                          from the adjudicated findings
     IOCs.json            machine-readable IOC bundle (C2 endpoints, hashes,
-                         tools, ATT&CK techniques) — consumed by
+                         tools, ATT&CK techniques) - consumed by
                          Invoke-Eradication.ps1 to keep known-bad blocked after
                          the firewall is otherwise restored to known-good.
 
@@ -219,12 +219,118 @@ def correlate(findings, remote_findings):
     }
 
 
+# ----------------------------------------------------------- YARA hit pivot
+# Memory-finding types that are inherently suspicious and PID-bearing. A YARA hit converging
+# with ANY one of these (or another distinct signal) on the same PID is a high-confidence
+# compromise pattern - mirrors the Linux STRONG_TYPES gate. Pivot ELEVATES only, never suppresses.
+WIN_MEM_YARA_TYPES = ("YARA Match (Memory)", "Injected Code (memory YARA)")
+WIN_MEM_STRONG_TYPES = frozenset({
+    "YARA Match (Memory)", "Injected Code (memory YARA)", "Injected Memory Region",
+    "Shellcode Thread (Memory)", "Hidden Process (Memory)", "Known Offensive Tool (Memory)",
+    "Process Path Spoofing (Memory)",
+})
+_MEM_PID_RE = re.compile(r"\bPID (\d+)")
+_MEM_PROC_RE = re.compile(r"\bPID \d+ \(([^)]+)\)")
+_SEV_RANK = {"Critical": 0, "High": 1, "Medium": 2, "Low": 3}
+# Generic technique/hunting rules: a match is suggestive (LOLBin/heuristic), NOT a named-malware
+# confirmation. A rule that is none of these is treated as a named malware/APT-family signature
+# (REDLEAVES_*, WiltedTulip_*, PlugX_*, CobaltStrike_*) - true-positive-grade on its own.
+_GENERIC_RULE_RE = re.compile(
+    r"(?i)^(LOLBin|Hunting|Suspicious|Generic|Anomaly|PUA|Indicator|Heuristic|Heur|Method|"
+    r"SUSP|Tool|Multi|Capability|Susp)[_.]")
+# Co-occurring memory signals that are themselves high-confidence injection evidence (NOT
+# path-spoofing, which is FP-prone on device-path notation and must not by itself confirm a hit).
+_INJECTION_CLASS = frozenset({
+    "Injected Memory Region", "Shellcode Thread (Memory)",
+    "Known Offensive Tool (Memory)", "Hidden Process (Memory)",
+})
+
+
+def _mem_pid_of(f):
+    m = _MEM_PID_RE.search(get(f, "Target") + " " + get(f, "Details"))
+    return m.group(1) if m else None
+
+
+def _yara_rule_of(f):
+    rm = re.search(r"Rule:\s*([^|]+?)\s*\|", get(f, "Details")) or \
+         re.search(r"Rule:\s*(.+)$", get(f, "Details"))
+    return rm.group(1).strip() if rm else ""
+
+
+def _rule_is_named_threat(rule):
+    """True for a named malware/APT-family signature; False for a generic technique/hunting rule."""
+    return bool(rule) and not _GENERIC_RULE_RE.match(rule)
+
+
+def correlate_yara_pivots(findings):
+    """Pivot on each YARA hit and rank by TRUE-POSITIVE confidence so the real implant leads and
+    generic/noisy hits sink (never suppressed). Confidence is driven by YARA-hit QUALITY, not raw
+    type-convergence: a named malware/APT-family signature, multiple distinct rules on one PID, an
+    injected/unbacked-memory hit, or convergence with injection-class evidence each raise it. A lone
+    generic rule (even alongside a path-spoof, which is FP-prone) stays 'investigate'. Returns pivot
+    dicts ordered true-positive-class first."""
+    by_pid = {}
+    for f in findings:
+        pid = _mem_pid_of(f)
+        if pid:
+            by_pid.setdefault(pid, []).append(f)
+
+    pivots = []
+    for pid, group in by_pid.items():
+        yara = [f for f in group if get(f, "Type") in WIN_MEM_YARA_TYPES]
+        if not yara:
+            continue                                    # only pivot on PIDs that have a YARA hit
+        types = {get(f, "Type") for f in group}
+        proc = next((_MEM_PROC_RE.search(get(f, "Target")).group(1)
+                     for f in group if _MEM_PROC_RE.search(get(f, "Target"))), "")
+        rules = []
+        for f in yara:
+            r = _yara_rule_of(f)
+            if r and r not in rules:
+                rules.append(r)
+        named = [r for r in rules if _rule_is_named_threat(r)]
+        injected = any(get(f, "Type") == "Injected Code (memory YARA)"
+                       or "anon-exec" in get(f, "Details") for f in yara)
+        inj_signals = sorted((types & _INJECTION_CLASS))
+        other_strong = sorted((types & WIN_MEM_STRONG_TYPES) - set(WIN_MEM_YARA_TYPES) - _INJECTION_CLASS)
+        # converging context = the non-YARA signals on this PID (what the hit pivots to)
+        signals = [(get(f, "Type"), get(f, "Details")) for f in group
+                   if get(f, "Type") not in WIN_MEM_YARA_TYPES]
+
+        # confidence score - what makes this a likely TRUE positive
+        score, reasons = 0, []
+        if named:
+            score += 3; reasons.append(f"named malware/APT signature ({', '.join(named)})")
+        if len(rules) >= 2:
+            score += 2; reasons.append(f"{len(rules)} distinct rules corroborate on one PID")
+        if injected:
+            score += 3; reasons.append("hit lands in injected/unbacked executable memory")
+        if inj_signals:
+            score += 3; reasons.append(f"co-occurs with injection evidence ({', '.join(inj_signals)})")
+        if other_strong:
+            score += 1; reasons.append(f"co-occurs with {', '.join(other_strong)}")
+        tp = score >= 3                                 # true-positive-class threshold
+        sev = min((get(f, "Severity", default="High") for f in group),
+                  key=lambda s: _SEV_RANK.get(s, 1))
+        pivots.append({
+            "pid": pid, "proc": proc, "rules": rules, "named": named, "types": sorted(types),
+            "injected": injected, "signals": signals, "severity": sev, "score": score,
+            "reasons": reasons, "true_positive": tp,
+            # legacy key kept for any existing consumer: TP-class == the elevated pivot
+            "correlated": tp, "hit_findings": yara,
+        })
+    # true-positive-class first, then by confidence score, then by severity
+    pivots.sort(key=lambda p: (0 if p["true_positive"] else 1, -p["score"],
+                               _SEV_RANK.get(p["severity"], 1)))
+    return pivots
+
+
 def severity(model):
     if any(not is_sanctioned_relay(r["host"]) for r in model["relays"]) or model["rats"]:
-        return "HIGH — confirmed unauthorized remote access"
+        return "HIGH - confirmed unauthorized remote access"
     if model["tp_count"]:
-        return "MEDIUM — true-positive-class findings require review"
-    return "LOW — no true-positive-class findings"
+        return "MEDIUM - true-positive-class findings require review"
+    return "LOW - no true-positive-class findings"
 
 
 # ---------------------------------------------------------------------- IOCs
@@ -253,7 +359,7 @@ def build_iocs(model, host, incident):
 def md_incident(model, host, incident, analyst, when):
     L = []
     a = L.append
-    a(f"# Incident Response Report — {host}")
+    a(f"# Incident Response Report - {host}")
     a("")
     a("| | |")
     a("|---|---|")
@@ -297,7 +403,7 @@ def md_incident(model, host, incident, analyst, when):
     a("")
     if model["techniques"]:
         for tech, label in model["techniques"].items():
-            lab = f" — {label}" if label else ""
+            lab = f" - {label}" if label else ""
             a(f"- **{tech}**{lab}")
     else:
         a("- No ATT&CK techniques were associated with the findings.")
@@ -364,7 +470,7 @@ def md_incident(model, host, incident, analyst, when):
               f"{y.get('rules_compiled', '?')} (Linux-applicable, compiled)  ·  "
               f"**duration:** {y.get('duration_seconds', '?')}s")
             badge = "✅ trusted (ELF self-test canary matched)" if trusted else \
-                    "❌ **UNTRUSTED** — self-test canary never matched / timed out; 0 matches is NOT clean"
+                    "❌ **UNTRUSTED** - self-test canary never matched / timed out; 0 matches is NOT clean"
             a(f"- **Scan integrity:** {badge}")
             n = y.get("match_count", 0)
             if n:
@@ -373,19 +479,19 @@ def md_incident(model, host, incident, analyst, when):
                     where = (f"PID {mt['pid']} ({mt.get('process', '')})" if mt.get("pid")
                              else f"offset {mt.get('offset', '?')}")
                     # location disambiguates injected code (anon/exec) from a rule grazing a loaded
-                    # library (file-backed) — shown so FP vs TP is visible at a glance
+                    # library (file-backed) - shown so FP vs TP is visible at a glance
                     region, perms, path = mt.get("region", ""), mt.get("perms", ""), mt.get("path", "")
                     ctx = ""
                     if region == "anon" and "x" in perms:
-                        ctx = f" — ⚠️ **anonymous executable** ({perms}, injected/unbacked)"
+                        ctx = f" - ⚠️ **anonymous executable** ({perms}, injected/unbacked)"
                     elif region == "file":
-                        ctx = f" — file-backed {perms} `{path or '?'}` (verify hash/package)"
+                        ctx = f" - file-backed {perms} `{path or '?'}` (verify hash/package)"
                     elif region:
-                        ctx = f" — {region} {perms}"
-                    a(f"  - `{mt.get('rule', '?')}` — {where}{ctx} "
+                        ctx = f" - {region} {perms}"
+                    a(f"  - `{mt.get('rule', '?')}` - {where}{ctx} "
                       f"[{mt.get('severity', 'High')}]")
             else:
-                a("- **YARA matches:** 0" + ("" if trusted else " *(unreliable — see integrity above)*"))
+                a("- **YARA matches:** 0" + ("" if trusted else " *(unreliable - see integrity above)*"))
         else:
             a("- YARA: not run for this image.")
         a("")
@@ -519,7 +625,7 @@ def md_attack_graph(model, host, incident):
     L = []
     a = L.append
     sev = severity(model)
-    a(f"# {host} — Attack Graph")
+    a(f"# {host} - Attack Graph")
     a("")
     a(f"**Incident:** {incident} · **Host:** {host} · **Severity:** {sev}")
     a("")
@@ -586,7 +692,7 @@ def md_attack_graph(model, host, incident):
     elif c2_anchor == "H":
         c2_anchor = prev          # no explicit C2 event -> hang relays off the last event
 
-    # C2 endpoints (relays / cloud beacons) — the egress focus, emphasized.
+    # C2 endpoints (relays / cloud beacons) - the egress focus, emphasized.
     for cidx, r in enumerate(model["relays"]):
         tag = "sanctioned" if is_sanctioned_relay(r["host"]) else "adversary-operated"
         port = f" : {r['port']}/TCP" if r.get("port") else ""
@@ -603,7 +709,7 @@ def md_attack_graph(model, host, incident):
         a(f"## RAT → {custom_relay['host']} (the key path)")
         a("")
         a(f"The remote-access client beacons to **`{custom_relay['host']}:"
-          f"{custom_relay['port']}`** — a custom relay rather than a vendor-sanctioned "
+          f"{custom_relay['port']}`** - a custom relay rather than a vendor-sanctioned "
           f"endpoint, which is what proves this is an **adversary-operated** deployment. "
           f"Block it at egress before reconnecting the host.")
         a("")
@@ -652,7 +758,7 @@ def md_retrospective(model, host_folder, host, incident):
     indet = model["funnel"].get("Indeterminate", 0)
     total = model["total"] or 1
 
-    a(f"# {host} — Incident Retrospective & Gap Analysis")
+    a(f"# {host} - Incident Retrospective & Gap Analysis")
     a("")
     a(f"**Incident:** {incident} · **Host:** {host}")
     a("")
@@ -680,7 +786,7 @@ def md_retrospective(model, host_folder, host, incident):
         if hit:
             a(f"| {tactic} | {', '.join(hit)} | covered |")
         else:
-            a(f"| {tactic} | — | no evidence collected |")
+            a(f"| {tactic} | - | no evidence collected |")
             gaps.append(tactic)
     a("")
 
@@ -688,7 +794,7 @@ def md_retrospective(model, host_folder, host, incident):
     a("")
     if "Initial Access" in gaps:
         a("- **Initial-access vector not captured.** No T1566/T1190/T1078 evidence "
-          "in the collection — the entry point (lure command, exploited service, or "
+          "in the collection - the entry point (lure command, exploited service, or "
           "stolen credential) is unconfirmed. Review browser history, RunMRU, and "
           "auth logs to close this.")
     if "Credential Access" in gaps and model["relays"]:
@@ -718,7 +824,7 @@ def md_retrospective(model, host_folder, host, incident):
       f"({round(100*fp/total)}%), keeping analyst focus on the actionable core.")
     if any(get(f, "SigStatus") == "Valid" for f in model["tp"]):
         a("- A **validly-signed** binary was still escalated to true-positive class "
-          "— signature alone did not clear it (the intended override).")
+          "- signature alone did not clear it (the intended override).")
     if model["relays"]:
         a("- C2 relay extracted automatically into machine-readable IOCs for egress "
           "blocking and eradication hand-off.")
@@ -770,10 +876,10 @@ def md_timeline(findings, host, incident):
                        get(f, "Verdict", default="-")))
     events.sort(key=lambda e: e[0])
 
-    L = [f"# {host} — Event Timeline", "",
+    L = [f"# {host} - Event Timeline", "",
          f"**Incident:** {incident} · **Host:** {host}", ""]
     if not events:
-        L += ["No timestamped events in the findings (timeline could not be built — a "
+        L += ["No timestamped events in the findings (timeline could not be built - a "
               "collection gap; see `Retrospective.md`).", ""]
         return "\n".join(L)
     L += ["Times are **activity** (when the adversary acted, from process/event times) where "
@@ -785,9 +891,67 @@ def md_timeline(findings, host, incident):
     return "\n".join(L)
 
 
+def md_yara_pivot(pivots, host, incident, when):
+    """Standalone deep-dive on the memory YARA hits, ranked by TRUE-POSITIVE confidence so the real
+    implant leads and generic/noisy hits sink. For each true positive this is also the index into
+    the per-PID memory enrichment (handles/modules/network/lineage/carved region) that scopes a
+    complete eradication. Separate from the Incident_Report so it stays a focused hunt work sheet."""
+    L = []
+    a = L.append
+    tps = [p for p in pivots if p["true_positive"]]
+    a(f"# Memory YARA - Hit Pivot & Eradication Scope - {host}")
+    a("")
+    a(f"**Incident:** {incident} · **Host:** {host} · **Generated:** {when}")
+    a("")
+    a(f"{len(pivots)} process(es) with a memory YARA hit · "
+      f"**{len(tps)} true-positive-class** (review/eradicate first).")
+    a("")
+    a("> Ranked by **true-positive confidence** from hit quality - a named malware/APT-family "
+      "signature, multiple distinct rules on one PID, or a hit in injected/unbacked memory each "
+      "raise it; a lone generic/LOLBin rule (even alongside a path-spoof, which is FP-prone) stays "
+      "*investigate*. **Nothing is suppressed** - lower-confidence hits are ranked below, not hidden.")
+    a("")
+    a("---")
+    a("")
+    for p in pivots:
+        tag = " - ⚠️ **Likely True Positive**" if p["true_positive"] else " - _investigate_"
+        title = f"PID {p['pid']}" + (f" ({p['proc']})" if p["proc"] else "")
+        a(f"## {title}{tag}")
+        a("")
+        a(f"- **Confidence:** {p['score']} ({'true-positive-class' if p['true_positive'] else 'investigate'})"
+          f"  ·  **Severity:** {p['severity']}  ·  **YARA rules:** {len(p['rules'])}")
+        a(f"- **Rules matched:** {', '.join(f'`{r}`' for r in p['rules']) or '(unparsed)'}"
+          + (f"  ·  **named:** {', '.join(f'`{r}`' for r in p['named'])}" if p["named"] else ""))
+        a("")
+        if p["reasons"]:
+            a(f"**Why true-positive-class:** {'; '.join(p['reasons'])}." if p["true_positive"]
+              else f"**Signal:** {'; '.join(p['reasons'])} - not yet confirmed.")
+            a("")
+        if p["signals"]:
+            a("**Other memory signals on this PID:**")
+            a("")
+            a("| Signal | Detail |")
+            a("|---|---|")
+            for typ, det in p["signals"]:
+                a(f"| {typ} | {det.replace('|', '/')} |")
+            a("")
+        if p["true_positive"]:
+            a("**Eradication scope - enrich this PID:** pull handles (dropped files, registry "
+              "persistence, mutexes, named pipes), loaded/injected modules, network endpoints (C2 "
+              "to block), process lineage, and carve the matched region for offline C2-config "
+              "extraction. See `Memory_Enrichment_*.json` for this PID's full footprint.")
+            a("")
+        a("---")
+        a("")
+    a("_Hit-context detail (region / perms / backing path / matched strings) is in "
+      "`Memory_Findings_*.json`; per-PID clustering is also summarized in `Incident_Report.md` §5._")
+    a("")
+    return "\n".join(L)
+
+
 # --------------------------------------------------------------------- main
 def detect_platform(host_folder):
-    """'linux' | 'windows' — so the report references the right eradication tooling. The custody
+    """'linux' | 'windows' - so the report references the right eradication tooling. The custody
     record carries an authoritative `platform` field (both collectors write it); fall back to
     platform-specific collection artifacts."""
     cust = newest(host_folder, "_custody_*.json")
@@ -827,6 +991,7 @@ def load_model(host_folder):
     yres = newest(host_folder, "_yara_results_*.json")        # dedicated YARA scan results
     model["yara"] = (load_json(yres) or [None])[0] if yres else None
     model["has_memory"] = bool(newest(host_folder, "Memory_Findings_*.json"))
+    model["yara_pivots"] = correlate_yara_pivots(findings)
     return model, host, findings
 
 
@@ -866,12 +1031,30 @@ def generate(host_folder, incident_id=None, analyst="IR Automation"):
     with open(iocs_json, "w", encoding="utf-8") as fh:
         json.dump(build_iocs(model, host, incident), fh, indent=2)
 
+    # Separate report - only when the image had memory YARA hits to pivot on.
+    yara_pivot_md = None
+    yara_pivot_tp = None
+    if model["yara_pivots"]:
+        yara_pivot_md = os.path.join(host_folder, "YARA_Pivot_Report.md")
+        with open(yara_pivot_md, "w", encoding="utf-8") as fh:
+            fh.write(md_yara_pivot(model["yara_pivots"], host, incident, when))
+        # Machine-readable list of true-positive PIDs so the workflow can auto-run the per-PID
+        # memory enrichment (eradication scope) against the image. Empty file is not written.
+        tps = [p for p in model["yara_pivots"] if p["true_positive"]]
+        if tps:
+            yara_pivot_tp = os.path.join(host_folder, "YARA_Pivot_TP.json")
+            with open(yara_pivot_tp, "w", encoding="utf-8") as fh:
+                json.dump([{"pid": int(p["pid"]), "proc": p["proc"], "score": p["score"],
+                            "rules": p["rules"]} for p in tps], fh, indent=2)
+
     return {
         "incident_report": incident_md,
         "attack_graph": graph_md,
         "retrospective": retro_md,
         "timeline": timeline_md,
         "iocs": iocs_json,
+        "yara_pivot": yara_pivot_md,
+        "yara_pivot_tp": yara_pivot_tp,
         "total": model["total"],
         "tp_count": model["tp_count"],
         "relays": model["relays"],
@@ -894,6 +1077,8 @@ def main(argv=None):
         print(f"[+] Retrospective.md")
         print(f"[+] Timeline.md")
         print(f"[+] IOCs.json  ({len(result['relays'])} C2 relay(s))")
+        if result.get("yara_pivot"):
+            print(f"[+] YARA_Pivot_Report.md")
     return 0
 
 

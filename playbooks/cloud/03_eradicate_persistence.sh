@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# IR Cloud Playbook 03 — Cloud Persistence Eradication
+# IR Cloud Playbook 03 - Cloud Persistence Eradication
 #
 # Removes adversarial cloud persistence mechanisms:
 #   AWS:   Remove malicious IAM user/role/policy, revoke sessions,
@@ -10,7 +10,7 @@
 #   GCP:   Remove malicious service account keys, Cloud Function triggers,
 #          delete malicious IAM bindings
 #
-# Conservative by default — requires explicit IR_MALICIOUS_* env vars.
+# Conservative by default - requires explicit IR_MALICIOUS_* env vars.
 # ==============================================================================
 set -uo pipefail
 
@@ -40,7 +40,7 @@ eradicate_aws() {
         entity="${entity// /}"
         [[ -z "${entity}" ]] && continue
 
-        # Try as IAM user — revoke active sessions by rotating credentials
+        # Try as IAM user - revoke active sessions by rotating credentials
         if aws iam get-user --user-name "${entity}" --output none 2>/dev/null; then
             log "Revoking IAM user sessions for ${entity}..."
             # Deactivate all access keys
@@ -58,7 +58,7 @@ eradicate_aws() {
                 removed=1
             done
 
-        # Try as IAM role — attach deny-all policy
+        # Try as IAM role - attach deny-all policy
         elif aws iam get-role --role-name "${entity}" --output none 2>/dev/null; then
             local policy_arn="arn:aws:iam::aws:policy/AWSDenyAll"
             if [[ "${DRY_RUN}" == "1" ]]; then
@@ -82,7 +82,7 @@ eradicate_aws() {
             if [[ "${DRY_RUN}" == "1" ]]; then
                 log "[DRY-RUN] would back up + delete Lambda function ${fn_name}"; removed=1
             else
-                # Lambda delete is IRREVERSIBLE — back up config + code location first for recreate.
+                # Lambda delete is IRREVERSIBLE - back up config + code location first for recreate.
                 local bak="${ARTIFACT_DIR}/lambda_${fn_name//[^A-Za-z0-9]/_}.json"
                 aws lambda get-function --region "${region}" --function-name "${fn_name}" \
                     --output json > "${bak}" 2>/dev/null \

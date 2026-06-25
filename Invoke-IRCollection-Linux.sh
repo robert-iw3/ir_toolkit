@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# Invoke-IRCollection-Linux.sh — offline IR collection orchestrator (Linux).
+# Invoke-IRCollection-Linux.sh - offline IR collection orchestrator (Linux).
 #
 # Single-command, read-only collection + enrichment. Runs every phase off one
 # invocation and drops ALL artifacts into a folder named after the hostname,
@@ -96,7 +96,7 @@ run_phase() {  # name, description, command...
 log "==================================================="
 log " IR COLLECTION | host=${HOSTNAME_S} | incident=${INCIDENT_ID}"
 log " output -> ${OUT_DIR}"
-[[ "$(id -u)" -ne 0 ]] && log " NOTE: not root — some artifacts will be limited."
+[[ "$(id -u)" -ne 0 ]] && log " NOTE: not root - some artifacts will be limited."
 log "==================================================="
 
 # Capture host clock/timezone context up front (for timeline normalization + skew).
@@ -176,10 +176,10 @@ if [[ $SKIP_FORENSICS -eq 0 ]]; then
             elif "$AVML" "${AVML_ARGS[@]}" "$MEM_PATH" >>"$RUN_LOG" 2>&1; then
                 SZ="$(stat -c %s "$MEM_PATH" 2>/dev/null || echo 0)"
                 if [[ "$SZ" -ge "$MIN" && "$SZ" -gt 0 ]]; then
-                    log "  Memory image -> ${MEM_PATH} ($((SZ/1024/1024)) MiB$([[ $MEM_COMPRESS -eq 1 ]] && echo ', snappy — avml-convert to analyze'))"; ir_record "Memory" success
+                    log "  Memory image -> ${MEM_PATH} ($((SZ/1024/1024)) MiB$([[ $MEM_COMPRESS -eq 1 ]] && echo ', snappy - avml-convert to analyze'))"; ir_record "Memory" success
                 else
                     mv -f "$MEM_PATH" "$(dirname "$MEM_PATH")/INVALID_$(basename "$MEM_PATH")" 2>/dev/null || true
-                    log "  Memory capture INVALID (size $((SZ/1024/1024)) MiB too small) — renamed INVALID_."; ir_record "Memory" failed
+                    log "  Memory capture INVALID (size $((SZ/1024/1024)) MiB too small) - renamed INVALID_."; ir_record "Memory" failed
                 fi
             else
                 log "  avml capture returned non-zero (permissions/disk/kernel?). See runtime log."; ir_record "Memory" failed
@@ -235,7 +235,7 @@ PYMERGE
         run_phase "Adjudication" "$PY" "${HUNT_DIR}/adjudicate.py" \
             --host-folder "$OUT_DIR" --report "$COMBINED" --stamp "$RUN_STAMP"
     else
-        log "No findings — skipping adjudication."
+        log "No findings - skipping adjudication."
     fi
 
     # --- Analysis-stage IOC + principal bundles (independent of reporting) ----
@@ -272,10 +272,10 @@ if [[ $NO_EGRESS_MONITOR -eq 0 && -f "$EGRESS_SCRIPT" ]]; then
         IR_INCIDENT_ID="$INCIDENT_ID" bash "$EGRESS_SCRIPT" --start \
             --incident "$INCIDENT_ID" --window-hours "$EGRESS_WINDOW_HOURS" \
             ${EGRESS_MGMT_IPS:+--mgmt-ips "$EGRESS_MGMT_IPS"} >>"$RUN_LOG" 2>&1 \
-            && log "  Egress sensor active — return after the window to collect /var/ir/egress-${INCIDENT_ID}/ and confirm blackhole." \
+            && log "  Egress sensor active - return after the window to collect /var/ir/egress-${INCIDENT_ID}/ and confirm blackhole." \
             || log "  Egress sensor start failed (see $RUN_LOG)."
     else
-        log "Egress observation skipped — needs root to install the cron sensor (re-run as root or start manually)."
+        log "Egress observation skipped - needs root to install the cron sensor (re-run as root or start manually)."
     fi
 elif [[ $NO_EGRESS_MONITOR -eq 1 ]]; then
     log "Egress observation skipped (--no-egress-monitor)."
@@ -286,7 +286,7 @@ fi
 # every artifact). On a USB target, hashing a 20+ GB .raw can take several minutes.
 BIGGEST="$(find "$OUT_DIR" -maxdepth 1 -type f -printf '%s\n' 2>/dev/null | sort -nr | head -1)"
 if [[ -n "${BIGGEST:-}" && "$BIGGEST" -gt $((4 * 1024 * 1024 * 1024)) ]]; then
-    log "==== PHASE: Manifest + Custody (hashing $((BIGGEST / 1024 / 1024 / 1024))+ GB image — this can take a few minutes) ===="
+    log "==== PHASE: Manifest + Custody (hashing $((BIGGEST / 1024 / 1024 / 1024))+ GB image - this can take a few minutes) ===="
 fi
 "$PY" - "$OUT_DIR" "$RUN_LOG" "$INCIDENT_ID" "$HOSTNAME_S" "$RUN_STAMP" <<'PYMAN' >>"$RUN_LOG" 2>&1 || true
 import json, os, hashlib, sys, datetime
@@ -333,6 +333,6 @@ OVERALL="$(ir_status_write "${OUT_DIR}/_status.json" "$INCIDENT_ID" "$HOSTNAME_S
 
 ART_COUNT="$(find "$OUT_DIR" -type f | wc -l)"
 log "==================================================="
-log " COLLECTION ${OVERALL} — ${ART_COUNT} artifact(s), ${TP_COUNT} true-positive-class"
+log " COLLECTION ${OVERALL} - ${ART_COUNT} artifact(s), ${TP_COUNT} true-positive-class"
 log " ${OUT_DIR}"
 log "==================================================="

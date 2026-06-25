@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """
-llm_incident_review.py — AI incident-review layer over a reports/<host>/ collection.
+llm_incident_review.py - AI incident-review layer over a reports/<host>/ collection.
 
 Reads the adjudicated findings + IOCs + principals an IR run produced and asks a
 configurable LLM for a triage summary, likely attack narrative, analyst pivots, and
-suggestions for resolving Indeterminate findings. Advisory ONLY — it never overrides
+suggestions for resolving Indeterminate findings. Advisory ONLY - it never overrides
 the adjudicator's verdict ladder; every output is flagged source=LLM.
 
-Configurable backend — frontier OR local, no SDK dependency (stdlib urllib):
+Configurable backend - frontier OR local, no SDK dependency (stdlib urllib):
   --provider anthropic            Claude Messages API (frontier; default model claude-opus-4-8)
   --provider openai               OpenAI Chat Completions (frontier)
   --provider openai-compatible    ANY OpenAI-compatible /chat/completions endpoint:
                                   vLLM, Ollama, LM Studio, llama.cpp server, OpenRouter,
                                   Together, Groq, DeepSeek, Mistral, Azure OpenAI, ...
                                   (set --base-url, e.g. http://localhost:11434/v1 for Ollama
-                                   or http://localhost:8000/v1 for vLLM) — fully offline-capable.
+                                   or http://localhost:8000/v1 for vLLM) - fully offline-capable.
 
 Config precedence: CLI flag > env var > default.
   provider   --provider   IR_LLM_PROVIDER
@@ -50,13 +50,13 @@ PROVIDERS = {
                "keys": ("OPENAI_API_KEY", "IR_LLM_API_KEY")},
     "openai-compatible": {"base": None, "model": None,
                           "keys": ("IR_LLM_API_KEY", "OPENAI_API_KEY")},
-    # Provider-native cloud LLMs — each cloud defaults to the latest of ITS OWN model
+    # Provider-native cloud LLMs - each cloud defaults to the latest of ITS OWN model
     # family, auth via the cloud CLI already present in the container. All overridable
     # with --model / IR_LLM_MODEL.
     #   AWS    -> latest Claude on Bedrock (model IDs carry the `anthropic.` prefix)
     #   GCP    -> latest Gemini on Vertex (Google-native)
     #   Azure  -> Azure OpenAI; `model` is the tenant's DEPLOYMENT name (no universal
-    #             default — point it at your latest GPT deployment via --model)
+    #             default - point it at your latest GPT deployment via --model)
     "bedrock": {"base": None, "model": "anthropic.claude-opus-4-8", "keys": ()},
     "vertex": {"base": None, "model": "gemini-2.0-flash", "keys": ()},
     "azure-openai": {"base": None, "model": None,
@@ -96,7 +96,7 @@ SYSTEM_PROMPT = (
     "of any finding. Your role is to summarize, correlate, and suggest analyst next steps.\n"
     "4. Do not recommend destructive or irreversible actions as if they were safe; frame "
     "remediation as analyst-confirmed steps.\n"
-    "5. Respond with STRICT JSON only — no prose, no code fences, outside the JSON object. "
+    "5. Respond with STRICT JSON only - no prose, no code fences, outside the JSON object. "
     "Keys (exactly): triage_summary (string), attack_narrative (string), "
     "key_findings (array of strings), analyst_pivots (array of strings), "
     "indeterminate_resolution (array of strings), "
@@ -170,7 +170,7 @@ def redact(obj, hostnames=None, usernames=None):
     """Replace internal identifiers with stable placeholders. Returns (obj, mapping).
 
     Redacts emails, private (RFC1918) IPs, and any supplied hostnames/usernames.
-    Public IPs/hashes (threat IOCs) are kept — they are the threat, not org data.
+    Public IPs/hashes (threat IOCs) are kept - they are the threat, not org data.
     """
     mapping = {}
     counters = {"EMAIL": 0, "IP": 0, "HOST": 0, "USER": 0}
@@ -421,16 +421,16 @@ def run_review(host_folder, provider, base_url, model, api_key,
         "incident_id": context.get("incident_id"),
         "hostname": context.get("hostname"),
         "review": review,
-        "redaction_map": mapping,   # local only — never sent to the API
+        "redaction_map": mapping,   # local only - never sent to the API
     }
     return out
 
 
 def render_markdown(out):
     r = out.get("review", {})
-    lines = [f"# LLM Incident Review — {out.get('hostname') or 'host'}",
+    lines = [f"# LLM Incident Review - {out.get('hostname') or 'host'}",
              "",
-             f"> **Advisory only — does not change adjudicated verdicts.** source=LLM · "
+             f"> **Advisory only - does not change adjudicated verdicts.** source=LLM · "
              f"provider={out.get('provider')} · model={out.get('model')} · "
              f"redacted={out.get('redacted')} · {out.get('generated_utc')}",
              ""]
@@ -455,7 +455,7 @@ def render_markdown(out):
     lines += bullets("Analyst pivots", "analyst_pivots")
     lines += bullets("Indeterminate resolution", "indeterminate_resolution")
     if out.get("redacted") and out.get("redaction_map"):
-        lines += ["## Redaction map (local only — not sent to the model)",
+        lines += ["## Redaction map (local only - not sent to the model)",
                   "| Placeholder | Real value |", "|---|---|"]
         lines += [f"| `{k}` | {v} |" for k, v in out["redaction_map"].items()]
         lines.append("")

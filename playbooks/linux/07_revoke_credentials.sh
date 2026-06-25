@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# IR Playbook 07 — Linux Credential / Session Revocation
+# IR Playbook 07 - Linux Credential / Session Revocation
 #
 # For each implicated account (from Principals.json, or --user), locks the
 # password, expires the account, terminates live sessions, and removes
 # unauthorized SSH authorized_keys. Turns the manual "rotate credentials" step
 # into an automated, reversible action.
 #
-# DRY-RUN (plan) by default — prints what it would do and changes nothing until
+# DRY-RUN (plan) by default - prints what it would do and changes nothing until
 # --apply. Records prior state to a rollback journal so 06_restore.sh can re-enable
 # a falsely-disabled account. Built-in/system accounts are never touched.
 #
@@ -63,7 +63,7 @@ PYP
 fi
 
 mode=$([[ $APPLY -eq 1 ]] && echo APPLY || echo PLAN)
-echo "[*] Credential revocation ($mode) — ${#USERS[@]} candidate(s) — journal: $JOURNAL"
+echo "[*] Credential revocation ($mode) - ${#USERS[@]} candidate(s) - journal: $JOURNAL"
 revoked=0; skipped=0
 
 for u in "${USERS[@]}"; do
@@ -84,7 +84,7 @@ for u in "${USERS[@]}"; do
     chage -E0 "$u" >/dev/null 2>&1 || true          # expire account
     pkill -KILL -u "$u" >/dev/null 2>&1 || true     # kill processes/sessions
     loginctl terminate-user "$u" >/dev/null 2>&1 || true
-    # quarantine the user's authorized_keys (do not delete — move aside, journaled)
+    # quarantine the user's authorized_keys (do not delete - move aside, journaled)
     ak="$(eval echo ~"$u")/.ssh/authorized_keys"
     if [[ -f "$ak" ]]; then
         mv "$ak" "${ak}.ir-revoked" 2>/dev/null && \
@@ -94,5 +94,5 @@ for u in "${USERS[@]}"; do
 done
 
 echo "[+] $mode complete: revoked=$revoked skipped=$skipped"
-[[ $APPLY -eq 0 ]] && echo "[i] PLAN only — re-run with --apply to enforce."
+[[ $APPLY -eq 0 ]] && echo "[i] PLAN only - re-run with --apply to enforce."
 exit 0

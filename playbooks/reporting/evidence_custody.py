@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-evidence_custody.py — chain-of-custody record + tamper-evident signing for a collection.
+evidence_custody.py - chain-of-custody record + tamper-evident signing for a collection.
 
 The collectors already write a sha256 `_manifest_<stamp>.json` of every artifact. This
 seals that manifest: it records WHO collected, WHEN, from WHERE, and the manifest's own
@@ -169,16 +169,16 @@ def verify_custody(host_folder):
     if not os.path.isfile(manifest_path):
         return False, [f"manifest {record.get('manifest_file')} missing"]
     if sha256_file(manifest_path) != record.get("manifest_sha256"):
-        issues.append("manifest sha256 mismatch — evidence manifest was modified after sealing")
+        issues.append("manifest sha256 mismatch - evidence manifest was modified after sealing")
     sig = record.get("signature", {})
     if sig.get("method") == "hmac-sha256":
         key = os.environ.get("IR_CUSTODY_HMAC_KEY")
         if not key:
-            issues.append("HMAC signature present but IR_CUSTODY_HMAC_KEY not set — cannot verify")
+            issues.append("HMAC signature present but IR_CUSTODY_HMAC_KEY not set - cannot verify")
         else:
             with open(manifest_path, "rb") as fh:
                 if not hmac_verify(fh.read(), key, sig.get("value")):
-                    issues.append("HMAC signature mismatch — manifest or signature altered")
+                    issues.append("HMAC signature mismatch - manifest or signature altered")
     elif sig.get("method") == "gpg" and sig.get("signature_file"):
         asc = os.path.join(host_folder, sig["signature_file"])
         try:

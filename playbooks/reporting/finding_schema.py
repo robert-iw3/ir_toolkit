@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-finding_schema.py — the canonical IR finding schema shared by every platform.
+finding_schema.py - the canonical IR finding schema shared by every platform.
 
 Windows (Get-FindingContext), Linux (adjudicate.py), and cloud (adjudicate_cloud.py)
 all emit findings that must conform to this schema so reporting, IOC extraction, and

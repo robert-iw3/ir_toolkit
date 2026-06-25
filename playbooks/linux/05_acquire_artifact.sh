@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# IR Playbook 05 — Linux Artifact Acquisition
+# IR Playbook 05 - Linux Artifact Acquisition
 # Delivered to the endpoint over SSH (ssh_playbook_v1). Given a confirmed-TP file
 # path, it ACQUIRES the file for detonation: hashes it (chain of custody), zips it
 # for safe transport, writes a manifest, and uploads to the quarantine bucket.
@@ -38,7 +38,7 @@ mkdir -p "${WORK_DIR}"
 FILENAME="$(basename -- "${REAL_PATH}")"
 SHA256="$(sha256sum -- "${REAL_PATH}" | cut -d' ' -f1)"
 
-# -- Package (zip) for safe transport — the sample is read/copied, never run ---
+# -- Package (zip) for safe transport - the sample is read/copied, never run ---
 ARTIFACT="${WORK_DIR}/${FILENAME}.zip"
 zip -j -q "${ARTIFACT}" "${REAL_PATH}"
 
