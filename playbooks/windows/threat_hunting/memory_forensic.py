@@ -427,6 +427,14 @@ log(f'  Suspicious Run keys: {n}')
 # ==============================================================================
 log('=== 12. YARA memory scan ===')
 
+# Optional: carve true-positive (Private+exec / injected) regions to tools\binja\data\<id>\ for
+# offline Binary Ninja RE. Enabled by Analyze-Memory.ps1 -Carve via IR_CARVE_DIR (inherited by the
+# worker subprocess). The worker does the actual carving; this just surfaces it in the run log.
+_carve_dir = os.environ.get('IR_CARVE_DIR')
+if _carve_dir:
+    log(f'  Carve ON: true-positive regions -> {_carve_dir}'
+        + ('  (IR_CARVE_ANY=1: carving ALL hit regions)' if os.environ.get('IR_CARVE_ANY') == '1' else ''))
+
 try:
     import memory_yara as myara   # vmmpyc-free: rule handling, canary, trust verdict
 except Exception as e:

@@ -58,7 +58,15 @@ param(
     [string]$SkipPlugins = '',
 
     # Merge memory findings into Combined_Findings and run Get-FindingContext.ps1 -Live.
-    [switch]$Adjudicate
+    [switch]$Adjudicate,
+
+    # Carve true-positive (Private+executable / injected) memory regions that YARA hits, as raw
+    # .bin + JSON sidecar, into tools\binja\data\<stamp>\ for offline Binary Ninja RE. Optional.
+    [switch]$Carve,
+    # Override the carve output dir. Default: <toolkit>\tools\binja\data\<stamp>\.
+    [string]$CarveDir = '',
+    # Triage: carve EVERY YARA-hit region (incl. file-backed), not just injected ones.
+    [switch]$CarveAny
 )
 
 Set-StrictMode -Version Latest
@@ -252,6 +260,22 @@ $RunStamp = Get-Date -Format 'yyyyMMdd_HHmmss'
 $OutFile  = Join-Path $OutputDir "Memory_Findings_$RunStamp.json"
 $LogFile  = Join-Path $OutputDir "_MemoryAnalysis_$RunStamp.log"
 
+# -- Optional carve of TP regions -> tools\binja\data\ for offline Binary Ninja RE ----------------
+# The YARA worker (memory_yara_worker.py, under memory_forensic.py) carves Private+exec/injected
+# regions when IR_CARVE_DIR is set. We set it here so the whole python subprocess tree inherits it;
+# unset otherwise so a prior run cannot leak carving into this one.
+if ($Carve) {
+    if (-not $CarveDir) {
+        $toolkitRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..\..')).Path
+        $CarveDir    = Join-Path $toolkitRoot ("tools\binja\data\" + $RunStamp)
+    }
+    $env:IR_CARVE_DIR = $CarveDir
+    if ($CarveAny) { $env:IR_CARVE_ANY = '1' } else { Remove-Item Env:\IR_CARVE_ANY -ErrorAction SilentlyContinue }
+} else {
+    Remove-Item Env:\IR_CARVE_DIR -ErrorAction SilentlyContinue
+    Remove-Item Env:\IR_CARVE_ANY -ErrorAction SilentlyContinue
+}
+
 $skipSet = @($SkipPlugins -split ',' |
     ForEach-Object { $_.Trim().ToLower() } |
     Where-Object { $_ })
@@ -312,6 +336,7 @@ if ($useMemProcFS) {
     Write-Log " Memory Analysis (MemProcFS / AFF4)" 'Green'
     Write-Log " image : $(Split-Path $ImagePath -Leaf)" 'Green'
     Write-Log " tool  : $mpcExe" 'Green'
+    if ($Carve) { Write-Log " carve : TP$(if($CarveAny){' + ALL'}) regions -> $env:IR_CARVE_DIR (Binary Ninja)" 'Cyan' }
     Write-Log '===================================================' 'Green'
 
     # Dokany/VFS fallback runs only if the primary vmmpyc Python path does NOT

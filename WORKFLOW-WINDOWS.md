@@ -7,7 +7,25 @@ See [readme.md](readme.md) for the cross-platform overview and adjudication phil
 
 ---
 
-## End-to-end workflow
+## How to read this guide
+
+An incident runs through **six phases, in order**:
+
+> **0 Contain → 1 Collect → 2 Analyze → 3 Memory → 4 Eradicate → 5 Restore**
+
+Two of those run **on the target machine** (Collect, Eradicate); the rest run on your
+**analyst machine**. Before any of it you do a **one-time setup** (build the toolkit, let it
+past antivirus).
+
+This guide is in three parts:
+
+1. **[Part 1 - One-time setup](#part-1--one-time-setup-analyst-machine)** - build the toolkit, allow it past AV.
+2. **[Part 2 - The six phases](#part-2--the-six-phases-in-order)** - for each phase: what it does, what it finds, and the exact command.
+3. **[Part 3 - Reference](#part-3--reference)** - every parameter, output file, and the remote/standalone/test paths.
+
+New to the toolkit? Read Parts 1 and 2 top to bottom. Returning for a specific flag? Jump to Part 3.
+
+### The whole run at a glance
 
 ```mermaid
 flowchart TD
@@ -63,166 +81,38 @@ flowchart TD
 
 ---
 
-## What the toolkit looks for - per stage
+# Part 1 - One-time setup (analyst machine)
 
-### Stage 0 · Containment
-Immediately enforces Default-Deny inbound firewall, exports the pre-lockdown state as a `.wfw` backup so eradication can restore known-good rules while keeping known-bad C2 blocked.
+Do this once, on an internet-connected analyst machine, **before** you take the toolkit to a target.
 
-**Inbound is blocked but outbound is deliberately left OPEN during the analysis window** (`Enforce-StrictFirewall.ps1` sets `DefaultOutboundAction Allow`). This is intentional: blocking inbound kills the adversary's listeners and lateral movement *in*, which forces their traffic onto **outbound beaconing** - where we can *see* where the implant calls home and what it exfils. Cutting egress immediately would blind the investigation to the C2/exfil destinations. See **Stage 4b · Egress observation** for how that visibility is captured over time and the deferred blackhole that closes it.
+## 1.1 Build the offline toolkit
 
-### Stage 1 · Collection
+`Build-OfflineToolkit.ps1` downloads the optional "depth" tools into `tools\`. Run it on your
+**analyst machine** (it needs internet), then copy the entire `IR_Toolkit\` folder (with `tools\`)
+to a USB drive or share for an isolated host. The core collection runs **fully offline without any
+staged tools** - these only add optional depth (memory capture, YARA, memory analysis).
 
-**Forensics snapshot** (`00_Collect-Forensics.ps1`)
-Running processes, network connections, loaded drivers, scheduled tasks, installed software, ARP/DNS cache, prefetch, jump lists, browser history, registry run keys for all users, event log export (Security / System / PowerShell / Sysmon).
+```powershell
+# Core: Sysinternals + LOLDrivers offline vulnerable-driver cache
+.\Build-OfflineToolkit.ps1
 
-**Extended persistence** (Autoruns)
-Every autostart location Windows supports: IFEO debuggers, AppInit DLLs, Winlogon Shell/Userinit, LSA packages, BootExecute, netsh helpers, codec hijacks, Active Setup, print processors, font drivers, boot sectors.
+# + WinPmem/go-winpmem memory acquisition + ProcDump
+.\Build-OfflineToolkit.ps1 -IncludeMemory
 
-**Persistence + security-config snapshot** (`Get-PersistenceSnapshot.ps1`)
-IFEO debugger hijacks, Winlogon Shell/Userinit anomalies, AppInit/AppCert DLLs, LSA packages, BootExecute, netsh helpers, WDigest cleartext credential caching, LSASS PPL disabled, UAC disabled, Defender disabled via policy, PowerShell ScriptBlock logging disabled. Raw evidence: full `.evtx` exports, every scheduled task XML, firewall rules, audit policy, Defender detection history.
+# + 1,773 YARA rules (Elastic, ReversingLabs, Neo23x0/Florian Roth)
+.\Build-OfflineToolkit.ps1 -IncludeYaraRules
 
-**Event log analysis** (`Invoke-EventLogAnalysis.ps1`)
-4688 process creation → LOLBin + obfuscation combos; 4625 failed logon burst → brute-force; 4648 explicit credential use → pass-the-hash; 4698/4702 suspicious task created/modified; 4720 new account created; 1102/104 security/system log cleared; 7045 new service in unusual path; 4104 PowerShell script block → encoded commands, Mimikatz, AMSI bypass, shellcode APIs.
+# + MemProcFS (the default AFF4 memory-analysis engine) and/or Volatility 3 (raw/dmp fallback)
+.\Build-OfflineToolkit.ps1 -IncludeMemProcFS
+.\Build-OfflineToolkit.ps1 -IncludeVolatility        # add -StageSymbols if the analyst box is air-gapped
 
-**Memory capture** (go-winpmem / FTK Imager / Magnet RAM Capture)
-Full physical memory image for post-collection offline analysis. AFF4 sparse format (go-winpmem) captures only actual RAM pages. FAT32 output volumes auto-redirect to NTFS for files >4 GiB. A pre-flight free-space check and exit-code/size validation guard against truncated captures; a failed capture is renamed `INVALID_memory_<HOST>.*` so analysis never treats it as complete.
+# Everything at once - recommended before any USB deployment
+.\Build-OfflineToolkit.ps1 -IncludeMemory -IncludeYaraRules -IncludeMemProcFS
+```
 
-**EDR hunt** (`EDR_Toolkit.ps1` / `EDR_Toolkit_Deploy.ps1`)
+Do **not** run this on the target host - it requires internet.
 
-| Module | What it looks for |
-|---|---|
-| Process hunt | Hidden processes (API vs WMI mismatch); LOLBin score ≥ 3 (encoded cmds, IEX, WebClient, mshta, certutil); high-risk parent multiplier |
-| Injection scan | Reflective DLL injection; unsigned modules in signed processes; DLLs loaded from Temp/AppData |
-| Driver hunt | BYOVD - loaded drivers checked against built-in list + live/offline loldrivers.io feed |
-| COM hijacking | HKCU InProcServer32 shadows existing HKLM CLSID AND points to unsigned/user-writable DLL |
-| BITS jobs | Transfer jobs not matching Microsoft/Windows-Update/vendor updater naming patterns |
-| ETW/AMSI tamper | ETW autologger sessions disabled; AMSI provider registry keys missing or renamed |
-| Registry | WMI event subscriptions; PendingFileRenameOperations; services running from Temp/AppData; IFEO debugger hijacks; AppInit DLLs |
-| Scheduled tasks | Score-based: encoded commands, IEX, WebClient download, hidden window, mshta in task action |
-| File hunt (optional) | Epoch/impossible timestamps (pre-2003 - timestomping); entropy ≥7.2 in non-image/non-script files; Alternate Data Streams in high-risk paths; YARA scan over the **full** Windows-applicable rule set (Elastic + ReversingLabs + Neo23x0, Linux/macOS rules filtered out) - runs a marker **self-test** so a "0 matches" result is provable, surfaces yara64 compile errors instead of swallowing them |
-
-**Memory YARA scan** (`Analyze-Memory.ps1` → `memory_forensic.py` / `memory_yara.py`)
-The staged Windows rules are compiled **once** into a single `.yac` (search_yara needs compiled rules, not source paths - passing paths silently scans nothing) and run against every process. A DOS-stub **canary** rides along so each result proves the engine actually inspected memory (`YARA self-test OK: canary matched in N/M processes` - or a loud `FAILED` if not). The scan runs in an isolated worker subprocess: a process that crashes the native scanner (e.g. `dwm.exe`) only kills the worker, which the parent restarts past the offender, so the scan always completes. Matches cluster **per PID** (count + rule list) in the incident report. The Volatility/raw path gets the same coverage via `windows.vadyarascan`.
-
-**Pivot → eradication scope** (`YARA_Pivot_Report.md` + `memory_enrich.py`, auto-run during `-Adjudicate`)
-Every hit PID is ranked by **true-positive confidence** (named malware/APT-family signature, multi-rule, or injected-memory hit lead; lone generic/LOLBin rules stay *investigate* - never suppressed) into a dedicated `YARA_Pivot_Report.md`. For each true positive the toolkit then extracts its **full memory footprint** - handles (dropped files, registry persistence, implant mutexes, pipes), modules, injected regions **carved to `_region_*.bin`** for offline capa/CyberChef, lineage, and C2 - into `Memory_Enrichment_*.json`, appends a detailed *discovered/correlated/corroborated* chain to `Attack_Graph.md`, and merges the eradication IOCs into `IOCs.json` for `Invoke-Eradication.ps1` (analyst-gated). See [WORKFLOW-YARA.md §⑤](WORKFLOW-YARA.md).
-
-**Remote-access triage** (`Get-RemoteAccessTriage.ps1`)
-Installed and running RMM agents (60+ signatures); ClickFix / CAPTCHA-lure PowerShell drops; browser history for RMM download pages; RunMRU for suspicious command execution; msiexec/installer logs for silent RAT installs.
-
-**Amcache + ShimCache execution history** (`Invoke-AmcacheParser.ps1`)
-Parses two Windows execution-history artifacts into findings and feeds them into the adjudication pipeline:
-
-| Artifact | What it is | How collected |
-|---|---|---|
-| `amcache_parsed.csv` | Application Compatibility Cache - every executable run, with path, SHA1, publisher, and link date. Survives process exit and deletion. | `Get-PersistenceSnapshot.ps1` copies the locked `Amcache.hve` via `robocopy /B` (backup privilege), loads it offline, exports to CSV |
-| `shimcache.bin` | AppCompatCache - kernel-level execution record, binary blob from registry. Records files executed since last boot cycle. | `Get-PersistenceSnapshot.ps1` reads directly from `HKLM\...\AppCompatCache` (no lock) |
-
-Detection logic - flags executables that:
-- Ran from user-writable or staging paths (`AppData\Roaming`, `Temp`, `Downloads`, `Desktop`, `Public`, `ProgramData` non-Microsoft sub-paths)
-- Are known LOLBin names (`mshta`, `rundll32`, `certutil`, `bitsadmin`, `regsvr32`, etc.) found outside `System32`
-- Ran from network shares (`\\server\share\...`)
-
-Each finding includes a pivot hint: *"Check Amcache for SHA1, Event 4688 for cmdline."* The adjudicator resolves the file path on-host, verifies the Authenticode chain, and assigns a verdict - Microsoft-signed installer temporaries clear as False Positive; LOLBins staged in Temp fail the path/hash check and become True Positive / High. Findings flow into `Combined_Findings` → adjudication on every collection run.
-
-### Stage 1b · Clock context (automatic, first act of collection)
-
-`Get-ClockContext.ps1` is called before any phase and writes `_clock.json`:
-- Host timezone + UTC offset (for timeline normalization across hosts)
-- NTP synchronization status via `w32tm /query /status`
-- Clock skew against the responder's own UTC reference (cross-host correlation requires a common timeline basis)
-
-### Stage 1c · Evidence custody seal (automatic, last act of collection)
-
-`Seal-EvidenceCustody.ps1` seals the sha256 `_manifest_*.json` after all artifacts are written:
-- Records operator identity (`$env:IR_OPERATOR` or `DOMAIN\user@hostname`)
-- HMAC-SHA256 signature of the manifest (set `$env:IR_CUSTODY_HMAC_KEY`)
-- Appends to append-only `_custody_log.jsonl`
-- `Seal-EvidenceCustody.ps1 -Verify` re-hashes the manifest and confirms no tampering
-
-### Stage 2 · Analysis
-
-**Adjudication** (`Get-FindingContext.ps1 -Live`)
-Every raw finding is enriched with on-host context: Authenticode signature chain (publisher, timestamp, revocation); file owner and install path; hash against known-good baselines; whether the binary is in Program Files vs Temp/AppData. Verdict ladder: `False Positive` → `Likely False Positive` → `Indeterminate` → `Likely True Positive` → `True Positive`. Evidence bundles written for every TP-class finding.
-
-The final report holds **only beyond-doubt (true-positive-class) anomalies**. To get there the adjudicator applies generalizable noise controls that hold on *any* Windows host (never host-specific tuning - the rule is "suppress only what is impossible to be malicious, never blindside an investigation"):
-- **Weak standalone signals are capped at `Indeterminate`.** ShimCache/Amcache are *historical* execution records (a missing binary is normal for installers/updaters), and high entropy is a by-design property of countless legit files. On their own these are pivot leads, not proof - they are elevated only when corroborated (invalid signature, external egress, or a remote-access/LOLBin abuse match).
-- **`NotSigned` ≠ invalid signature.** Only a genuinely bad signature (tampered/revoked/untrusted) is a strong signal; unsigned-but-otherwise-clean is weak.
-- **Script hosts** (`powershell`/`pwsh`/`cmd`) are flagged only when the command line shows real abuse (encoded command, download cradle, hidden window) - a bare shell is not proof.
-- **The toolkit's own staged tools** (`yara64`, `autorunsc`, `winpmem`, …) are cleared outright - they execute on every host during collection.
-- Local device-path forms (`\\?\`, `\\.\`) are not treated as UNC network paths; version strings in paths (`…\3.0.0.18\…`) are not parsed as IPs.
-
-Everything that does not clear the bar is **not dropped** - it is written to a separate pivot-leads log (see Output files) so the analyst can still review it.
-
-**Run-to-run delta** (`Delta_<stamp>.json`)
-Each adjudication run compares against the previous `Adjudication_*.json` and writes a diff: `NEW` (first seen this run), `RESOLVED` (present last run, gone now), `CHANGED_VERDICT` (same target/type, different verdict). Tracks remediation progress across repeated collections on the same host.
-
-**IOC extraction** - C2 endpoints, file hashes, ATT&CK techniques, implicated principals, Defender exclusion tampering.
-
-**ATT&CK Navigator layer** (`attck_navigator_layer.json`)
-All observed MITRE techniques exported as a Navigator v4.9 layer. Open at https://mitre-attack.github.io/attack-navigator/ to visualise detection coverage for this incident.
-
-### Output files (per-host folder: `reports\<HOSTNAME>\`)
-
-The reports are intentionally split: the three **final reports** show only beyond-doubt anomalies; the **full record** keeps every verdict; the **pivot-leads log** holds the downgraded leads so nothing is lost.
-
-| File | What it is |
-|---|---|
-| `Incident_Report.md` | **Final report.** Executive incident summary - true-positive-class findings only, with the remote-access/C2 narrative, implicated accounts, and the recommended eradication command. |
-| `Attack_Graph.md` | **Final report.** MITRE ATT&CK tactic-ordered kill-chain of the true-positive-class findings. |
-| `Adjudication_<stamp>.md` | **Final report.** Highly-suspicious findings only, with full per-finding evidence (signature, hash, path trust, command line, notes). |
-| `attck_navigator_layer.json` | ATT&CK Navigator v4.9 layer of observed techniques. |
-| `Adjudication_<stamp>.json` / `.csv` | **Full record** - *every* finding with its verdict, confidence, and notes (nothing dropped). Machine-readable feed for SIEM. |
-| `Adjudication_PivotLeads_<stamp>.csv` | **Separate leads log** - the lower-confidence findings (`Indeterminate` / `Likely False Positive` / `False Positive`). Review only if one corroborates a beyond-doubt finding. |
-| `Delta_<stamp>.json` | Run-to-run verdict diff (`NEW` / `RESOLVED` / `CHANGED_VERDICT`) vs the previous adjudication on this host. |
-| `Combined_Findings_<stamp>.json` | Raw wave-1 findings (pre-adjudication), merged from all detection modules. |
-| `EDR_Report_<stamp>.json/.csv/.html` | Wave-1 EDR hunt output (raw detections before adjudication). |
-| `findings_amcache_<stamp>.json` | ShimCache / Amcache historical-execution findings. |
-| `Evidence\<finding>\` | Per-finding evidence bundle (copied binary, hashes, signature, loaded modules, network) for TP-class findings. |
-| `_clock.json` | Host clock context (timezone, UTC offset, NTP sync state, skew) for timeline normalization. |
-| `_custody_<stamp>.json` + `_custody_log.jsonl` | Chain-of-custody seal - SHA256 manifest + HMAC-SHA256 signature of all collected files. |
-| `forensics-<stamp>.zip` | Raw collected artifacts (event-log CSVs, process/network/persistence snapshots, ShimCache/Amcache exports). |
-| `Memory_Findings_<stamp>.json` | Memory-analysis findings (only if a memory image was captured and analyzed). |
-| `_<Phase>_<stamp>.log` / `_runtime_<stamp>.log` | Per-phase and overall runtime logs for the collection. |
-
-### Stage 3 · Memory analysis (analyst machine, post-collection)
-
-`Analyze-Memory.ps1` + `memory_forensic.py` via MemProcFS vmmpyc Python API. Runs against the AFF4 image with no system changes (no driver install required).
-
-| Check | What it detects |
-|---|---|
-| LOLBin cmdlines | Processes with encoded commands, IEX, WebClient downloads, mshta - same scoring as live EDR hunt but from memory |
-| Hidden processes | DKOM / PEB-unlink artifacts flagged by MemProcFS state field |
-| Injected memory | Executable private VAD regions with no backing file - classic shellcode/reflective DLL footprint |
-| External network | Established/listening connections to non-RFC1918 IPs present at capture time (C2 dwell) |
-| Shellcode threads | User-mode threads whose start address falls outside every loaded module in that process |
-| Parent-child anomalies | High-risk child processes (powershell, cmd, wscript, mshta, regsvr32) spawned from unexpected parents - macro/exploit chain indicator |
-| Process path spoofing | Well-known system binaries (lsass, svchost, smss, etc.) running from a path other than System32 |
-| Known offensive tooling | Process names / cmdlines matching Mimikatz, Cobalt Strike, Meterpreter, BloodHound, Rubeus, PsExec, etc. |
-| Suspicious listeners | User processes listening on high ports (>1024) on non-loopback interfaces |
-| BYOVD drivers | Loaded kernel drivers matching known vulnerable driver names |
-| Registry Run keys | LOLBin commands in Run/RunOnce keys from the live registry hive in memory |
-| YARA memory scan | 1,775 staged rules (Elastic + ReversingLabs + Neo23x0) scanned per-process, 15s abort timeout per process, noise-rule suppression |
-
-### Stage 4 · Eradication
-Kills malicious processes, quarantines implants (sha256-verified), unregisters persistence (tasks, COM, WMI, services), disables/revokes implicated accounts, blocks C2 egress via firewall. Every action is dry-run by default and written to a rollback journal.
-
-### Stage 4b · Egress observation (OPTIONAL, deferred - extends past the analyst's visit)
-
-> **⚠️ Data-sensitive hosts: isolate FIRST, do not observe.** Egress observation deliberately leaves outbound open for a window to learn the C2/exfil destinations - which means tolerating that the implant **may keep exfiltrating** during that window. For a host holding sensitive/regulated data (PII/PHI/secrets/crown-jewel IP) that trade is **not acceptable**: completely isolate the network stack **before** investigation (full inbound **and** outbound block) and skip this phase - `playbooks\windows\01_Contain-Host.ps1` (blocks in + out), or `Enforce-StrictFirewall.ps1 -FullInboundLockdown -BlockOutbound`, then run collection with **`-NoEgressMonitor`**. You lose *where* it exfiltrated but **eliminate further data loss** - the right priority when the data outweighs the attribution. Observe only when mapping the C2 infrastructure is worth the residual exfil risk.
-
-Because C2 beacons **jitter** and can **dwell for hours**, a point-in-time `netstat` during collection routinely misses them. When you do choose to observe, `Watch-Egress.ps1 -Start` (on by default; `-NoEgressMonitor` to skip) registers a SYSTEM scheduled task that snapshots outbound connections (`Get-NetTCPConnection` + owning process) every minute into an **append-only evidence log** (`C:\ProgramData\IRToolkit\egress-<id>\`), filtering RFC1918/management. When the observation window closes (default **24h**) a one-shot task **auto-blackholes egress** (`Enforce-StrictFirewall.ps1 -BlockOutbound`, keeping a management pinhole) and removes the poller.
-
-> **Workflow impact - return visit required.** The responder leaves the sensor running and **comes back after the window** to (1) collect the egress evidence log (`Watch-Egress.ps1 -Collect` reports its path + unique destinations) and bundle it as evidence, and (2) confirm the blackhole fired (`-Status` → `blackhole: done`). Tune with `-WindowHours` / `-IntervalMin`; `-Blackhole` cuts egress immediately, `-Stop` tears the sensor down without blackholing.
-
-### Stage 5 · Restoration
-Restores firewall to pre-lockdown known-good state while keeping C2 IPs blocked. Recovers quarantined files only after sha256-verifying them against the rollback journal. The egress blackhole is part of the same `.wfw`-backed firewall state, so `Enforce-StrictFirewall.ps1 -Rollback` reverses it too.
-
-`IOCs.json` is emitted in the **analysis** stage (not reporting) so eradication's C2 re-block never depends on reports being generated. Every orchestrator writes a uniform `_status.json` (`COMPLETED` / `PARTIAL` / `FAILED` + per-phase results + `tp_count`) for SOAR gating.
-
----
-
-## AV / EDR compatibility
+## 1.2 Allow the toolkit past antivirus
 
 ### Why antivirus flags this toolkit
 
@@ -238,30 +128,30 @@ The AV detections are false positives caused by heuristic pattern-matching on
 legitimate forensic operations. KAPE, Velociraptor, FTK Imager, and Sysinternals tools
 all trigger the same detections and require the same exclusions.
 
-### Windows Defender - required setup before running
+### Windows Defender - required before the first run on a target
 
 Windows Defender with **Tamper Protection** enabled silently blocks all programmatic
 attempts to add exclusions or disable real-time protection, even from an Administrator
 account. The only way to configure Defender on a Tamper-Protected system is through
 the Windows Security GUI.
 
-**Option A - Automated setup script (recommended)**
-
-Run this once on the target machine. It opens Windows Security to the right page,
-polls until you toggle the switch, adds all exclusions automatically, and guides
-Tamper Protection back on:
+**Option A - Automated setup script (recommended).** Run this once on the target machine.
+It opens Windows Security to the right page, polls until you toggle the switch, adds all
+exclusions automatically, and guides Tamper Protection back on:
 
 ```powershell
 powershell.exe -ExecutionPolicy Bypass -NoProfile -File .\Invoke-PrepareDefender.ps1
 ```
 
 The only manual steps are two GUI clicks - TP off, then TP back on. Everything else
-(folder exclusion, process exclusions, verification) runs automatically.
+(folder exclusion, process exclusions, verification) runs automatically. The orchestrator
+also launches this automatically if it detects Tamper Protection on. Exclusions persist
+across reboots; re-run only if the toolkit is moved to a new path.
 
 **Option B - Manual setup** (do this once on the target before running):
 
 1. **Disable Tamper Protection** - Windows Security → Virus & threat protection → Manage settings → **Tamper Protection** → **OFF**. This allows the pre-flight to call `Set-MpPreference` and temporarily suspend real-time monitoring; it is re-enabled automatically when the run finishes (the `finally` block always runs).
-2. **Add a folder exclusion** - Manage settings → Exclusions → Add an exclusion → Folder → `C:\path\to\IR_Toolkit`. Stops Defender's AMSI provider from blocking the scripts at load time. (Elevated processes get stricter AMSI scanning, so Step 1 is required for the exclusion to take full effect in an admin run.)
+2. **Add a folder exclusion** - Manage settings → Exclusions → Add an exclusion → Folder → `C:\path\to\IR_Toolkit`. Stops Defender's AMSI provider from blocking the scripts at load time.
 3. **Re-enable Tamper Protection after the run** - Manage settings → Tamper Protection → **ON**. The `finally` block restores real-time monitoring; TP itself must be restored manually.
 
 ### Other AV / EDR products
@@ -303,37 +193,42 @@ folder - they monitor parent-child chains and will alert on PowerShell spawned b
 
 ---
 
-## Step 0a - Build the offline toolkit (once, on an internet-connected analyst machine)
+# Part 2 - The six phases, in order
 
-Runs on your **analyst machine**, not the target. Downloads staged depth tools into `tools\`.
-Copy the entire `IR_Toolkit\` folder (with `tools\`) to USB or a share for an isolated host.
+Each phase below has the same shape: **what it does**, **what it finds**, and **run it**. Phases 0-1
+and 6 run on the **target** inside one `Invoke-IRCollection.ps1` call; Phases 2-5 run on the
+**analyst machine** afterward.
 
-```powershell
-# Core: Sysinternals + LOLDrivers offline vulnerable-driver cache
-.\Build-OfflineToolkit.ps1
+---
 
-# + WinPmem memory acquisition + ProcDump
-.\Build-OfflineToolkit.ps1 -IncludeMemory
+## Phase 0 - Contain
 
-# + 1,773 YARA rules (Elastic, ReversingLabs, Neo23x0/Florian Roth)
-.\Build-OfflineToolkit.ps1 -IncludeYaraRules
+**What it does.** Immediately enforces a Default-Deny **inbound** firewall and exports the
+pre-lockdown state as a `.wfw` backup, so restoration can return known-good rules while keeping
+known-bad C2 blocked. This is the **first** thing `Invoke-IRCollection.ps1` does (unless you pass
+`-NoFirewallLockdown`).
 
-# Everything at once - recommended before any USB deployment
-.\Build-OfflineToolkit.ps1 -IncludeMemory -IncludeYaraRules
-```
+**Why outbound stays open.** Inbound is blocked but outbound is deliberately left **OPEN** during the
+analysis window (`Enforce-StrictFirewall.ps1` sets `DefaultOutboundAction Allow`). Blocking inbound
+kills the adversary's listeners and lateral movement *in*, which forces their traffic onto **outbound
+beaconing** - where we can *see* where the implant calls home and what it exfils. Cutting egress
+immediately would blind the investigation to the C2/exfil destinations. (To map C2 over time, see
+**Phase 4 - Egress observation**.)
 
-Do **not** run this on the target host - it requires internet. The core collection workflow
-runs entirely offline without staged tools; they only enable optional depth.
+> **Data-sensitive hosts: isolate fully instead.** If the host holds regulated/crown-jewel data,
+> block inbound **and** outbound before you investigate - `playbooks\windows\01_Contain-Host.ps1`, or
+> `Enforce-StrictFirewall.ps1 -FullInboundLockdown -BlockOutbound`, then collect with
+> `-NoEgressMonitor`. You lose *where* it exfiltrated but eliminate further data loss.
 
-## Step 0b - Prepare Defender on the target (first run only)
+---
 
-If Tamper Protection is on, the orchestrator automatically launches `Invoke-PrepareDefender.ps1`
-(see AV section). You can also run it manually before your first collection. Exclusions persist
-across reboots; re-run only if the toolkit is moved to a new path.
+## Phase 1 - Collect (on the target, as Administrator)
 
-## Step 1 - Collection (run on the TARGET machine as Administrator)
+**What it does.** One `Invoke-IRCollection.ps1` call runs the whole on-target sequence: contain →
+forensics → (optional) memory capture → EDR hunt → remote-access triage → adjudication. Collection
+is **read-only**. Output goes to `reports\<HOSTNAME>\` next to the toolkit.
 
-Output is written to `reports\<HOSTNAME>\` next to the toolkit. Directories are created automatically.
+### Run it
 
 ```powershell
 # Minimum - process/registry/persistence/event-log hunt, no file scan
@@ -360,65 +255,366 @@ powershell.exe -ExecutionPolicy Bypass -NoProfile -File .\Invoke-IRCollection.ps
     -DeepFileScan -OutputRoot "E:\Evidence"
 ```
 
-## Step 1b - Memory analysis (run on the ANALYST machine after copying evidence back)
+> Full flag list: **[Invoke-IRCollection.ps1 parameter reference](#invoke-ircollectionps1---full-parameters)** in Part 3.
+
+### What it finds
+
+**Forensics snapshot** (`00_Collect-Forensics.ps1`) - running processes, network connections, loaded
+drivers, scheduled tasks, installed software, ARP/DNS cache, prefetch, jump lists, browser history,
+registry run keys for all users, event-log export (Security / System / PowerShell / Sysmon).
+
+**Extended persistence** (Autoruns) - every autostart location Windows supports: IFEO debuggers,
+AppInit DLLs, Winlogon Shell/Userinit, LSA packages, BootExecute, netsh helpers, codec hijacks,
+Active Setup, print processors, font drivers, boot sectors.
+
+**Persistence + security-config snapshot** (`Get-PersistenceSnapshot.ps1`) - IFEO debugger hijacks,
+Winlogon anomalies, AppInit/AppCert DLLs, LSA packages, BootExecute, netsh helpers, WDigest cleartext
+credential caching, LSASS PPL disabled, UAC disabled, Defender disabled via policy, PowerShell
+ScriptBlock logging disabled. Raw evidence: full `.evtx` exports, every scheduled-task XML, firewall
+rules, audit policy, Defender detection history.
+
+**Event-log analysis** (`Invoke-EventLogAnalysis.ps1`) - 4688 process creation → LOLBin + obfuscation
+combos; 4625 failed-logon burst → brute-force; 4648 explicit credential use → pass-the-hash;
+4698/4702 suspicious task created/modified; 4720 new account; 1102/104 log cleared; 7045 new service
+in unusual path; 4104 PowerShell script block → encoded commands, Mimikatz, AMSI bypass, shellcode APIs.
+
+**Memory capture** (go-winpmem / FTK Imager / Magnet RAM Capture) - full physical memory image for
+Phase 3. AFF4 sparse format (go-winpmem) captures only actual RAM pages. FAT32 output volumes
+auto-redirect to NTFS for files >4 GiB. A pre-flight free-space check and exit-code/size validation
+guard against truncated captures; a failed capture is renamed `INVALID_memory_<HOST>.*` so analysis
+never treats it as complete. Enable with `-CaptureMemory`.
+
+**EDR hunt** (`EDR_Toolkit.ps1`):
+
+| Module | What it looks for |
+|---|---|
+| Process hunt | Hidden processes (API vs WMI mismatch); LOLBin score ≥ 3 (encoded cmds, IEX, WebClient, mshta, certutil); high-risk parent multiplier |
+| Injection scan | Reflective DLL injection; unsigned modules in signed processes; DLLs loaded from Temp/AppData |
+| Driver hunt | BYOVD - loaded drivers checked against built-in list + live/offline loldrivers.io feed |
+| COM hijacking | HKCU InProcServer32 shadows existing HKLM CLSID AND points to unsigned/user-writable DLL |
+| BITS jobs | Transfer jobs not matching Microsoft/Windows-Update/vendor updater naming patterns |
+| ETW/AMSI tamper | ETW autologger sessions disabled; AMSI provider registry keys missing or renamed |
+| Registry | WMI event subscriptions; PendingFileRenameOperations; services running from Temp/AppData; IFEO debugger hijacks; AppInit DLLs |
+| Scheduled tasks | Score-based: encoded commands, IEX, WebClient download, hidden window, mshta in task action |
+| File hunt (optional) | Epoch/impossible timestamps (pre-2003 - timestomping); entropy ≥7.2 in non-image/non-script files; Alternate Data Streams in high-risk paths; YARA scan over the **full** Windows-applicable rule set (Linux/macOS rules filtered out) with a marker **self-test** so a "0 matches" result is provable |
+
+**Remote-access triage** (`Get-RemoteAccessTriage.ps1`) - installed and running RMM agents (60+
+signatures); ClickFix / CAPTCHA-lure PowerShell drops; browser history for RMM download pages; RunMRU
+for suspicious command execution; msiexec/installer logs for silent RAT installs.
+
+**Amcache + ShimCache execution history** (`Invoke-AmcacheParser.ps1`) - parses two Windows
+execution-history artifacts into findings:
+
+| Artifact | What it is | How collected |
+|---|---|---|
+| `amcache_parsed.csv` | Application Compatibility Cache - every executable run, with path, SHA1, publisher, link date. Survives process exit and deletion. | `Get-PersistenceSnapshot.ps1` copies the locked `Amcache.hve` via `robocopy /B`, loads it offline, exports to CSV |
+| `shimcache.bin` | AppCompatCache - kernel-level execution record. Records files executed since last boot cycle. | read directly from `HKLM\...\AppCompatCache` (no lock) |
+
+It flags executables that ran from user-writable/staging paths (`AppData\Roaming`, `Temp`,
+`Downloads`, `Desktop`, `Public`, non-Microsoft `ProgramData`), known LOLBin names outside `System32`,
+or network shares. Each finding carries a pivot hint (*"Check Amcache for SHA1, Event 4688 for
+cmdline"*); the adjudicator then resolves the path on-host and assigns a verdict.
+
+### Automatic sub-steps (you don't invoke these)
+
+- **Clock context (first act of collection)** - `Get-ClockContext.ps1` writes `_clock.json`: host
+  timezone + UTC offset, NTP sync status (`w32tm /query /status`), and clock skew vs the responder's
+  UTC reference. This normalizes timelines when correlating across hosts.
+- **Evidence custody seal (last act of collection)** - `Seal-EvidenceCustody.ps1` seals the SHA256
+  `_manifest_*.json`: operator identity (`$env:IR_OPERATOR`), an HMAC-SHA256 signature
+  (`$env:IR_CUSTODY_HMAC_KEY`), and an append-only `_custody_log.jsonl`. `-Verify` re-hashes and
+  confirms no tampering.
+
+---
+
+## Phase 2 - Analyze & adjudicate
+
+**What it does.** Turns raw detections into verdicts. This runs **automatically at the end of
+collection**, and again on the analyst machine after you fold in memory findings (Phase 3). The goal:
+the final reports contain **only beyond-doubt (true-positive-class) anomalies**, while nothing is
+ever silently dropped.
+
+**Adjudication** (`Get-FindingContext.ps1 -Live`) - every raw finding is enriched with on-host
+context: Authenticode signature chain (publisher, timestamp, revocation), file owner and install
+path, hash against known-good baselines, Program Files vs Temp/AppData. Verdict ladder:
+`False Positive` → `Likely False Positive` → `Indeterminate` → `Likely True Positive` → `True Positive`.
+Evidence bundles are written for every TP-class finding.
+
+To get there the adjudicator applies generalizable noise controls that hold on *any* Windows host
+(never host-specific tuning - "suppress only what is impossible to be malicious, never blindside an
+investigation"):
+
+- **Weak standalone signals are capped at `Indeterminate`.** ShimCache/Amcache are *historical*
+  execution records (a missing binary is normal for installers), and high entropy is by-design in
+  countless legit files. On their own they are pivot leads, not proof - elevated only when
+  corroborated (invalid signature, external egress, or a remote-access/LOLBin match).
+- **`NotSigned` ≠ invalid signature.** Only a genuinely bad signature (tampered/revoked/untrusted) is
+  strong; unsigned-but-otherwise-clean is weak.
+- **Script hosts** (`powershell`/`pwsh`/`cmd`) are flagged only when the command line shows real abuse
+  (encoded command, download cradle, hidden window) - a bare shell is not proof.
+- **The toolkit's own staged tools** (`yara64`, `autorunsc`, `winpmem`, …) are cleared outright.
+- Local device-path forms (`\\?\`, `\\.\`) are not treated as UNC paths; version strings in paths are
+  not parsed as IPs.
+
+Everything that does not clear the bar is **not dropped** - it goes to a separate pivot-leads log so
+the analyst can still review it.
+
+**Run-to-run delta** (`Delta_<stamp>.json`) - each run diffs against the previous adjudication:
+`NEW`, `RESOLVED`, `CHANGED_VERDICT`. Tracks remediation progress across repeated collections.
+
+**IOC extraction** - C2 endpoints, file hashes, ATT&CK techniques, implicated principals, Defender
+exclusion tampering. `IOCs.json` is emitted in **this** stage (not reporting) so eradication's C2
+re-block never depends on reports being generated.
+
+**ATT&CK Navigator layer** (`attck_navigator_layer.json`) - all observed techniques as a Navigator
+v4.9 layer; open at https://mitre-attack.github.io/attack-navigator/.
+
+> The full list of report/output files is in **[Output files](#output-files-reportshostname)** in Part 3.
+
+---
+
+## Phase 3 - Memory analysis (analyst machine)
 
 > **⚠️ Do this for every serious investigation - memory analysis is imperative.** RAM is the only
 > place that holds evidence which never touches disk: process injection and shellcode, fileless /
 > reflective-loading malware, decrypted payloads, live C2 connections, cleartext credentials and
-> tokens (LSASS), and rootkits/BYOVD that hide from the live OS. Modern Windows attacks are
-> heavily in-memory and LOLBin-driven - a disk-and-Event-Log-only investigation misses them, and a
-> present attacker can clear logs and tamper artifacts while memory still reflects ground truth.
-> RAM is the **most volatile** evidence (RFC 3227): capture it **first** (`-CaptureMemory`), because
-> a reboot/power-off destroys it permanently. Always pair collection with this analysis step.
+> tokens (LSASS), and rootkits/BYOVD that hide from the live OS. RAM is the **most volatile** evidence
+> (RFC 3227): capture it **first** (`-CaptureMemory` in Phase 1), because a reboot/power-off destroys
+> it permanently. Always pair collection with this analysis step.
 
+**What it does.** Analyzes the captured memory image **off the target** (it's resource-heavy, and
+keeping it off the host preserves an air-gapped target). Copy `memory_<HOST>.*` from `reports\<HOST>\`
+to the analyst machine and run `Analyze-Memory.ps1`.
 
-Memory analysis runs **off the target**. Copy the collected `memory_<HOST>.*` from
-`reports\<HOST>\` back to your analyst machine, then run `Analyze-Memory.ps1`. It **routes by
-image type**:
+### How it works (end to end)
 
-| Captured image | Default tool | Engine | Detection logic |
+1. **Route by image type** - the engine is chosen from the file extension:
+
+   | Image | Engine | How it reads the image | Notes |
+   |---|---|---|---|
+   | `.aff4` (go-winpmem, the **default** capture) | **MemProcFS** via `memory_forensic.py` (`vmmpyc` Python API) | pure library - no driver/Dokany/WinFsp | primary path, fully offline |
+   | `.raw` / `.mem` / `.dmp` | **Volatility 3** (`vol.exe`) | standalone build | fallback; fetches MS symbols on first run unless pre-staged with `-StageSymbols` |
+
+2. **Detect** - `memory_forensic.py` runs 12 modules over the image:
+
+   | Check | What it detects |
+   |---|---|
+   | LOLBin cmdlines | Encoded commands, IEX, WebClient downloads, mshta - same scoring as the live EDR hunt, but from memory |
+   | Hidden processes | DKOM / PEB-unlink artifacts flagged by the MemProcFS state field |
+   | Injected memory | Executable private VAD regions with no backing file - classic shellcode/reflective-DLL footprint |
+   | External network | Established/listening connections to non-RFC1918 IPs present at capture time (C2 dwell) |
+   | Shellcode threads | User-mode threads whose start address falls outside every loaded module |
+   | Parent-child anomalies | High-risk children (powershell, cmd, wscript, mshta, regsvr32) from unexpected parents |
+   | Process path spoofing | System binaries (lsass, svchost, smss…) running from a path other than System32 |
+   | Known offensive tooling | Names/cmdlines matching Mimikatz, Cobalt Strike, Meterpreter, BloodHound, Rubeus, PsExec, etc. |
+   | Suspicious listeners | User processes listening on high ports (>1024) on non-loopback interfaces |
+   | BYOVD drivers | Loaded kernel drivers matching known vulnerable driver names |
+   | Registry Run keys | LOLBin commands in Run/RunOnce keys from the live registry hive in memory |
+   | YARA memory scan | Staged rules (Elastic + ReversingLabs + Neo23x0) scanned per-process, 15s abort timeout, noise-rule suppression, with a DOS-stub **canary** that proves the engine actually inspected memory |
+
+3. **Write** - concerning findings only → `Memory_Findings_<stamp>.json` (same schema as the rest of
+   the pipeline) + `_MemProcFS_<stamp>.log`.
+4. **(optional) `-Carve`** - any YARA hit in a **Private + executable (injected) region** is dumped as
+   raw `.bin` + a JSON sidecar to `tools\binja\data\<stamp>\` for offline Binary Ninja RE (see below).
+5. **(optional) `-Adjudicate`** - the payoff switch. It runs the **whole pivot→enrich chain
+   automatically** (see the next subsection): merge → adjudicate → rank the YARA hits → enrich the true
+   positives → roll up the eradication IOCs. Without it you get only `Memory_Findings_<stamp>.json`.
+
+### `Analyze-Memory.ps1` parameters
+
+| Parameter | Type | Default | What it does |
 |---|---|---|---|
-| `.aff4` (go-winpmem - the **default** capture) | **MemProcFS** | `memory_forensic.py` via `vmmpyc` (no Dokany/WinFsp) | 11 modules (injection, hidden procs, C2, LOLBin, BYOVD, Run keys…) |
-| `.raw` / `.mem` / `.dmp` (winpmem/FTK or an external image) | Volatility 3 (`vol.exe`) | Volatility 3 plugins | fallback path |
+| `-ImagePath` | string (**required**) | - | Memory image to analyze (`.aff4` / `.raw` / `.mem` / `.dmp`). The extension selects the engine. **Never** analyze a file starting with `INVALID_` (the collector renames truncated/failed captures). |
+| `-OutputDir` | string | the image's own folder | Where `Memory_Findings_<stamp>.json` + logs land. Point it at the host's `reports\<HOST>\` so memory findings sit with the rest of the evidence. |
+| `-VolExe` | string | `<toolkit>\tools\vol.exe` | Volatility 3 standalone path. **Volatility path only** (raw/mem/dmp). Auto-located. |
+| `-SymbolDir` | string | `<toolkit>\tools\vol_symbols` | Extra Volatility 3 symbol directory (offline symbols from `-StageSymbols`). **Volatility path only.** |
+| `-SkipPlugins` | string (CSV) | - | Volatility plugins to skip, e.g. `"hashdump,ldrmodules"`. **Volatility path only.** |
+| `-Adjudicate` | switch | off | After analysis, merge findings into `Combined_Findings` and re-run live adjudication. |
+| `-Carve` | switch | off | Carve true-positive (Private+exec / injected) YARA-hit regions to `tools\binja\data\<stamp>\` as `.bin` + JSON sidecar for Binary Ninja. Inert - raw bytes, never executed. |
+| `-CarveDir` | string | `<toolkit>\tools\binja\data\<stamp>` | Override the carve output directory (e.g. a case folder). Still requires `-Carve`. |
+| `-CarveAny` | switch | off | Triage: carve **every** YARA-hit region, including file-backed ones (sidecar marks them `injected:false` and names the DLL to verify). Without it, only injected regions are carved. |
 
-Because the collector defaults to **go-winpmem (AFF4)**, the **primary** analysis engine is
-**MemProcFS** - Volatility 3 is only used for raw/dmp images.
+### `-Carve` → Binary Ninja (optional deep reverse engineering)
+
+`-Carve` is **optional and analyst-invoked**. When a YARA rule hits inside a **Private + executable
+VAD** (the Windows signature of injected/reflective code - no on-disk backing), the worker reads that
+region and writes two files to `tools\binja\data\<stamp>\`:
+
+- `pid<PID>_<proc>_0x<base>.bin` - the raw region bytes (**inert**; never run on the analyst host).
+- `pid<PID>_<proc>_0x<base>.json` - sidecar with `base_address` (load address for correct
+  addressing), `size`, `protection`, `vad_type`, `injected` (true for Private+exec), `matched_rules`,
+  `arch_hint`, and a human `note`.
+
+**Carve on Windows, reverse on Linux.** The output is just bytes + metadata, so it is platform-
+agnostic; the Binary Ninja container under `tools\binja\` is Linux/X11. If the analyst box has no
+container runtime, copy `tools\binja\data\<stamp>\` to a Linux desktop and open it in the
+`irtoolkit-binja` container: load each `.bin` as **Raw**, set arch/platform + `base_address` from the
+sidecar, then re-analyze (the staged plugins - obfuscation_detection, binaryninja-ollama,
+binary_ninja_mcp - assist). **Treat `injected:true` regions as live malware** - analyze them only
+inside the isolated container.
+
+### Run it
 
 ```powershell
-# Default (AFF4) path - stage MemProcFS (+ -IncludeMemory to also stage the capture tools)
+# Stage the engine once (Part 1). AFF4 is the default capture -> MemProcFS:
 .\Build-OfflineToolkit.ps1 -IncludeMemProcFS
+#   raw/dmp fallback instead uses Volatility 3:  .\Build-OfflineToolkit.ps1 -IncludeVolatility [-StageSymbols]
 
-# Analyze the captured AFF4 image (MemProcFS, no internet symbols required)
+# 1) Analyze the captured AFF4 image (offline, no symbols needed):
 .\playbooks\windows\threat_hunting\Analyze-Memory.ps1 `
     -ImagePath ".\reports\HOSTNAME\memory_HOSTNAME.aff4" -OutputDir ".\reports\HOSTNAME"
 
-# Fallback only - RAW/MEM/DMP images use Volatility 3 (needs MS symbols on first run):
-.\Build-OfflineToolkit.ps1 -IncludeVolatility            # add -StageSymbols if analyst box is air-gapped
+# 2) Same, plus carve injected regions for Binary Ninja AND adjudicate the findings:
 .\playbooks\windows\threat_hunting\Analyze-Memory.ps1 `
-    -ImagePath ".\reports\HOSTNAME\memory_HOSTNAME.raw" -SkipPlugins "hashdump,ldrmodules"
+    -ImagePath ".\reports\HOSTNAME\memory_HOSTNAME.aff4" -OutputDir ".\reports\HOSTNAME" `
+    -Carve -Adjudicate
+
+# 3) RAW/MEM/DMP fallback (Volatility 3; skip slow plugins):
+.\playbooks\windows\threat_hunting\Analyze-Memory.ps1 `
+    -ImagePath ".\reports\HOSTNAME\memory_HOSTNAME.raw" -OutputDir ".\reports\HOSTNAME" `
+    -SkipPlugins "hashdump,ldrmodules"
 ```
 
-**Integrate findings with the rest of the evidence:**
+> **Only analyze a valid image.** The collector renames truncated/failed captures to
+> `INVALID_memory_<HOST>.*`; never run analysis on one of those.
+
+### Phase 3b - Verify every flagged PID (the enriched follow-up - do NOT skip)
+
+A YARA verdict is **earned, not assumed.** `-Adjudicate` produces two things you must read **together**:
+
+- **`YARA_Pivot_Report.md`** - ranks every hit PID. The ones marked **"true-positive-class - review/
+  eradicate first"** are **open leads**, not confirmed threats.
+- **`_status.json` `tp_count`** - the *live* adjudication's confirmed count.
+
+> **A `tp_count: 0` while the pivot lists TP-class PIDs is an OPEN run, not a clean one.** The two can
+> disagree, and you are not done until every flagged PID has an evidence-backed verdict. Do not stop at
+> the green status - that is how a real implant hides behind a clean summary.
+
+For **every** TP-class PID, gather the facts with the enriched scan, then decide from the evidence:
+
 ```powershell
-$combined = Get-Content ".\reports\HOSTNAME\Combined_Findings_*.json" | ConvertFrom-Json
-$memory   = Get-Content ".\reports\HOSTNAME\Memory_Findings_*.json"   | ConvertFrom-Json
-($combined + $memory) | ConvertTo-Json -Depth 5 |
-    Out-File ".\reports\HOSTNAME\Combined_Findings_WithMemory.json" -Encoding UTF8
+# 1) See which PIDs the pivot flagged:
+Get-Content .\reports\HOSTNAME\YARA_Pivot_TP.json | ConvertFrom-Json | Format-Table pid, name, rules
 
-.\playbooks\windows\threat_hunting\Get-FindingContext.ps1 `
-    -HostFolder ".\reports\HOSTNAME" `
-    -ReportPath ".\reports\HOSTNAME\Combined_Findings_WithMemory.json" -Live
+# 2) Enrich EVERY flagged PID - handles, injected regions, recovered C2/strings, capa/FLOSS, first-seen.
+#    Pass the REAL image path even if it lives outside the reports folder (e.g. C:\captures):
+.\tools\memprocfs\python\python.exe `
+    .\playbooks\windows\threat_hunting\memory_enrich.py `
+    "<path>\memory_HOSTNAME.aff4" ".\reports\HOSTNAME" <pid1>,<pid2>,<pid3>
+
+# 3) Read each PID's full footprint and assign a verdict:
+Get-Content .\reports\HOSTNAME\Memory_Enrichment.md
 ```
 
-**Why it runs separately:** memory analysis is resource-heavy and kept off the (air-gapped)
-target. The default MemProcFS/AFF4 path runs fully offline; only the Volatility 3 fallback
-needs internet on first run (to fetch Windows debug symbols, unless pre-staged with
-`-StageSymbols`). Separating analysis from collection keeps the offline host offline.
+**How to read each PID's enrichment (the verdict table):**
 
-> **IMPORTANT:** Only analyze an image whose filename does NOT start with `INVALID_`. The
-> collector renames truncated/failed captures to `INVALID_memory_<HOST>.*`.
+| What enrichment shows for the PID | Verdict |
+|---|---|
+| Injected exec region(s) **and** recovered C2/miner/wallet resolving to **real adversary infra** | **CONFIRMED** - eradicate; its footprint *is* the eradication scope |
+| Recovered domains are all the vendor's own SaaS (e.g. `*.adobe.com`), **0** injected regions/handles | **benign FP** - record why, clear it |
+| "Shellcode threads" but **0** injected regions and **0** IOCs | usually **benign JIT** (Acrobat/.NET/browsers) - confirm the thread starts are JIT stubs, not a payload |
+| Region is **file-backed** on a signed system DLL (the `LOLBin_*` cluster) | **benign** - the rule grazed a loaded library (verify its signature) |
+| Recovered "IOCs" trace to **files this analyst session handled** (case reports, test fixtures) | **self-reference** - not a host indicator |
 
-## Invoke-IRCollection.ps1 - full parameter reference
+> **Watch for analysis-tooling and agent processes.** The memory-capture tool (`go-winpmem.exe`,
+> `winpmem.exe`) buffers a slice of **physical RAM**, so *its* process memory holds **ambient strings
+> from every process** - unattributed RAM, not that tool's own C2. Likewise the toolkit's own
+> `python.exe`/`pwsh.exe` (and any analyst tooling) hold rule text and case strings in heap. Their
+> recovered strings are **candidates to attribute, never host IOCs.** An indicator is **confirmed only
+> after** you attribute it to a *non-tooling* process **and** real infrastructure.
+
+> **Do not let enrichment pollute `IOCs.json`.** Strings recovered from tooling/agent/self-reference
+> are **candidates**, not confirmed C2 - if they land in `c2_endpoints`, eradication will try to block
+> legitimate infrastructure. Promote a candidate to a confirmed IOC only after attribution. **The run
+> is "clean" only when every TP-class PID has an evidence-backed verdict** - record each verdict (and
+> *why*) so the next responder can trust it.
+
+For the YARA hit-to-verdict decision logic this phase uses, see **[WORKFLOW-YARA.md](WORKFLOW-YARA.md)**.
+
+---
+
+## Phase 4 - Eradicate (on the target, as Administrator)
+
+**What it does.** Kills malicious processes, quarantines implants (sha256-verified), unregisters
+persistence (tasks, COM, WMI, services), disables/revokes implicated accounts, and blocks C2 egress
+via firewall. **Every action is dry-run by default** and written to a rollback journal.
+
+### Run it
+
+```powershell
+.\Invoke-Eradication.ps1 -HostFolder .\reports\<HOSTNAME> -MinVerdict "Likely True Positive"          # dry-run
+.\Invoke-Eradication.ps1 -HostFolder .\reports\<HOSTNAME> -MinVerdict "Likely True Positive" -Apply   # apply
+```
+
+### Egress observation (OPTIONAL, deferred - extends past the analyst's visit)
+
+> **⚠️ Data-sensitive hosts: isolate FIRST, do not observe.** Egress observation deliberately leaves
+> outbound open for a window to learn the C2/exfil destinations - which means tolerating that the
+> implant **may keep exfiltrating** during that window. For a host holding sensitive/regulated data
+> (PII/PHI/secrets/crown-jewel IP) that trade is **not acceptable**: completely isolate the network
+> stack **before** investigation (`01_Contain-Host.ps1`, or
+> `Enforce-StrictFirewall.ps1 -FullInboundLockdown -BlockOutbound`), then run collection with
+> **`-NoEgressMonitor`**.
+
+Because C2 beacons **jitter** and can **dwell for hours**, a point-in-time `netstat` during collection
+routinely misses them. When you choose to observe, `Watch-Egress.ps1 -Start` (on by default;
+`-NoEgressMonitor` to skip) registers a SYSTEM scheduled task that snapshots outbound connections
+(`Get-NetTCPConnection` + owning process) every minute into an **append-only evidence log**
+(`C:\ProgramData\IRToolkit\egress-<id>\`), filtering RFC1918/management. When the observation window
+closes (default **24h**) a one-shot task **auto-blackholes egress**
+(`Enforce-StrictFirewall.ps1 -BlockOutbound`, keeping a management pinhole) and removes the poller.
+
+> **Return visit required.** The responder leaves the sensor running and **comes back after the
+> window** to (1) collect the egress evidence log (`Watch-Egress.ps1 -Collect` reports its path +
+> unique destinations) and bundle it as evidence, and (2) confirm the blackhole fired (`-Status` →
+> `blackhole: done`). Tune with `-WindowHours` / `-IntervalMin`; `-Blackhole` cuts egress
+> immediately, `-Stop` tears the sensor down without blackholing.
+
+---
+
+## Phase 5 - Restore
+
+**What it does.** Restores the firewall to its pre-lockdown known-good state **while keeping C2 IPs
+blocked**. Recovers quarantined files only after sha256-verifying them against the rollback journal.
+The egress blackhole is part of the same `.wfw`-backed firewall state, so
+`Enforce-StrictFirewall.ps1 -Rollback` reverses it too.
+
+```powershell
+.\playbooks\windows\06_Restore-Host.ps1
+```
+
+> Every orchestrator writes a uniform `_status.json` (`COMPLETED` / `PARTIAL` / `FAILED` + per-phase
+> results + `tp_count`) for SOAR gating.
+
+---
+
+# Part 3 - Reference
+
+## Output files (`reports\<HOSTNAME>\`)
+
+The reports are intentionally split: the three **final reports** show only beyond-doubt anomalies; the
+**full record** keeps every verdict; the **pivot-leads log** holds the downgraded leads so nothing is lost.
+
+| File | What it is |
+|---|---|
+| `Incident_Report.md` | **Final report.** Executive summary - true-positive-class findings only, with the remote-access/C2 narrative, implicated accounts, and the recommended eradication command. |
+| `Attack_Graph.md` | **Final report.** MITRE ATT&CK tactic-ordered kill-chain of the true-positive-class findings. |
+| `Adjudication_<stamp>.md` | **Final report.** Highly-suspicious findings only, with full per-finding evidence (signature, hash, path trust, command line, notes). |
+| `attck_navigator_layer.json` | ATT&CK Navigator v4.9 layer of observed techniques. |
+| `Adjudication_<stamp>.json` / `.csv` | **Full record** - *every* finding with verdict, confidence, and notes (nothing dropped). Machine-readable feed for SIEM. |
+| `Adjudication_PivotLeads_<stamp>.csv` | **Separate leads log** - lower-confidence findings (`Indeterminate` / `Likely False Positive` / `False Positive`). |
+| `Delta_<stamp>.json` | Run-to-run verdict diff (`NEW` / `RESOLVED` / `CHANGED_VERDICT`) vs the previous adjudication. |
+| `Combined_Findings_<stamp>.json` | Raw wave-1 findings (pre-adjudication), merged from all detection modules. |
+| `EDR_Report_<stamp>.json/.csv/.html` | Wave-1 EDR hunt output (raw detections before adjudication). |
+| `findings_amcache_<stamp>.json` | ShimCache / Amcache historical-execution findings. |
+| `Evidence\<finding>\` | Per-finding evidence bundle (copied binary, hashes, signature, modules, network) for TP-class findings. |
+| `Memory_Findings_<stamp>.json` | Memory-analysis findings (Phase 3, only if a memory image was analyzed). |
+| `_clock.json` | Host clock context (timezone, UTC offset, NTP sync state, skew). |
+| `_custody_<stamp>.json` + `_custody_log.jsonl` | Chain-of-custody seal - SHA256 manifest + HMAC-SHA256 signature. |
+| `forensics-<stamp>.zip` | Raw collected artifacts (event-log CSVs, process/network/persistence snapshots, ShimCache/Amcache exports). |
+| `_<Phase>_<stamp>.log` / `_runtime_<stamp>.log` | Per-phase and overall runtime logs. |
+
+## Invoke-IRCollection.ps1 - full parameters
 
 ### Output and identity
 
@@ -480,9 +676,10 @@ needs internet on first run (to fetch Windows debug symbols, unless pre-staged w
 | `-NoFirewallLockdown` | switch | off | Skip the default-deny inbound lockdown (not recommended on a live incident). |
 | `-AllowInboundPort` | int[] | `@()` | Keep ports open during lockdown (e.g. `5985` WinRM, `3389` RDP). |
 | `-AllowInboundRemoteAddress` | string[] | `@()` | Restrict pinhole ports to specific source IPs. |
+| `-NoEgressMonitor` | switch | off | Skip the deferred egress observation sensor (see Phase 4). |
 | `-PostRunExecutionPolicy` | string | `RemoteSigned` | Execution policy restored after the run. |
 
-## Step 1 (alt) - WinRM remote deployment of the EDR hunt only
+## Remote collection over WinRM (EDR hunt only)
 
 ```powershell
 .\playbooks\windows\threat_hunting\dev\Build-Toolkit.ps1   # build single-file payload
@@ -496,20 +693,7 @@ Invoke-Command -ComputerName TARGET_HOST `
         "-OutputFormat", "JSON", "-Quiet")
 ```
 
-## Step 4 - Eradication
-
-```powershell
-.\Invoke-Eradication.ps1 -HostFolder .\reports\<HOSTNAME> -MinVerdict "Likely True Positive"          # dry-run
-.\Invoke-Eradication.ps1 -HostFolder .\reports\<HOSTNAME> -MinVerdict "Likely True Positive" -Apply   # apply
-```
-
-## Step 5 - Restoration
-
-```powershell
-.\playbooks\windows\06_Restore-Host.ps1
-```
-
-## Analyze a collected run standalone
+## Re-run analysis on a collected run (standalone)
 
 ```powershell
 # Baseline-tune an EDR report (suppress OS noise, export CSV for SIEM)
@@ -527,6 +711,8 @@ Invoke-Command -ComputerName TARGET_HOST `
 
 > **AV note:** Add `IR_Toolkit\` and `%TEMP%` to your AV exclusion list before running tests.
 > Trend Micro and similar products may quarantine `.ps1` stub files created in temp during test runs.
+
+## Key scripts
 
 - Hunt scripts: `playbooks/windows/threat_hunting/`
 - Containment: `playbooks/windows/Enforce-StrictFirewall.ps1 -FullInboundLockdown`

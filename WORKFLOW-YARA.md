@@ -8,9 +8,23 @@ silently clears** (no blindspots). A match is *contextualised*, never *deleted*.
 See [readme.md](readme.md) for the adjudication philosophy, [WORKFLOW-LINUX.md](WORKFLOW-LINUX.md)
 and [WORKFLOW-WINDOWS.md](WORKFLOW-WINDOWS.md) for the per-platform memory pipelines.
 
+### How to read this guide
+
+This guide answers one question: **a YARA rule matched some bytes in memory - is it actually malware?**
+It reads top to bottom as a story:
+
+1. **[The problem](#the-problem-a-raw-yara-hit-is-not-a-verdict)** - why a raw match is not a verdict.
+2. **[How the tool gathers context](#how-the-tool-gathers-context-the-scan-pipeline)** - the scan pipeline (curate → triage → enrich).
+3. **[How you reach a verdict](#how-you-reach-a-verdict-the-decision-logic)** - the decision logic (five rules, with a flowchart).
+4. **[What happens to a confirmed hit](#from-a-true-positive-to-the-eradication-scope)** - pivoting a true positive into the full eradication scope.
+5. **[Worked examples](#worked-examples)** + **[quick reference](#quick-reference)** - real benign and true-positive hits, side by side.
+
+It applies to **both Windows and Linux**; differences are called out inline. You don't run anything
+here - this is the reasoning the toolkit automates and that you confirm by eye in the report.
+
 ---
 
-## Why a raw YARA hit is not a verdict
+## The problem: a raw YARA hit is not a verdict
 
 YARA matches **bytes**. A rule named `ELF_Mirai` or `Cobalt_Strike` firing tells you those bytes are
 present in memory - **not** that the malware is running. The same bytes legitimately appear in:
@@ -27,7 +41,7 @@ implant.
 
 ---
 
-## The scan pipeline (both platforms)
+## How the tool gathers context: the scan pipeline
 
 ```mermaid
 flowchart TD
@@ -61,7 +75,9 @@ flowchart TD
     classDef decision fill:#451a03,stroke:#f97316,color:#fed7aa
 ```
 
-### ① Curate by content + compile a canary
+The pipeline has three steps - the diagram's ①②③ map to **Curate → Triage → Enrich** below.
+
+### Step 1 - Curate by content + compile a canary
 Rules are filtered by **what they reference**, not by filename:
 
 - **Linux** (`linux_yara.py`): drop rules importing `pe`/`dotnet`/`macho` or built from
@@ -78,13 +94,13 @@ This is the single most important integrity check: it makes a silent scan failur
 > *no* externals, so one rule referencing `filename` failed the **entire** compile → the scanner ran
 > with **zero** rules → reported a false "clean." The canary turns that into an explicit UNTRUSTED.
 
-### ② Triage scan
+### Step 2 - Triage scan
 - **Linux native (default):** `yara-python` mmaps the whole image, one pass - **full physical
   coverage** (kernel + free pages), fast, but no PID yet.
 - **Windows:** MemProcFS (`vmmpyc`, C-backed) scans **per-process** directly - fast + already
   attributed.
 
-### ③ Enrich per hit (the disambiguator)
+### Step 3 - Enrich per hit (the disambiguator)
 For every match the toolkit records:
 
 | Field | Linux source | Windows source | What it tells you |
@@ -104,10 +120,10 @@ in the single pass. Both stream a rolling `_yara_results_<stamp>.jsonl` and writ
 
 ---
 
-## ④ The decision logic
+## How you reach a verdict: the decision logic
 
-Apply in order. The point is to **earn** a verdict from evidence, and to be honest about when you
-can't reach "without a doubt."
+Apply these five rules **in order**. The point is to **earn** a verdict from the context gathered
+above, and to be honest about when you can't reach "without a doubt."
 
 ```
                       ┌─────────────────────────────────────────────┐
@@ -123,8 +139,8 @@ can't reach "without a doubt."
                                    ┌────────────────┐  ┌───────────────────────────────┐
                                    │ TRUE POSITIVE  │  │ region == file/image (on disk)│
                                    │  (injected/    │  └──────┬────────────────────────┘
-                                   │  unbacked exec)│        │
-                                   └───────┬────────┘  ┌─────▼──────────────────────────┐
+                                   │  unbacked exec)│         │
+                                   └───────┬────────┘  ┌──────▼─────────────────────────┐
                                            │           │ verify backing file:           │
                               corroborate  │           │  hash/package (Linux)          │
                               (malfind/VAD,│           │  Authenticode+hash (Windows)   │
@@ -151,7 +167,7 @@ to certain as memory forensics gets.
 > already flags anon-exec regions; add external C2 (`sockstat`/netstat), an anomalous parent, or a
 > persistence hook and you have an undeniable, multi-signal true positive. On Windows the toolkit
 > ranks every hit by **true-positive confidence** and writes a dedicated `YARA_Pivot_Report.md` - see
-> [§⑤ Pivoting on a true positive](#-pivoting-on-a-true-positive--eradication-scope).
+> [From a true positive to the eradication scope](#from-a-true-positive-to-the-eradication-scope).
 
 ### Rule C - File-backed ⇒ verify the file, don't assume
 A match in a **file-backed** region (`file` on Linux, `Image`/`Mapped` on Windows) means the rule hit
@@ -180,7 +196,7 @@ unusual** process is more concerning than the same rule across every GUI app.
 
 ---
 
-## ⑤ Pivoting on a true positive → eradication scope
+## From a true positive to the eradication scope
 
 Identifying *which* PID is a true positive is only half the job - eradication has to remove the implant's
 **entire footprint**, or it comes back. On Windows the toolkit does this in two automatic stages.
@@ -220,6 +236,15 @@ appended to `Attack_Graph.md`.
 
 The recovered files / keys / mutexes / C2 / implicated-PID chain are merged into **`IOCs.json`** so
 `Invoke-Eradication.ps1` blocks the C2 and surfaces the removal scope (analyst-gated; nothing auto-deletes).
+
+**Optional - carve the injected regions for Binary Ninja.** Run the memory analysis with
+`Analyze-Memory.ps1 -Carve` (see [WORKFLOW-WINDOWS.md Phase 3](WORKFLOW-WINDOWS.md#phase-3---memory-analysis-analyst-machine))
+and every YARA hit in a **Private + executable (injected) VAD** is dumped as raw `.bin` + a JSON
+sidecar (base address, perms, `injected`, matched rules, arch) into `tools\binja\data\<stamp>\`. These
+are the same true-positive regions ranked above - now in a form you can reverse-engineer. The carve is
+**inert** (raw bytes, never executed); analyse it only in the isolated `irtoolkit-binja` container
+(`tools\binja\`). This mirrors the Linux carve below - the sidecar schema is identical, so one Binary
+Ninja loader handles both platforms.
 
 ### Linux — carve, enrich, capa/FLOSS (end-to-end walkthrough)
 

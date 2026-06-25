@@ -317,6 +317,9 @@ $md.Add(""); $md.Add("**$($findings.Count) raw findings -> $($tp.Count) true-pos
 $md.Add("## 2. Attack chain (MITRE ATT&CK)"); $md.Add("")
 if ($techniques.Count) { foreach ($t in $techniques.Keys) { $md.Add("- **$t**") } } else { $md.Add("- No ATT&CK techniques associated.") }
 $md.Add(""); $md.Add("---"); $md.Add("")
+# Memory YARA hits are OPEN LEADS until each is verified by the enriched follow-up (Phase 3b) -
+# never report this host "clean / no eradication" while unverified memory leads exist.
+$yaraMem = @($findings | Where-Object { (Field $_ @('Type')) -in @('YARA Match (Memory)','Injected Code (memory YARA)') })
 $md.Add("## 3. True-positive-class findings"); $md.Add("")
 if ($tp.Count) {
     $md.Add("| Verdict | Conf | Type | Target | Subject |"); $md.Add("|---|---|---|---|---|")
@@ -324,6 +327,8 @@ if ($tp.Count) {
         $subj=(Field $f @('SubjectPath')) -replace '\|','\|'
         $md.Add("| $(Field $f @('Verdict')) | $(Field $f @('Confidence')) | $(Field $f @('Type')) | $(Field $f @('Target')) | ``$subj`` |")
     }
+} elseif ($yaraMem.Count) {
+    $md.Add("No findings cleared the **live** adjudication bar - but **$($yaraMem.Count) memory YARA hit(s) are OPEN LEADS**, not yet verified. This host is **NOT clean** until each is resolved: see *YARA matches by process* below and ``YARA_Pivot_Report.md`` (true-positive-class = review first), then run the enriched follow-up on every flagged PID (WORKFLOW-WINDOWS Phase 3b).")
 } else { $md.Add("No true-positive-class findings. **No eradication required.**") }
 $md.Add(""); $md.Add("---"); $md.Add("")
 
@@ -331,8 +336,7 @@ $md.Add(""); $md.Add("---"); $md.Add("")
 # A process can match several rules; collapse to one row per PID. Each rule carries
 # the VAD context (anon-exec = injected/unbacked -> real; file-backed -> verify signature)
 # so an injected-code hit is distinguishable from a rule grazing a loaded DLL.
-$yaraMem = @($findings | Where-Object { (Field $_ @('Type')) -in @('YARA Match (Memory)','Injected Code (memory YARA)') })
-if ($yaraMem.Count) {
+if ($yaraMem.Count) {                                     # $yaraMem computed in section 3 above
     $clusters = [ordered]@{}
     foreach ($f in $yaraMem) {
         $tgt = Field $f @('Target')                       # "PID 1234 (proc.exe)"
@@ -346,8 +350,14 @@ if ($yaraMem.Count) {
         if (-not $rule) { $rule = ([regex]::Match($d, 'Rule:\s*(.+)$')).Groups[1].Value.Trim() }
         [void]$clusters[$tgt].Add($(if ($ctx) { "$rule ($ctx)" } else { $rule }))
     }
-    $md.Add("## YARA matches by process (memory)"); $md.Add("")
+    $md.Add("## YARA matches by process (memory) - OPEN LEADS"); $md.Add("")
     $md.Add("$($yaraMem.Count) match(es) across $($clusters.Count) process(es), clustered per PID. Context: **anon-exec = injected/unbacked code** (real); file-backed = verify signature/hash."); $md.Add("")
+    $md.Add("> **These are leads, not verdicts - nothing here is suppressed.** Each PID must be verified by the enriched follow-up before it is cleared or eradicated: ``YARA_Pivot_Report.md`` ranks them (true-positive-class = review first), then enrich each flagged PID and read its footprint -"); $md.Add("")
+    $md.Add("``````powershell")
+    $md.Add(".\tools\memprocfs\python\python.exe .\playbooks\windows\threat_hunting\memory_enrich.py <image> .\$HostName <pid1>,<pid2>")
+    $md.Add("Get-Content .\$HostName\Memory_Enrichment.md   # recovered handles/regions/C2 per PID -> verdict")
+    $md.Add("``````")
+    $md.Add("See **WORKFLOW-WINDOWS.md Phase 3b** for how to read each PID's enrichment into a verdict (incl. tooling/self-reference traps)."); $md.Add("")
     $md.Add("| Process (PID) | Hits | Rule (VAD context) |"); $md.Add("|---|---:|---|")
     foreach ($k in ($clusters.Keys | Sort-Object { $clusters[$_].Count } -Descending)) {
         $rules = ($clusters[$k] | Select-Object -Unique) -join '; '
