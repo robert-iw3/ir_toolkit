@@ -35,7 +35,10 @@ target/analyst host - recorded, not bundled).
 | kernel **ISF / symbols** | version-EXACT kernel layout (a generic `vmlinux.h`/BTF will not work) | **staged** `tools/symbols/` via `--stage-symbols` (build while connected); else fetched at analysis time |
 | YARA rules (Elastic, ReversingLabs, Neo23x0, **abuse.ch yaraify**) | `--yara` in-memory signature scan | **staged** `tools/yara_rules/<pack>/` via `--include-memory`. `linux_yara.py` drops PE/dotnet/macho-bound + Windows-API-only rules **by content** (~9,600 → ~400 Linux-applicable), declares the file-scan externals, and compiles per-file namespaces into one `.yarc` (an ELF canary proves the engine read memory). **Two engines:** `--yara-engine native` = yara-python over the whole image (fast, full physical coverage, no PID); `--yara-engine vol` = `linux_yara_worker.py` drives Volatility 3 **as a library** (init the 25GB layer once, then loop tasks in-process - *not* per-PID CLI, which re-inits ~130s/call) for **per-PID attribution + per-process timeout + rolling resumable JSONL**. |
 | `yara-python` | compile + load the ruleset | **vendored** in `tools/vol3_wheels/` |
-| `python3-venv`, `pip`, `unzip` | analyzer venv + rule-pack extraction | **assumed** |
+| `memory_enrich.py` (stdlib) | scan carved true-positive regions' strings (ASCII + UTF-16LE) for C2/Tor/crypto/exfil/cred IOCs → findings → `IOCs.json` + report; also IOC-sweeps FLOSS-deobfuscated strings | **stdlib only** (+ optional capa/FLOSS below) |
+| **capa** + **FLOSS** (standalone) | capabilities/ATT&CK + **deobfuscated** strings over each carved injected region (auto-run by `memory_enrich.py`, `-f sc64 -j`) | **staged** `tools/capa/capa`, `tools/floss/floss` via `--include-memory` (Mandiant Linux release zips; capa bundles its rules) |
+| **Binary Ninja** (free, containerized) | reverse-engineer carved injected regions (`--carve` keeps them in `tools/binja/data/`) | **built on demand** by `tools/binja/launch.sh` (downloads BN free; auto-handles podman/docker + X11/Wayland + SELinux; `binja/` is the only git-tracked part of `tools/`). Needs `podman`/`docker` + an X server. |
+| `python3-venv`, `pip`, `unzip` | analyzer venv + rule-pack / capa-floss extraction | **assumed** |
 | `debuginfod-find` (elfutils) | universal ISF fetch by build-id (connected staging) | **assumed** (optional) |
 | `dpkg-deb` | extract a dbgsym `vmlinux` without root | **assumed** (Debian) |
 
@@ -61,8 +64,11 @@ Staged tools land in `tools/`; flags: `-IncludeMemory -IncludeMemProcFS -Include
 | Volatility 3 standalone (`vol.exe`) | secondary memory analysis (RAW/DMP) | **staged** `tools/vol.exe` (`-IncludeVolatility`) |
 | **YARA** engine (`yara64.exe`, `yarac64.exe`) | file + memory signature scan / **rule compilation** | **staged** `tools/` |
 | YARA rules (Elastic, ReversingLabs, Neo23x0, **abuse.ch yaraify**) | file + memory scan | **staged** `tools/yara_rules/<pack>/` (`-IncludeYaraRules`). `memory_yara.py` drops **non-Windows** rules by name, declares externals, and compiles with `yarac64` to one `.yac` (DOS-stub canary proves the scan ran). |
+| `memory_enrich.py` (per-TP footprint) + **capa** + **FLOSS** | handles/persistence/lineage/network footprint, injected-region carve, capabilities/ATT&CK + deobfuscated strings, RAM↔USB first-seen correlation | **staged** `tools/capa/capa.exe` (`-IncludeCapa`), `tools/floss/floss.exe` (`-IncludeFloss`); the module is PowerShell-invoked Python via the embeddable runtime |
 | Windows debug symbols (PDBs) | Volatility 3 symbol resolution | **auto-fetched** from Microsoft on first run (or pre-staged with `-StageSymbols`) |
 | LOLDrivers list | vulnerable-driver catalog | **staged** `tools/loldrivers.json` |
+| `Get-NetTCPConnection`, `Register-ScheduledTask`, `Set-NetFirewallProfile` | egress-observation sensor (`Watch-Egress.ps1`) + deferred outbound blackhole (`Enforce-StrictFirewall.ps1 -BlockOutbound`) | **assumed** (OS-provided) |
+| **Binary Ninja** (Linux container) | RE of carved regions — Windows **carves only**; analyse the portable `tools/binja/data/` output on a Linux desktop (the container is X11/Linux) | see Linux row + `planning/windows_binja_port.md` |
 
 > Symbols are the inverse of Linux: Windows **auto-fetches PDBs** (no per-kernel ISF problem);
 > Linux must build a kernel-exact ISF. YARA design is **twinned** - each platform compiles a
@@ -83,6 +89,7 @@ Staged tools land in `tools/`; flags: `-IncludeMemory -IncludeMemProcFS -Include
 | Dependency | Role |
 |---|---|
 | `ip`, `nft` / `iptables` | network isolation / firewall |
+| `ss` / `conntrack`, `cron` (or systemd-timer) | egress-observation sensor (`monitor_egress.sh`): poll outbound flows over a window, then auto-blackhole egress |
 | `usbguard` | USB device control |
 | `nmcli`, `resolvectl`, `dnsmasq` | network/DNS controls |
 | `dpkg` / `rpm`, `debsums`, `getcap` | package verification, changed-file + capability triage |

@@ -2,7 +2,7 @@
 
 Runs the cloud collection inside a throwaway `alpine:edge` container that bundles the
 AWS / Azure / GCP CLIs, Terraform, and Python. The investigation leaves **no trace on the
-launching host** — evidence is shipped to locked-down cloud storage and the local scratch
+launching host** - evidence is shipped to locked-down cloud storage and the local scratch
 is wiped on exit.
 
 ## Build

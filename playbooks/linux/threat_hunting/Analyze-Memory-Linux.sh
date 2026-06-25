@@ -11,7 +11,7 @@
 # Usage:
 #   Analyze-Memory-Linux.sh --image PATH [--host-folder DIR] [--symbols DIR]
 #                           [--kernel VER] [--yara] [--yara-engine native|vol]
-#                           [--yara-broad] [--yara-proc-timeout S] [--adjudicate]
+#                           [--yara-broad] [--yara-proc-timeout S] [--carve] [--adjudicate]
 #                           [--keep-env] [--dry-run] [--quiet]
 #
 #   --symbols DIR   use a prebuilt ISF dir (skip building)
@@ -27,6 +27,10 @@
 #                   rolling _yara_results_<stamp>.jsonl + a _yara_results_<stamp>.json summary.
 #   --yara-broad    also include platform-generic rules (broader but noisier). Default: Linux-only.
 #   --yara-proc-timeout S   vol engine: per-process scan timeout in seconds (default 180)
+#   --carve         KEEP carved true-positive injected regions in tools/binja/data/<stamp>/ for
+#                   Binary Ninja RE. Injected (anon+exec) regions are ALWAYS carved + string-scanned
+#                   for C2/exfil/crypto/cred IOCs (memory_enrich); without --carve the raw bytes are
+#                   DELETED after enrichment (they are potential live malware).
 #   --adjudicate    merge findings into the newest Combined_Findings + re-run adjudicate.py
 #   --keep-env      do NOT tear down the venv/symbols (for debugging)
 # ==============================================================================
@@ -39,7 +43,7 @@ ADJUDICATOR="${SCRIPT_DIR}/adjudicate.py"
 
 IMAGE=""; HOST_FOLDER=""; SYMBOLS=""; KERNEL="$(uname -r)"; BUILD_ID=""; DBGD_URLS=""
 YARA=0; ADJUDICATE=0; KEEP=0; DRYRUN=0; QUIET=0; FETCH=0; YARA_SCOPE=""; YARA_TIMEOUT=""
-YARA_ENGINE=""; YARA_BROAD=0; YARA_PROC_TIMEOUT=""
+YARA_ENGINE=""; YARA_BROAD=0; YARA_PROC_TIMEOUT=""; CARVE=0; CARVE_DIR=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -55,6 +59,8 @@ while [[ $# -gt 0 ]]; do
         --yara-scope)  YARA_SCOPE="$2"; shift 2 ;;           # vol engine: process | full
         --yara-timeout) YARA_TIMEOUT="$2"; shift 2 ;;
         --yara-proc-timeout) YARA_PROC_TIMEOUT="$2"; shift 2 ;;  # vol engine: per-process timeout (s)
+        --carve)       CARVE=1; shift ;;                     # KEEP carved TP regions for Binary Ninja
+        --carve-dir)   CARVE_DIR="$2"; shift 2 ;;            # override carve output dir
         --adjudicate)  ADJUDICATE=1; shift ;;
         --fetch-symbols|--install-dbgsym) FETCH=1; shift ;;  # debuginfod + distro pkg mgr (sudo)
         --keep-env)    KEEP=1; shift ;;
@@ -159,6 +165,8 @@ ARGS=(--image "$IMAGE" --output-dir "$HOST_FOLDER" --stamp "$STAMP")
 [[ -n "$YARA_SCOPE" ]] && ARGS+=(--yara-scope "$YARA_SCOPE")
 [[ -n "$YARA_TIMEOUT" ]] && ARGS+=(--yara-timeout "$YARA_TIMEOUT")
 [[ -n "$YARA_PROC_TIMEOUT" ]] && ARGS+=(--yara-proc-timeout "$YARA_PROC_TIMEOUT")
+[[ $CARVE -eq 1 ]] && ARGS+=(--carve)
+[[ -n "$CARVE_DIR" ]] && ARGS+=(--carve-dir "$CARVE_DIR")
 [[ $QUIET -eq 1 ]] && ARGS+=(--quiet)
 log "running analyzer..."
 python "$ANALYZER" "${ARGS[@]}" || log "analyzer returned non-zero (see output)."

@@ -123,8 +123,8 @@ can't reach "without a doubt."
                                    ┌────────────────┐  ┌───────────────────────────────┐
                                    │ TRUE POSITIVE  │  │ region == file/image (on disk)│
                                    │  (injected/    │  └──────┬────────────────────────┘
-                                   │  unbacked exec)│         │
-                                   └───────┬────────┘  ┌──────▼─────────────────────────┐
+                                   │  unbacked exec)│        │
+                                   └───────┬────────┘  ┌─────▼──────────────────────────┐
                                            │           │ verify backing file:           │
                               corroborate  │           │  hash/package (Linux)          │
                               (malfind/VAD,│           │  Authenticode+hash (Windows)   │
@@ -220,6 +220,45 @@ appended to `Attack_Graph.md`.
 
 The recovered files / keys / mutexes / C2 / implicated-PID chain are merged into **`IOCs.json`** so
 `Invoke-Eradication.ps1` blocks the C2 and surfaces the removal scope (analyst-gated; nothing auto-deletes).
+
+### Linux — carve, enrich, capa/FLOSS (end-to-end walkthrough)
+
+The Linux pivot is the same idea on the proven engine, run off-host on the analyst machine (memory
+**capture** happens on the target via `Invoke-IRCollection-Linux.sh --capture-memory`; **analysis**
+needs symbols, so it runs separately — the air-gapped split):
+
+```bash
+playbooks/linux/threat_hunting/Analyze-Memory-Linux.sh \
+    --image reports/<host>/memory_<host>.raw --host-folder reports/<host> \
+    --yara --carve --adjudicate
+```
+
+Step by step, and what each produces:
+
+1. **Triage + per-PID enrichment** — native scan finds *which* signatures are present, then the
+   per-process worker attributes each to a PID and adds VMA context (`anon`/`file`, perms, backing
+   path, matched strings). → `_yara_results_<stamp>.{jsonl,json}`, report **Memory forensics & YARA**.
+2. **Carve** — every injected region (`anon`+exec) is carved to `tools/binja/data/<stamp>/` as
+   `pid<PID>_<proc>_0x<addr>.bin` + a JSON sidecar (`base_address`, `perms`, `region`, `matched_rules`).
+3. **Enrich (`memory_enrich.py`)** — scans each carved region's strings (ASCII + UTF-16LE) for
+   **C2 IPs/domains/URLs, Tor `.onion`, Telegram/Discord exfil, Monero + miner configs/wallets, AWS
+   keys, private keys**; **capa** (`-f sc64 -j`) adds capabilities/ATT&CK and **FLOSS** recovers
+   **deobfuscated** strings (encoded C2 plain `strings` miss) — which are IOC-swept too. →
+   `Memory_Enrichment_<stamp>.{json,md}` (defanged) + common-schema findings.
+4. **Adjudicate + report** — findings merge into `Combined_Findings` → verdict ladder → `IOCs.json`
+   `c2_endpoints` (so eradication blocks the C2) + `Incident_Report.md`.
+5. **Cleanup** — the carved bytes are **potential live malware**, so they are **deleted after
+   enrichment**; the extracted IOCs remain. `--carve` **keeps** them for Binary Ninja
+   (`tools/binja/launch.sh`).
+
+> **What this proves on a clean host (live run against `reports/ubuntu-main`):** the worker recarved
+> 2 regions (`networkd-dispat`/python3.13, `nvidia-powerd`), `memory_enrich` + capa + FLOSS scanned
+> them in 9s → **0 IOCs, 0 capabilities** (capa 0 rules, FLOSS 226 *static* but 0 *decoded* strings),
+> reports regenerated with **0 C2** — i.e. the full pipeline executes end-to-end on a real image and
+> correctly **finds nothing in benign regions** (no FP flood). On a compromised host the same path
+> surfaces the implant's C2 in `IOCs.json` and its capabilities in `Memory_Enrichment.md`. The
+> extraction itself is proven by `test_37_memory_enrich_linux.py` (synthetic adversary region → full
+> catalog; FLOSS-deobfuscated C2 surfaces; benign infra dropped).
 
 ### Corroborate until it's confirmed - what this exposed in a real-world investigation
 

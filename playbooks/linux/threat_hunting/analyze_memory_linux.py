@@ -973,6 +973,13 @@ def main():
     ap.add_argument("--no-yara-followup", dest="yara_followup", action="store_false",
                     help="native engine: do NOT auto-run the per-process enrichment after triage "
                          "finds matches (default: follow up to attribute + add VMA context).")
+    ap.add_argument("--carve", action="store_true",
+                    help="KEEP carved true-positive injected regions (anon+exec hits) in "
+                         "tools/binja/data/<incident>/ for Binary Ninja RE. They are always carved + "
+                         "string-scanned for IOCs (memory_enrich); without --carve the raw bytes "
+                         "(potential live malware) are DELETED after enrichment.")
+    ap.add_argument("--carve-dir", default=None,
+                    help="override the carve output dir (default tools/binja/data/<stamp>/).")
     ap.add_argument("--yara-scope", choices=["process", "full"], default="full",
                     help="vol engine only: process = vmayarascan (per-PID); full = yarascan")
     ap.add_argument("--yara-timeout", type=int, default=7200,
@@ -1030,6 +1037,17 @@ def main():
         import time as _t
         worker = os.path.join(os.path.dirname(os.path.abspath(__file__)), "linux_yara_worker.py")
         jsonl = os.path.join(out_dir, f"_yara_results_{args.stamp}.jsonl")
+        # Carving: TP injected regions (anon+exec hits) are carved so memory_enrich can scan their
+        # strings for C2/exfil/crypto/cred IOCs. The carved bytes are potential live malware, so
+        # they are DELETED after enrichment UNLESS --carve (the Binary Ninja RE workflow) keeps them.
+        worker_env = dict(os.environ)
+        repo_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        carve_dir = args.carve_dir or os.path.join(repo_root, "tools", "binja", "data", args.stamp)
+        keep_carved = bool(args.carve)
+        worker_env["IR_CARVE_DIR"] = carve_dir
+        if keep_carved:
+            print(f"[mem]   carving injected regions -> {carve_dir} (kept for Binary Ninja)",
+                  file=sys.stderr, flush=True)
         if args.yara_engine == "native":
             print("[mem]   YARA native triage (engine=yara-python, full image) …", file=sys.stderr,
                   flush=True)
@@ -1056,7 +1074,8 @@ def main():
                 jl = os.path.join(out_dir, f"_yara_followup_{args.stamp}.jsonl")
                 _s2 = _t.time()
                 subprocess.run([sys.executable, worker, image, yarc, jl,
-                                args.symbols or "-", str(args.yara_proc_timeout)], check=False)
+                                args.symbols or "-", str(args.yara_proc_timeout)],
+                               env=worker_env, check=False)
                 yara_dur += int(_t.time() - _s2)
                 try:
                     with open(jl, encoding="utf-8") as fh:
@@ -1074,7 +1093,8 @@ def main():
                   f"rolling log: {jsonl}", file=sys.stderr, flush=True)
             _s = _t.time()
             subprocess.run([sys.executable, worker, image, yarc, jsonl,
-                            args.symbols or "-", str(args.yara_proc_timeout)], check=False)
+                            args.symbols or "-", str(args.yara_proc_timeout)],
+                           env=worker_env, check=False)
             yara_dur = int(_t.time() - _s)
             with open(jsonl, encoding="utf-8") as fh:
                 parsed = linux_yara.parse_worker_jsonl(fh.readlines())
@@ -1101,6 +1121,34 @@ def main():
                 f"Raise --yara-timeout, check yara-python, or try --yara-engine vol.", "N/A"))
         _write_yara_results(out_dir, args.stamp, args.yara_engine, image, yara_n, yara_failed,
                             yara_dur, timed_out, canary, yrows)
+
+        # MEMORY ENRICHMENT: scan the carved TP region(s) for C2/exfil/crypto/cred IOCs (strings),
+        # fold the findings in, then CLEAN UP the carved bytes (potential live malware) — UNLESS
+        # --carve keeps them for Binary Ninja RE.
+        import glob as _glob
+        carved = _glob.glob(os.path.join(carve_dir, "*.bin")) if os.path.isdir(carve_dir) else []
+        if carved:
+            try:
+                import memory_enrich
+                efindings, _ = memory_enrich.enrich(carve_dir, out_dir, args.stamp, quiet=args.quiet)
+                findings.extend(efindings)
+            except Exception as e:                       # enrichment is best-effort, never fatal
+                print(f"[mem]   enrichment skipped: {e}", file=sys.stderr)
+            if keep_carved:
+                print(f"[mem]   {len(carved)} carved region(s) kept in {carve_dir} — RE with: "
+                      f"tools/binja/launch.sh", file=sys.stderr, flush=True)
+            else:
+                for p in carved + _glob.glob(os.path.join(carve_dir, "*.json")):
+                    try:
+                        os.remove(p)
+                    except OSError:
+                        pass
+                try:
+                    os.rmdir(carve_dir)                  # remove the stamp dir if now empty
+                except OSError:
+                    pass
+                print(f"[mem]   {len(carved)} carved region(s) removed after enrichment (cleanup); "
+                      f"rerun with --carve to keep them for Binary Ninja.", file=sys.stderr, flush=True)
 
     out_path = os.path.join(out_dir, f"Memory_Findings_{args.stamp}.json")
     with open(out_path, "w", encoding="utf-8") as fh:

@@ -1,7 +1,7 @@
 # Ephemeral cloud-IR collection container.
 #
 # The investigation runs INSIDE this throwaway container (run with --rm). The only
-# persistent trace is the evidence uploaded to locked-down cloud storage — the host
+# persistent trace is the evidence uploaded to locked-down cloud storage - the host
 # that launched the container keeps nothing. Credentials are passed at run time
 # (env / mounted secret), never baked into the image.
 #
@@ -26,7 +26,7 @@ RUN apk add --no-cache --virtual .build-deps \
     && python3 -m pip install --no-cache-dir --break-system-packages azure-cli \
     && apk del .build-deps
 
-# Terraform — Alpine community dropped the package (license), so install the official
+# Terraform - Alpine community dropped the package (license), so install the official
 # pinned binary for provisioning the locked-down evidence storage.
 ARG TERRAFORM_VERSION=1.9.8
 RUN curl -fsSL "https://releases.hashicorp.com/terraform/${TERRAFORM_VERSION}/terraform_${TERRAFORM_VERSION}_linux_amd64.zip" \
@@ -35,7 +35,7 @@ RUN curl -fsSL "https://releases.hashicorp.com/terraform/${TERRAFORM_VERSION}/te
     && rm /tmp/tf.zip \
     && terraform version
 
-# Google Cloud CLI — official tarball, musl-compatible, uses the system python3.
+# Google Cloud CLI - official tarball, musl-compatible, uses the system python3.
 ARG GCLOUD_VERSION=496.0.0
 RUN curl -fsSL "https://dl.google.com/dl/cloudsdk/channels/rapid/downloads/google-cloud-cli-${GCLOUD_VERSION}-linux-x86_64.tar.gz" \
         -o /tmp/gcloud.tar.gz \
@@ -51,7 +51,7 @@ WORKDIR /opt/ir-toolkit
 COPY . /opt/ir-toolkit
 RUN chmod +x docker/entrypoint.sh Invoke-IRCollection-Cloud.sh 2>/dev/null || true
 
-# Ephemeral scratch — collections land here, ship to cloud storage, then vanish with
+# Ephemeral scratch - collections land here, ship to cloud storage, then vanish with
 # the container. Mount as tmpfs (--tmpfs /work) so nothing ever touches a real disk.
 ENV IR_WORKDIR=/work
 RUN mkdir -p /work

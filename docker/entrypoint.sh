@@ -47,6 +47,6 @@ set -e
 # scratch so nothing collection-related remains in the (throwaway) container layer.
 if [[ -n "${IR_EVIDENCE_BUCKET:-}" && "${IR_WIPE_WORKDIR:-1}" == "1" ]]; then
     rm -rf "${WORKDIR:?}/"* 2>/dev/null || true
-    echo "[entrypoint] local scratch wiped — traces remain only in cloud storage."
+    echo "[entrypoint] local scratch wiped - traces remain only in cloud storage."
 fi
 exit "$rc"

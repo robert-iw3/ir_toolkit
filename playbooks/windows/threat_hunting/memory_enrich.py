@@ -6,22 +6,22 @@ The YARA pivot identifies WHICH processes are true positives; this gathers, for 
 those PIDs, EVERYTHING the implant touched that the memory image still holds, so eradication
 can be complete and nothing is missed:
 
-    handles    -> dropped files, registry persistence (Run/Services/IFEO), mutexes (implant
-                  locks), named pipes / ALPC (C2 IPC)
-    modules    -> loaded DLLs + injected/unbacked executable regions
-    network    -> C2 endpoints to block
-    lineage    -> parent + child processes (the rest of the foothold)
-    region     -> the injected exec region carved to _region_<pid>_<addr>.bin, with C2-config
-                  IOCs (IPs / domains / URLs) recovered from it for offline capa/CyberChef
+    handles   -> dropped files, registry persistence (Run/Services/IFEO), mutexes (implant
+                 locks), named pipes / ALPC (C2 IPC)
+    modules   -> loaded DLLs + injected/unbacked executable regions
+    network   -> C2 endpoints to block
+    lineage   -> parent + child processes (the rest of the foothold)
+    region    -> the injected exec region carved to _region_<pid>_<addr>.bin, with C2-config
+                 IOCs (IPs / domains / URLs) recovered from it for offline capa/CyberChef
     first-seen -> the process create time (from the main thread's ftCreateTime) - the RAM anchor
-                  that gets correlated against USB device first-connect times to test the entry vector
+                 that gets correlated against USB device first-connect times to test the entry vector
 
 Output: Memory_Enrichment_<ts>.json - a per-PID dossier plus a rolled-up eradication IOC bundle;
 Memory_Enrichment.md; the memory-derived chain + a first-seen correlation timeline appended to
 Attack_Graph.md; and Timeline_Correlation.md. Only ELEVATES/collects - it never suppresses a finding.
 
 Usage: memory_enrich.py <image> <out_dir> <pid>[,<pid>...]
-       memory_enrich.py --correlate <out_dir>    # re-join RAM<->USB first-seen (no image; run after
+       memory_enrich.py --correlate <out_dir>   # re-join RAM<->USB first-seen (no image; run after
                                                  # collecting USB history live on the affected host)
 """
 import sys, os, re, json, glob

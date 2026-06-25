@@ -1,0 +1,7 @@
+# Carved memory regions / malware samples land here for Binary Ninja analysis.
+# These are RUNTIME EVIDENCE (potentially live malware) — never commit them.
+# Ignore everything except this file and a README; carved subfolders + their
+# .bin/.json sidecars are evidence-only.
+*
+!.gitignore
+!readme.md

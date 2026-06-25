@@ -256,7 +256,8 @@ python3 playbooks/linux/threat_hunting/analyze_memory_linux.py --offline-dir vol
 Output `Memory_Findings_<stamp>.json` (common schema, **priority-ordered** - correlated threats
 first) → add to `Combined_Findings` and re-run `adjudicate.py` to fold into the verdict ladder.
 YARA perf knobs: `--yara-engine native|vol`, `--yara-broad` (add generic rules), `--yara-timeout`
-(native), `--yara-proc-timeout` (per-process cap), `--no-yara-followup`, `--yara-rules-dir`. Both
+(native), `--yara-proc-timeout` (per-process cap), `--no-yara-followup`, `--carve` (carve TP regions
+for Binary Ninja — see below), `--yara-rules-dir`. Both
 engines stream a rolling `_yara_results_<stamp>.jsonl` during the scan and write a
 `_yara_results_<stamp>.json` summary (engine, rules, duration, canary-trusted, per-match attribution)
 - surfaced in the incident report's **Memory forensics & YARA** section.
@@ -297,6 +298,56 @@ finding with the region/perms/path/strings and a *"verify hash/package"* next st
 `anon`+executable hit to Critical, and lets the adjudication ladder + analyst make the call with full
 context. The breadth note ("matched N processes - likely shared bytes, but rule out a library
 injection") is exactly that: context, not a clearance.
+
+### Memory IOC enrichment + carve → Binary Ninja (deeper RE)
+
+A confirmed hit is rarely the end — you want the implant's IOCs and to know *what the code does*. When
+YARA runs, the per-process worker **carves each injected region** (anonymous executable memory — the
+strongest TP signal; `IR_CARVE_ANY=1` carves any hit for triage) and `memory_enrich.py` **scans its
+strings (ASCII + UTF-16LE)** for the IOCs the implant left in memory:
+
+- **network** → C2 IPs / domains / URLs (incl. `stratum`/`ws`/`tcp` schemes), Tor `.onion`
+- **exfil**   → Telegram bot tokens, Discord webhooks
+- **crypto**  → Monero addresses + miner command lines / wallets
+- **creds**   → AWS keys, private-key blocks
+
+These become findings → `Combined_Findings` → adjudication → **`IOCs.json` `c2_endpoints` + the
+incident report** (and `Memory_Enrichment_<stamp>.{json,md}`, defanged). Benign OS/CDN/distro hosts +
+RFC1918/loopback are dropped (no FP flood).
+
+> **Cleanup (default):** the carved bytes are **potential live malware**, so they are **DELETED after
+> enrichment** — the extracted IOCs remain in the findings. Pass **`--carve`** to **KEEP** them in
+> `tools/binja/data/<incident>/` for the Binary Ninja workflow:
+
+```bash
+playbooks/linux/threat_hunting/analyze_memory_linux.py --image mem.raw --yara --carve
+#   or via the orchestrator:  Analyze-Memory-Linux.sh --yara --carve --adjudicate
+```
+
+> Memory **capture** happens on the target (`Invoke-IRCollection-Linux.sh --capture-memory`); this
+> **analysis** (vol + symbols + yara + carve + enrich) runs **off-host** on the analyst machine via
+> `Analyze-Memory-Linux.sh` — the air-gapped split.
+
+With `--carve`, each kept region is a pair in `tools/binja/data/<incident>/`:
+
+- `pid<PID>_<proc>_0x<addr>.bin` — the **raw bytes** (inert on disk, never executed)
+- `pid<PID>_<proc>_0x<addr>.json` — sidecar: `base_address`, `size`, `perms`, `region`,
+  `backing_path`, `injected`, `matched_rules`, `arch_hint`
+
+Then analyse in the containerized **Binary Ninja** (free), pre-loaded with RE plugins
+(obfuscation_detection, ollama, MCP, x64dbg). The portable launcher figures out the runtime
+(podman/docker), the display (X11 or Wayland/XWayland), the X cookie, and SELinux for you, and opens
+every carved region:
+
+```bash
+tools/binja/launch.sh                 # open ALL carved regions (tools/binja/data/**/*.bin)
+tools/binja/launch.sh data/<incident>/pid1337_evil_0x7f00.bin   # open one
+```
+
+A carved `.bin` is **raw memory**, not a file format — open it as **Raw**, then set the architecture +
+**base address** from the sidecar so BN's addresses match the original process (offsets in the YARA
+finding line up). See `tools/binja/data/readme.md`. ⚠️ Carved regions are **potential live malware** —
+analyse them only inside the isolated container, and they are git-ignored (never committed).
 
 ## Step 4 - Eradication
 

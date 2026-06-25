@@ -14,12 +14,15 @@
 #   volatility3     -> memory analyzer wheels (+ yara-python) vendored for an
 #                      OFFLINE analyst venv (pip install --no-index)
 #   yara_rules      -> rule set used by the memory analyzer's --yara scan (recorded)
+#   capa + FLOSS    -> capabilities/ATT&CK + deobfuscated strings, auto-run by
+#                      memory_enrich.py over each carved true-positive region
 #   LOLDrivers list -> vulnerable-driver catalog (offline-usable)
 #   cloud CLIs      -> aws / az / gcloud are required for the CLOUD workflow; they
 #                      are too large to bundle, so their presence + version is
 #                      RECORDED here and install hints emitted if missing
 #
-#   --include-memory stages avml + avml-convert + dwarf2json + volatility3 wheels.
+#   --include-memory stages avml + avml-convert + dwarf2json + volatility3 wheels
+#                    + capa + FLOSS + the YARA rule packs.
 #
 # Everything lands in <toolkit>/tools/ with a sha256 manifest. The workflow
 # auto-detects and uses what is present and silently skips what is not.
@@ -71,6 +74,10 @@ AVML_REL="https://github.com/microsoft/avml/releases/latest/download"
 AVML_URL="${AVML_URL:-${AVML_REL}/avml${AV_SFX}}"
 AVMLCONV_URL="${AVML_REL}/avml-convert${AV_SFX}"
 D2J_URL="https://github.com/volatilityfoundation/dwarf2json/releases/latest/download/${D2J_ASSET}"
+# capa (capabilities/ATT&CK) + FLOSS (deobfuscated strings) — memory_enrich.py auto-runs them over
+# each carved true-positive region. Linux standalone release zips (capa bundles its own rules).
+CAPA_URL="https://github.com/mandiant/capa/releases/download/v7.4.0/capa-v7.4.0-linux.zip"
+FLOSS_URL="https://github.com/mandiant/flare-floss/releases/download/v3.1.1/floss-v3.1.1-linux.zip"
 
 mkdir -p "$TOOLS_DIR"
 MANIFEST="${TOOLS_DIR}/STAGED_MANIFEST.json"
@@ -103,6 +110,24 @@ stage_bin() {  # name, url, dest - download + chmod + record (honours --check-on
     fi
 }
 
+stage_zip_bin() {  # name, url, out_subdir, binary - download zip + unzip + chmod the named binary
+    local name="$1" url="$2" subdir="$3" binary="$4"
+    local dest="${TOOLS_DIR}/${subdir}/${binary}"
+    if [[ $CHECK_ONLY -eq 1 ]]; then
+        [[ -f "$dest" ]] && record "$name" "$url" "$dest" "present" || record "$name" "$url" "" "not-staged"
+        return
+    fi
+    if ! command -v unzip >/dev/null 2>&1; then record "$name" "$url" "" "failed (need unzip)"; return; fi
+    mkdir -p "${TOOLS_DIR}/${subdir}"
+    local zip="${TOOLS_DIR}/${subdir}/.dl.zip"
+    if download "$url" "$zip" 2>/dev/null && unzip -o -q "$zip" -d "${TOOLS_DIR}/${subdir}/" 2>/dev/null; then
+        rm -f "$zip"; [[ -f "$dest" ]] && chmod +x "$dest"
+        [[ -f "$dest" ]] && record "$name" "$url" "$dest" "ok" || record "$name" "$url" "" "failed (binary not in zip)"
+    else
+        rm -f "$zip"; record "$name" "$url" "" "failed"
+    fi
+}
+
 # --- Memory acquisition + analysis toolchain ----------------------------------
 # avml (capture) + avml-convert (decompress --compress LiME) + dwarf2json (build
 # the Volatility 3 Linux ISF) + volatility3 wheels (offline analyzer venv).
@@ -110,6 +135,10 @@ if [[ $INCLUDE_MEMORY -eq 1 ]]; then
     stage_bin "AVML"         "$AVML_URL"     "${TOOLS_DIR}/avml"
     stage_bin "avml-convert" "$AVMLCONV_URL" "${TOOLS_DIR}/avml-convert"
     stage_bin "dwarf2json"   "$D2J_URL"      "${TOOLS_DIR}/dwarf2json"
+    # capa + FLOSS — memory_enrich.py runs them over carved true-positive regions for
+    # capabilities/ATT&CK + deobfuscated strings (encoded C2 plain strings miss).
+    stage_zip_bin "capa"  "$CAPA_URL"  "capa"  "capa"
+    stage_zip_bin "floss" "$FLOSS_URL" "floss" "floss"
 
     wheeldir="${TOOLS_DIR}/vol3_wheels"
     if [[ $CHECK_ONLY -eq 1 ]]; then
