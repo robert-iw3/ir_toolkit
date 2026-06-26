@@ -334,7 +334,7 @@ With `--carve`, each kept region is a pair in `tools/binja/data/<incident>/`:
 - `pid<PID>_<proc>_0x<addr>.json` — sidecar: `base_address`, `size`, `perms`, `region`,
   `backing_path`, `injected`, `matched_rules`, `arch_hint`
 
-Then analyse in the containerized **Binary Ninja** (free), pre-loaded with RE plugins
+Then analyze in the containerized **Binary Ninja** (free), pre-loaded with RE plugins
 (obfuscation_detection, ollama, MCP, x64dbg). The portable launcher figures out the runtime
 (podman/docker), the display (X11 or Wayland/XWayland), the X cookie, and SELinux for you, and opens
 every carved region:
@@ -347,7 +347,7 @@ tools/binja/launch.sh data/<incident>/pid1337_evil_0x7f00.bin   # open one
 A carved `.bin` is **raw memory**, not a file format — open it as **Raw**, then set the architecture +
 **base address** from the sidecar so BN's addresses match the original process (offsets in the YARA
 finding line up). See `tools/binja/data/readme.md`. ⚠️ Carved regions are **potential live malware** —
-analyse them only inside the isolated container, and they are git-ignored (never committed).
+analyze them only inside the isolated container, and they are git-ignored (never committed).
 
 ## Step 4 - Eradication
 

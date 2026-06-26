@@ -41,7 +41,9 @@ All three platforms follow this shape. Each platform's workflow doc has its own 
 diagram and specifics: [Windows](WORKFLOW-WINDOWS.md) · [Linux](WORKFLOW-LINUX.md) · [Cloud](WORKFLOW-CLOUD.md).
 Cross-cutting: [WORKFLOW-YARA.md](WORKFLOW-YARA.md) - how memory YARA hits are enriched (region /
 perms / backing file / matched strings) and the logic, with examples, for calling a finding benign vs
-a true positive without a doubt.
+a true positive without a doubt. And [WORKFLOW-INVESTIGATION.md](WORKFLOW-INVESTIGATION.md) - the
+**hand-off to the analyst**: how to read the enriched output (validated IOCs, offline IP→country,
+implant config DNA) and reconstruct the chain of events safely with OSINT.
 
 > ### ⚠️ Capture and analyze memory - it is imperative, not optional
 >
@@ -123,12 +125,12 @@ Run on an internet-connected machine before deploying to an isolated host. Both 
 a sha256 `tools/STAGED_MANIFEST.json`. The core workflow runs offline without any of these;
 they only enable optional depth (memory capture, YARA, extended persistence).
 
-- **Windows** - `Build-OfflineToolkit.ps1 [-IncludeMemory] [-IncludeYaraRules] [-IncludeMemProcFS] [-IncludeVolatility] [-StageSymbols]`
-  Memory capture: `go-winpmem` (AFF4) → analyst-side analysis via **MemProcFS + Python 3.12 embeddable** (AFF4 native, no driver install) or **Volatility 3** (raw/dmp). `Build-OfflineToolkit.ps1 -IncludeMemProcFS` stages MemProcFS, Python 3.12, sqlite3, and Dokany MSI into `tools/`.
+- **Windows** - `Build-OfflineToolkit.ps1 [-IncludeMemory] [-IncludeYaraRules] [-IncludeMemProcFS] [-IncludeVolatility] [-IncludeCapa] [-IncludeFloss] [-IncludeGeoIP] [-StageSymbols]`
+  Memory capture: `go-winpmem` (AFF4) → analyst-side analysis via **MemProcFS + Python 3.12 embeddable** (AFF4 native, no driver install) or **Volatility 3** (raw/dmp). `Build-OfflineToolkit.ps1 -IncludeMemProcFS` stages MemProcFS, Python 3.12, sqlite3, and Dokany MSI into `tools/`. `-IncludeCapa`/`-IncludeFloss` add capability + deobfuscated-string analysis of carved regions; `-IncludeGeoIP` stages the **offline IP→country** DB (db-ip Lite) used to tag recovered IOCs with no network calls.
 
   Full recommended staging for a Windows deployment:
   ```powershell
-  .\Build-OfflineToolkit.ps1 -IncludeMemory -IncludeYaraRules -IncludeMemProcFS -IncludeVolatility
+  .\Build-OfflineToolkit.ps1 -IncludeMemory -IncludeYaraRules -IncludeMemProcFS -IncludeVolatility -IncludeCapa -IncludeFloss -IncludeGeoIP
   ```
 - **Linux** - `Build-OfflineToolkit-Linux.sh [--include-memory] [--include-cloud] [--stage-symbols] [--check-only]`
   (memory analysis: **Volatility 3** wheels + `dwarf2json` + kernel ISF, vendored for offline use)

@@ -50,13 +50,13 @@ def carve_region(carve_dir, image, pid, name, vm_start, data, perms, region, pat
         injected = region == "anon" and "x" in (perms or "")
         if injected:
             note = ("INJECTED anon+exec region (no on-disk backing) — strong true-positive; treat as "
-                    "live malware, analyse only in the isolated Binary Ninja container.")
+                    "live malware, analyze only in the isolated Binary Ninja container.")
         elif region == "file":
             note = (f"File-backed {perms} region of {path or '?'} — a YARA hit here is often a rule "
                     f"grazing a loaded binary/library; verify that file's hash/package before "
-                    f"treating it as malicious. Analyse only in the isolated container.")
+                    f"treating it as malicious. analyze only in the isolated container.")
         else:
-            note = (f"{region or 'unknown'} {perms} region carried a YARA hit. Analyse only in the "
+            note = (f"{region or 'unknown'} {perms} region carried a YARA hit. analyze only in the "
                     f"isolated Binary Ninja container.")
         meta = {
             "carved_from": os.path.basename(str(image)), "pid": str(pid), "process": name,

@@ -531,6 +531,16 @@ Get-Content .\reports\HOSTNAME\Memory_Enrichment.md
 
 For the YARA hit-to-verdict decision logic this phase uses, see **[WORKFLOW-YARA.md](WORKFLOW-YARA.md)**.
 
+### Hand-off to the analyst
+
+Once Phase 3b has flagged and enriched the true positives, the toolkit has **gathered everything an
+analyst needs**. Reading those indicators into the **chain of events** - the recovered hosts/IPs (with
+offline country), the implant's config DNA (beacon templates, User-Agent, worm/mutex), and the YARA
+verdicts - and doing it **safely with OSINT** (urlscan.io / tria.ge / VirusTotal / AlienVault OTX /
+IBM X-Force / Shodan) is its own cross-platform guide:
+
+> **[WORKFLOW-INVESTIGATION.md](WORKFLOW-INVESTIGATION.md)** - from toolkit output to the chain of events.
+
 ---
 
 ## Phase 4 - Eradicate (on the target, as Administrator)

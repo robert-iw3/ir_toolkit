@@ -18,7 +18,7 @@ Each carved region is a pair (under `data/<incident-stamp>/`):
 By default only **anonymous + executable** regions are carved — injected/unbacked code, the strongest
 true-positive signal. (Set `IR_CARVE_ANY=1` to carve any hit's region, e.g. for triage.)
 
-> ⚠️ **These are potentially live malware.** Analyse them **only inside the isolated Binary Ninja
+> ⚠️ **These are potentially live malware.** Analyze them **only inside the isolated Binary Ninja
 > container** (`../binja.Dockerfile`), never on the host. They are git-ignored — do not commit them.
 
 ## Loading a carved region in Binary Ninja

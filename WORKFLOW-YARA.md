@@ -242,7 +242,7 @@ The recovered files / keys / mutexes / C2 / implicated-PID chain are merged into
 and every YARA hit in a **Private + executable (injected) VAD** is dumped as raw `.bin` + a JSON
 sidecar (base address, perms, `injected`, matched rules, arch) into `tools\binja\data\<stamp>\`. These
 are the same true-positive regions ranked above - now in a form you can reverse-engineer. The carve is
-**inert** (raw bytes, never executed); analyse it only in the isolated `irtoolkit-binja` container
+**inert** (raw bytes, never executed); analyze it only in the isolated `irtoolkit-binja` container
 (`tools\binja\`). This mirrors the Linux carve below - the sidecar schema is identical, so one Binary
 Ninja loader handles both platforms.
 
@@ -285,31 +285,13 @@ Step by step, and what each produces:
 > extraction itself is proven by `test_37_memory_enrich_linux.py` (synthetic adversary region → full
 > catalog; FLOSS-deobfuscated C2 surfaces; benign infra dropped).
 
-### Corroborate until it's confirmed - what this exposed in a real-world investigation
+### Corroborating a hit to a confirmed verdict (real-world)
 
-On a live image, the pivot ranked **three** YARA hits true-positive-class - all on *benign-looking* Windows
-host processes (a shell-experience host, a service host, a browser webview). **capa found no capabilities**
-in the carved regions, and a naive read would have dismissed them as rule grazes. The corroboration loop
-settled all three - and the decisive step was matched-string specificity (Rule D), *not* capa:
+The full worked walkthrough - how three benign-looking processes were each confirmed by their
+**matched string** (REDLEAVES, a Metasploit task, a coin-miner+Vidar), and how the analyst pieced the
+indicators into the chain of events - now lives in the cross-platform analyst guide:
 
-| Hit (rule) | Process | The matched string the tool surfaced | Verdict |
-|---|---|---|---|
-| `REDLEAVES_CoreImplant_UniqueStrings` | shell host | `red_autumnal_leaves_dllmain.dll` + in-memory RTTI `CmdRedirector` / `MappingSlave` / `GHttp` / `SIComm` | **Confirmed** - APT10 RedLeaves core implant |
-| `WiltedTulip_Windows_UM_Task` | service host | `svchost64.swp",checkUpdate` (the payload + export), with `Msfpayloads_msf_5` adjacent | **Confirmed** - scheduled-task persistence, Metasploit-built |
-| `CoinMiner_Strings` | browser webview | `stratum+tcp://<pool>:7333 -u <wallet> -p x`, with `Vidar.AM` adjacent | **Confirmed** - coinminer **+** Vidar stealer |
-
-The enrichment then auto-recovered the **eradication scope** into `IOCs.json` with zero analyst effort: the
-mining-pool C2 + the crypto wallet (parsed from the `-u` argument), the implant mutex, the dropped `%TEMP%`
-payload, and the implicated parent/child PID chain.
-
-> **The lesson worth keeping:** *capa returning nothing is not "clean."* The implant evidence lived in
-> process **strings**, not in capa-matchable code. The unique-string match is the cheapest and strongest
-> discriminator - so the tool records *which* strings fired (and a bytes snippet) and lets the verdict be
-> self-evident. Equally, it does **not** invent IOCs: bare heap IPs that collide with crypto OIDs, benign
-> CDN domains, GUIDs/SIDs, and the user's own account email are all filtered out - only the adversary
-> indicators reach `IOCs.json`.
-
----
+> **[WORKFLOW-INVESTIGATION.md](WORKFLOW-INVESTIGATION.md)** - from toolkit output to the chain of events.
 
 ## Worked examples
 
@@ -368,49 +350,11 @@ Cobalt_Strike_Beacon - PID 5308 (SecHealthUI.exe)
 **Decision:** Private+RWX (injected) + specific Cobalt config strings + injected-VAD + macro-style
 parent + C2 = undeniable. **True positive - declare.**
 
-### Windows - from a real-world run of this tool (what was found + what proves it)
+### A real-world run, end to end
 
-***Windows Defender (full & offline scan) found nothing, along with Trend Micro "Maximum" Security.***
-
-***Do you really trust your (insert buzzword here) EDR/AV software? lol***
-
-A live `Analyze-Memory.ps1` run over a captured memory image of a suspected-compromise host produced
-**104 YARA matches across 102 processes**. Raw, that is undifferentiated noise. The per-hit VAD
-context separates the real implants from rule grazes **with no analyst guesswork** - and the report
-renders it inline. Here is what was found and what proves it.
-
-**The four true positives - rule strings in ANONYMOUS (unbacked) memory:**
-```
-REDLEAVES_CoreImplant_UniqueStrings - PID 13680 (ShellExperienceHost)   region = anon / rw-
-WiltedTulip_Windows_UM_Task         - PID 3464  (svchost.exe)           region = anon / rw-
-CoinMiner_Strings                   - PID 13816 (msedgewebview2)        region = anon / rw-
-LOLBin_Mshta_Scriptlet              - PID 13680 (ShellExperienceHost)   region = anon / rw-
-```
-**What proves it:** the matched strings live in **anonymous, unbacked memory** - there is no on-disk
-file they could have been read from, so they are the implant's own runtime strings, not a signature
-grazing a loaded module. REDLEAVES (APT10) and WiltedTulip are **family-specific** rules (Rule D), and
-a specific family rule firing in unbacked memory is a true positive. *(Perms here are `rw-`, not
-`rwx`; the **anon/unbacked location + family-rule specificity** is what's decisive. An `anon + rwx`
-hit would additionally trip Rule B and be auto-typed "Injected Code (memory YARA)" → Critical.)*
-
-**The noise - the SAME rule, FILE-BACKED on signed DLLs (the ~100× `LOLBin_BITS_Drop` cluster):**
-```
-LOLBin_BITS_Drop - PID 620  (svchost.exe)   file-backed -wx C:\...\shlwapi.dll  -- verify signature
-LOLBin_BITS_Drop - PID 11272(iCloudCKKS)    file-backed -wx C:\...\zlib1.dll    -- verify signature
-LOLBin_BITS_Drop - PID 11020(msedge.exe)    file-backed -wx C:\...\SHLWAPI.dll  -- verify signature
-   ... ~100 hits, nearly all file-backed on Microsoft/vendor-signed system DLLs
-```
-**What proves it benign:** one rule fired across ~100 processes (Rule E - breadth) and almost every
-hit is **file-backed on a signed system DLL** (Rule C) - the rule's BITS strings live inside
-`shlwapi.dll` / `zlib1.dll`, which load nearly everywhere. Verify those DLL signatures and the cluster
-clears as false positive.
-
-**Takeaway for the analyst:** without enrichment this host reads as "104 YARA matches" - flat and
-unactionable. With the VAD context, the **four real implants (all `anon`)** stand out at a glance
-against the **~100 file-backed false positives**, and the proof (region / perms / backing file) is on
-the same line in the report. That is the difference between a 2-hour triage and a 2-minute one.
-
----
+The full real-world walkthrough (104 matches across 102 processes collapsing to a few in-memory
+implants, then reconstructed into the attack story) is in
+**[WORKFLOW-INVESTIGATION.md](WORKFLOW-INVESTIGATION.md)**.
 
 ## Quick reference
 

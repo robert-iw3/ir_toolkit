@@ -24,7 +24,7 @@ Usage: memory_enrich.py <image> <out_dir> <pid>[,<pid>...]
        memory_enrich.py --correlate <out_dir>   # re-join RAM<->USB first-seen (no image; run after
                                                  # collecting USB history live on the affected host)
 """
-import sys, os, re, json, glob
+import sys, os, re, json, glob, gzip, bisect
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
@@ -80,8 +80,134 @@ _BENIGN_DOMAIN_RE = re.compile(
     r"cloudflare\.com|akamai\.net|akamaiedge\.net|w3\.org|schemas\.microsoft\.com|apple\.com)$")
 
 
+# Real-looking-domain check - STRUCTURAL ONLY (we never resolve DNS). A host is "confident" when its
+# last label is a recognised TLD - any 2-letter ccTLD (every ccTLD is exactly 2 letters, so that rule
+# is complete), or one of the common gTLDs below - AND every label is RFC-1035 shaped.
+# NOTE: this gTLD set is deliberately a COMMON subset, not the full ~1450-entry IANA list. So a real
+# domain on an uncommon gTLD (e.g. `.ninja`) will NOT match here - which is exactly why a non-matching
+# host is moved to `unverified` ("not resolvable - verify"), NOT deleted. We never assert it as an IOC,
+# and never invent one; the analyst (or a later IANA-list check) confirms it. The aim is a clean,
+# high-confidence `domains` list plus a transparent `unverified` bucket - no silent suppression.
+_GTLD = frozenset((
+    "com net org info biz xyz top club online site app dev cloud shop store tech space website "
+    "live news blog page link click work fun icu vip pro name mobi asia tel pub win bid loan men "
+    "date stream download racing party review trade science gdn ren xin wang ltd group team today "
+    "email host run cyou sbs world life fund money company center systems solutions services "
+    "digital network media monster pics photos cc su pw tk ninja guru ws me tv io co").split())
+_LABEL_RE = re.compile(r"^[a-z0-9](?:[a-z0-9\-]{0,61}[a-z0-9])?$")
+
+
+def _valid_tld(tld):
+    """A TLD is plausible if it is any 2-letter ccTLD (all ccTLDs are 2 letters) or a known gTLD."""
+    tld = str(tld).lower()
+    return (len(tld) == 2 and tld.isalpha()) or tld in _GTLD
+
+
+def _valid_host(h):
+    """True when h is structurally a real domain: >=2 RFC-1035 labels and a valid TLD. No DNS."""
+    h = str(h or "").strip().rstrip(".").lower()
+    if not h or len(h) > 253 or "." not in h:
+        return False
+    labels = h.split(".")
+    return len(labels) >= 2 and _valid_tld(labels[-1]) and all(_LABEL_RE.match(l) for l in labels)
+
+
+def _url_host_ok(h):
+    """Lenient gate for KEEPING a URL (not for deriving a domain): a valid IP, or a dotted host with
+    non-empty labels. Drops only the clearly-truncated junk (`http://micr`, `http://mtsvc9`)."""
+    if _IPV4_RE.fullmatch(str(h)):
+        return True
+    labels = str(h).split(".")
+    return len(labels) >= 2 and all(labels)
+
+
+# ----------------------------------------------------------- offline geolocation
+# Country-of-origin for a recovered IP, looked up in a LOCAL DB (db-ip.com Country Lite, a keyless,
+# CC-BY, GeoLite2-equivalent staged by Build-OfflineToolkit.ps1 -IncludeGeoIP). 100% OFFLINE - never a
+# DNS / whois / API call. Ties an IOC to real infrastructure (e.g. an OVH/France node that matches an
+# active threat-intel campaign) so attribution starts before any external lookup.
+_GEOIP_DIR = Path(__file__).resolve().parent.parent.parent.parent / "tools" / "geoip"
+_GEO = {"loaded": False, "starts": [], "ends": [], "ccs": []}
+_CC_NAME = {
+    "US": "United States", "KR": "South Korea", "RU": "Russia", "FR": "France", "CN": "China",
+    "DE": "Germany", "NL": "Netherlands", "GB": "United Kingdom", "JP": "Japan", "IN": "India",
+    "BR": "Brazil", "CA": "Canada", "UA": "Ukraine", "RO": "Romania", "TR": "Turkey", "IR": "Iran",
+    "HK": "Hong Kong", "SG": "Singapore", "VN": "Vietnam", "ID": "Indonesia", "PL": "Poland",
+    "IT": "Italy", "ES": "Spain", "SE": "Sweden", "CH": "Switzerland", "AU": "Australia",
+    "TW": "Taiwan", "KP": "North Korea", "BG": "Bulgaria", "MD": "Moldova", "SC": "Seychelles",
+    "PA": "Panama", "BZ": "Belize", "VG": "British Virgin Islands", "AE": "United Arab Emirates",
+}
+
+
+def _ip_to_int(ip):
+    parts = str(ip).split(".")
+    if len(parts) != 4:
+        return None
+    try:
+        octs = [int(p) for p in parts]
+    except ValueError:
+        return None
+    if any(o < 0 or o > 255 for o in octs):
+        return None
+    return (octs[0] << 24) | (octs[1] << 16) | (octs[2] << 8) | octs[3]
+
+
+def _load_geoip():
+    """Lazy-load the IPv4 ranges from tools/geoip/dbip-country-lite.csv[.gz] into sorted arrays."""
+    if _GEO["loaded"]:
+        return
+    _GEO["loaded"] = True
+    src = None
+    for cand in (_GEOIP_DIR / "dbip-country-lite.csv.gz", _GEOIP_DIR / "dbip-country-lite.csv"):
+        if cand.is_file():
+            src = cand
+            break
+    if not src:
+        return
+    opener = gzip.open if str(src).endswith(".gz") else open
+    starts, ends, ccs = [], [], []
+    try:
+        with opener(src, "rt", encoding="utf-8", errors="ignore") as fh:
+            for line in fh:
+                p = line.rstrip("\n").split(",")
+                if len(p) < 3 or ":" in p[0]:          # IPv4 rows only
+                    continue
+                s, e = _ip_to_int(p[0]), _ip_to_int(p[1])
+                if s is None or e is None:
+                    continue
+                starts.append(s); ends.append(e); ccs.append(p[2].strip().upper())
+    except Exception:
+        return
+    _GEO["starts"], _GEO["ends"], _GEO["ccs"] = starts, ends, ccs
+
+
+def country_of_ip(ip):
+    """OFFLINE ISO-3166 country code for an IPv4 (None if no DB / no match / unallocated). No network."""
+    _load_geoip()
+    starts = _GEO["starts"]
+    if not starts:
+        return None
+    n = _ip_to_int(ip)
+    if n is None:
+        return None
+    i = bisect.bisect_right(starts, n) - 1
+    if 0 <= i < len(starts) and starts[i] <= n <= _GEO["ends"][i]:
+        cc = _GEO["ccs"][i]
+        return cc if (cc and cc != "ZZ") else None
+    return None
+
+
+def geo_label(ip):
+    """'KR (South Korea)' / 'FR (France)' / 'XX' / '' for an IP, fully offline."""
+    cc = country_of_ip(ip)
+    if not cc:
+        return ""
+    name = _CC_NAME.get(cc)
+    return f"{cc} ({name})" if name else cc
+
+
 def defang(s):
-    """Render an IOC inert for human reports: hxxp / [:]// / [.] so it can't be clicked or executed
+    """Render an IOC inert for reports: hxxp / [:]// / [.] so it can't be clicked or executed
     and on-host AV won't quarantine the report. The machine-readable IOCs.json stays un-defanged
     because Invoke-Eradication needs real hosts to block."""
     s = str(s)
@@ -147,12 +273,27 @@ _PRIVKEY_RE = re.compile(r"-----BEGIN (?:[A-Z0-9 ]+ )?PRIVATE KEY-----")
 _MINER_RE = re.compile(
     r"(?i)stratum\+(?:tcp|udp|ssl)://[A-Za-z0-9._:\-/?=&%]+(?:[ \t]+-[A-Za-z][ \t]+[A-Za-z0-9._:\-/?=&%]+){0,5}")
 _HOST_OF_RE = re.compile(r"(?i)^[a-z+]+://([A-Za-z0-9._\-]+)")
+# Memory has no string delimiters, so the greedy URL host regex over-reads into the NEXT string when
+# they run together: `office.net` + `Xfoo` -> host `office.netXfoo`. A lowercase TLD label immediately
+# followed by an UPPERCASE letter is a camelCase/run-on concatenation artifact - a real URL ends its
+# TLD with `/ : ? #` or end-of-string. Cut there. This RECOVERS the true host (office.netX ->
+# office.net, foo.comBar -> foo.com) without inventing one: an all-lowercase run-on (foo.community)
+# has no boundary signal, so it is left intact and just fails the TLD check below - we never fabricate
+# foo.com out of foo.community. NB: we deliberately do NOT treat a following digit run as a boundary -
+# that wrongly cuts legitimate hosts whose label has digits (ip.aq138.com would mis-trim to ip.aq).
+_OVERCAPTURE_RE = re.compile(r"\.[a-z]{2,24}(?=[A-Z])")
 
 
 def _host_of(url):
-    """Host (no scheme/port) from a url/stratum string, lowercased."""
+    """Host (no scheme/port) from a url/stratum string, lowercased, with run-on over-capture trimmed."""
     m = _HOST_OF_RE.match(url)
-    return m.group(1).lower() if m else ""
+    if not m:
+        return ""
+    h = m.group(1)
+    cut = _OVERCAPTURE_RE.search(h)        # trim a TLD-then-uppercase/digit-run concatenation
+    if cut:
+        h = h[:cut.end()]
+    return h.lower()
 
 
 def _memblob(data):
@@ -170,24 +311,39 @@ def extract_c2_iocs(data, bare_domains=True):
     high-confidence). `bare_domains` additionally scrapes free-standing FQDNs/IPs from the blob - use
     it on small config-bearing regions, but NOT on a big heap where every `x.com` substring is noise."""
     if not data:
-        return {"ips": [], "domains": [], "urls": []}
+        return {"ips": [], "domains": [], "urls": [], "unverified": []}
     blob = _memblob(data)
-    domains, ips = set(), set()
-    # URLs are kept only when their host isn't benign infrastructure; the host seeds domains/ips
+    domains, ips, unverified = set(), set(), set()
+    # URLs are kept only when their host isn't benign infrastructure; the host seeds domains/ips.
+    # A host that does NOT pass the TLD gate is NOT dropped - it is recorded under `unverified`
+    # ("captured, but not a recognised TLD - verify; may be an over-capture or an uncommon TLD") so
+    # nothing is silently suppressed. The `domains` list stays high-confidence/actionable.
     urls = []
     for u in sorted(set(_URL_RE.findall(blob))):
         h = _host_of(u)
         if not h or _BENIGN_DOMAIN_RE.search(h):
             continue
         urls.append(u)
-        (ips if _IPV4_RE.fullmatch(h) else domains).add(h)
+        if _IPV4_RE.fullmatch(h):
+            ips.add(h)
+        elif _valid_host(h):                 # structured + recognised TLD -> confident domain IOC
+            domains.add(h)
+        else:                                # kept, not dropped: surfaced as "not resolvable - verify"
+            unverified.add(h)
     if bare_domains:
         # bare FQDNs only (NOT bare IPs - those collide with crypto OIDs / version numbers like 2.5.4.3)
         domains |= set(_DOMAIN_RE.findall(blob))
     ips = sorted({m for m in ips if m and not _BENIGN_IP_RE.match(m)})
-    domains = sorted({d.lower() for d in domains
-                      if d and not _BENIGN_DOMAIN_RE.search(d) and not d.isupper()})
-    return {"ips": ips[:50], "domains": domains[:50], "urls": urls[:50]}
+    # Confident domains: structurally valid + recognised TLD. A bare-scraped string with an unrecognised
+    # TLD is moved to `unverified` (kept, labelled), never deleted.
+    clean, maybe = set(), set(unverified)
+    for d in domains:
+        d = str(d).lower()
+        if not d or _BENIGN_DOMAIN_RE.search(d) or d.isupper():
+            continue
+        (clean if _valid_host(d) else maybe).add(d)
+    return {"ips": ips[:50], "domains": sorted(clean)[:50], "urls": urls[:50],
+            "unverified": sorted(maybe)[:50]}
 
 
 def extract_threat_iocs(data, bare_domains=False):
@@ -196,7 +352,7 @@ def extract_threat_iocs(data, bare_domains=False):
     de-duplicated, FP-filtered bundle. `bare_domains` only for small config regions. Plain email
     addresses are deliberately NOT collected - they are mostly victim PII, not adversary IOCs; the
     real exfil indicators are the Telegram/Discord channels below."""
-    out = {"ips": [], "domains": [], "urls": [], "onion": [], "xmr": [],
+    out = {"ips": [], "domains": [], "urls": [], "unverified": [], "onion": [], "xmr": [],
            "aws_keys": [], "telegram_tokens": [], "discord_webhooks": [], "miner_configs": [],
            "private_keys": 0}
     if not data:
@@ -204,6 +360,7 @@ def extract_threat_iocs(data, bare_domains=False):
     blob = _memblob(data)
     net = extract_c2_iocs(data, bare_domains=bare_domains)
     out["ips"], out["domains"], out["urls"] = net["ips"], net["domains"], net["urls"]
+    out["unverified"] = net.get("unverified", [])
     out["onion"] = sorted(set(_ONION_RE.findall(blob)))[:50]
     out["xmr"] = sorted(set(_XMR_RE.findall(blob)))[:20]
     out["aws_keys"] = sorted(set(_AWS_RE.findall(blob)))[:20]
@@ -287,7 +444,7 @@ def extract_decode_candidates(data, limit=15):
     return out
 
 
-_THREAT_CATS = ("ips", "domains", "urls", "onion", "xmr", "wallets", "aws_keys",
+_THREAT_CATS = ("ips", "domains", "urls", "unverified", "onion", "xmr", "wallets", "aws_keys",
                 "telegram_tokens", "discord_webhooks", "miner_configs")
 
 
@@ -356,7 +513,7 @@ def rollup_iocs(dossiers):
     # c2_* names kept for back-compat; the rest carry the broader sweep
     out["c2_ips"] = sorted(agg["ips"]); out["c2_domains"] = sorted(agg["domains"])
     out["c2_urls"] = sorted(agg["urls"])
-    for c in ("onion", "xmr", "wallets", "aws_keys", "telegram_tokens", "discord_webhooks", "miner_configs"):
+    for c in ("unverified", "onion", "xmr", "wallets", "aws_keys", "telegram_tokens", "discord_webhooks", "miner_configs"):
         out[c] = sorted(agg[c])
     return out
 
@@ -1029,7 +1186,8 @@ def build_enrichment_md(bundle):
                    ("miner_configs", "Miner command lines"), ("wallets", "Crypto wallets"),
                    ("xmr", "Monero wallets"), ("onion", "Tor (.onion)"),
                    ("telegram_tokens", "Telegram bot tokens"), ("discord_webhooks", "Discord webhooks"),
-                   ("aws_keys", "AWS keys")]
+                   ("aws_keys", "AWS keys"),
+                   ("unverified", "Unverified hosts (captured; TLD not recognized - not resolved, verify)")]
     for d in bundle.get("dossiers", []):
         a(f"## PID {d['pid']} ({d['name']})")
         if d.get("injected_thread_first_seen"):
@@ -1045,12 +1203,15 @@ def build_enrichment_md(bundle):
                 a(f"- `{h['category']}` {h['name']}")
             a("")
         ti = d.get("threat_iocs", {})
-        ioc_lines = [(label, ti.get(key, [])) for key, label in _IOC_LABELS if ti.get(key)]
+        ioc_lines = [(key, label, ti.get(key, [])) for key, label in _IOC_LABELS if ti.get(key)]
         if ioc_lines or ti.get("private_keys"):
             a("**Recovered IOCs (from process memory; defanged here, live in IOCs.json):**")
-            for label, vals in ioc_lines:
+            for key, label, vals in ioc_lines:
                 for v in vals:
-                    a(f"- **{label}:** `{defang(v)}`")
+                    # IPs get an OFFLINE country-of-origin tag (db-ip Lite; no network) so each IOC is
+                    # tied to real infrastructure at a glance.
+                    geo = f"  [{geo_label(v)}]" if key == "ips" and geo_label(v) else ""
+                    a(f"- **{label}:** `{defang(v)}`{geo}")
             if ti.get("private_keys"):
                 a(f"- **Private-key blocks in memory:** {ti['private_keys']}")
             a("")
@@ -1116,7 +1277,8 @@ def merge_into_iocs(out_dir, bundle):
     for host in erad.get("c2_ips", []) + erad.get("c2_domains", []):
         if (host, 0) not in have:
             ioc["c2_endpoints"].append({"host": host, "port": 0, "sanctioned": False,
-                                        "session_id": None, "instance_id": None, "source": "memory"})
+                                        "session_id": None, "instance_id": None, "source": "memory",
+                                        "country": (country_of_ip(host) or None)})   # offline geo, IPs
             have.add((host, 0))
     ioc["memory_eradication"] = erad
     with open(iocs_path, "w", encoding="utf-8") as fh:

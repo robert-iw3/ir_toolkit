@@ -53,7 +53,7 @@ the target kernel's exact build (struct offsets + symbol addresses + banner). Ac
 
 The Windows workflow is **native PowerShell** (no Python for collection/detection/eradication).
 Staged tools land in `tools/`; flags: `-IncludeMemory -IncludeMemProcFS -IncludeVolatility
--IncludeYaraRules -StageSymbols`.
+-IncludeYaraRules -IncludeCapa -IncludeFloss -IncludeGeoIP -StageSymbols`.
 
 | Dependency | Role | Satisfied by |
 |---|---|---|
@@ -64,11 +64,12 @@ Staged tools land in `tools/`; flags: `-IncludeMemory -IncludeMemProcFS -Include
 | Volatility 3 standalone (`vol.exe`) | secondary memory analysis (RAW/DMP) | **staged** `tools/vol.exe` (`-IncludeVolatility`) |
 | **YARA** engine (`yara64.exe`, `yarac64.exe`) | file + memory signature scan / **rule compilation** | **staged** `tools/` |
 | YARA rules (Elastic, ReversingLabs, Neo23x0, **abuse.ch yaraify**) | file + memory scan | **staged** `tools/yara_rules/<pack>/` (`-IncludeYaraRules`). `memory_yara.py` drops **non-Windows** rules by name, declares externals, and compiles with `yarac64` to one `.yac` (DOS-stub canary proves the scan ran). |
-| `memory_enrich.py` (per-TP footprint) + **capa** + **FLOSS** | handles/persistence/lineage/network footprint, injected-region carve, capabilities/ATT&CK + deobfuscated strings, RAM↔USB first-seen correlation | **staged** `tools/capa/capa.exe` (`-IncludeCapa`), `tools/floss/floss.exe` (`-IncludeFloss`); the module is PowerShell-invoked Python via the embeddable runtime |
+| `memory_enrich.py` (per-TP footprint) + **capa** + **FLOSS** | handles/persistence/lineage/network footprint, injected-region carve, capabilities/ATT&CK + deobfuscated strings, RAM↔USB first-seen correlation, **structural IOC validation** (recover over-captured domains; keep-and-label unverified TLDs) | **staged** `tools/capa/capa.exe` (`-IncludeCapa`), `tools/floss/floss.exe` (`-IncludeFloss`); the module is PowerShell-invoked Python via the embeddable runtime |
+| **GeoIP country DB** (db-ip.com Country Lite, keyless/CC-BY) | **offline** IP→country for each recovered IP (no DNS/whois/API); tags `IOCs.json` endpoints + the enrichment report | **staged** `tools/geoip/dbip-country-lite.csv.gz` (`-IncludeGeoIP`). A MaxMind GeoLite2-Country.mmdb may be dropped in instead. stdlib-only reader (gzip + bisect). |
 | Windows debug symbols (PDBs) | Volatility 3 symbol resolution | **auto-fetched** from Microsoft on first run (or pre-staged with `-StageSymbols`) |
 | LOLDrivers list | vulnerable-driver catalog | **staged** `tools/loldrivers.json` |
 | `Get-NetTCPConnection`, `Register-ScheduledTask`, `Set-NetFirewallProfile` | egress-observation sensor (`Watch-Egress.ps1`) + deferred outbound blackhole (`Enforce-StrictFirewall.ps1 -BlockOutbound`) | **assumed** (OS-provided) |
-| **Binary Ninja** (Linux container) | RE of carved regions — Windows **carves only**; analyse the portable `tools/binja/data/` output on a Linux desktop (the container is X11/Linux) | see Linux row + `planning/windows_binja_port.md` |
+| **Binary Ninja** (Linux container) | RE of carved regions — Windows **carves only**; analyze the portable `tools/binja/data/` output on a Linux desktop (the container is X11/Linux) | see Linux row + `planning/windows_binja_port.md` |
 
 > Symbols are the inverse of Linux: Windows **auto-fetches PDBs** (no per-kernel ISF problem);
 > Linux must build a kernel-exact ISF. YARA design is **twinned** - each platform compiles a

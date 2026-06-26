@@ -55,6 +55,42 @@ _PRIVKEY_RE = re.compile(r"-----BEGIN (?:[A-Z0-9 ]+ )?PRIVATE KEY-----")
 _MINER_RE = re.compile(
     r"(?i)stratum\+(?:tcp|udp|ssl)://[A-Za-z0-9._:\-/?=&%]+(?:[ \t]+-[A-Za-z][ \t]+[A-Za-z0-9._:\-/?=&%]+){0,5}")
 _HOST_OF_RE = re.compile(r"(?i)^[a-z+]+://([A-Za-z0-9._\-]+)")
+# Real-looking-domain check - STRUCTURAL ONLY (no DNS). "Confident" = last label is a recognised TLD
+# (any 2-letter ccTLD, which is a complete rule, OR a common gTLD below) and every label is RFC-1035
+# shaped. The gTLD set is a COMMON subset, not the full IANA list; a host that does not match is moved
+# to `unverified` ("not resolvable - verify"), never deleted and never asserted as an IOC.
+_GTLD = frozenset((
+    "com net org info biz xyz top club online site app dev cloud shop store tech space website "
+    "live news blog page link click work fun icu vip pro name mobi asia tel pub win bid loan men "
+    "date stream download racing party review trade science gdn ren xin wang ltd group team today "
+    "email host run cyou sbs world life fund money company center systems solutions services "
+    "digital network media monster pics photos cc su pw tk ninja guru ws me tv io co").split())
+_LABEL_RE = re.compile(r"^[a-z0-9](?:[a-z0-9\-]{0,61}[a-z0-9])?$")
+# A lowercase TLD label immediately followed by an UPPERCASE letter is a run-on concatenation artifact
+# (memory has no delimiters); cut there to recover the real host (office.netX -> office.net). Never
+# fabricates: an all-lowercase run-on has no boundary and just fails the TLD check.
+_OVERCAPTURE_RE = re.compile(r"\.[a-z]{2,24}(?=[A-Z])")
+
+
+def _valid_tld(tld):
+    tld = str(tld).lower()
+    return (len(tld) == 2 and tld.isalpha()) or tld in _GTLD
+
+
+def _valid_host(h):
+    """True when h is structurally a real domain: >=2 RFC-1035 labels and a recognised TLD. No DNS."""
+    h = str(h or "").strip().rstrip(".").lower()
+    if not h or len(h) > 253 or "." not in h:
+        return False
+    labels = h.split(".")
+    return len(labels) >= 2 and _valid_tld(labels[-1]) and all(_LABEL_RE.match(l) for l in labels)
+
+
+def _url_host_ok(h):
+    if _IPV4_RE.fullmatch(str(h)):
+        return True
+    labels = str(h).split(".")
+    return len(labels) >= 2 and all(labels)
 
 
 def defang(s):
@@ -67,7 +103,13 @@ def defang(s):
 
 def _host_of(url):
     m = _HOST_OF_RE.match(url)
-    return m.group(1).lower() if m else ""
+    if not m:
+        return ""
+    h = m.group(1)
+    cut = _OVERCAPTURE_RE.search(h)        # trim a TLD-then-uppercase run-on concatenation
+    if cut:
+        h = h[:cut.end()]
+    return h.lower()
 
 
 def _memblob(data):
@@ -81,27 +123,37 @@ def _memblob(data):
 
 def extract_c2_iocs(data, bare_domains=True):
     if not data:
-        return {"ips": [], "domains": [], "urls": []}
+        return {"ips": [], "domains": [], "urls": [], "unverified": []}
     blob = _memblob(data)
-    domains, ips, urls = set(), set(), []
+    domains, ips, unverified, urls = set(), set(), set(), []
     for u in sorted(set(_URL_RE.findall(blob))):
         h = _host_of(u)
         if not h or _BENIGN_DOMAIN_RE.search(h):
             continue
         urls.append(u)
-        (ips if _IPV4_RE.fullmatch(h) else domains).add(h)
+        if _IPV4_RE.fullmatch(h):
+            ips.add(h)
+        elif _valid_host(h):                 # structured + recognised TLD -> confident domain IOC
+            domains.add(h)
+        else:                                # kept, not dropped: "not resolvable - verify"
+            unverified.add(h)
     if bare_domains:
         domains |= set(_DOMAIN_RE.findall(blob))
     ips = sorted({m for m in ips if m and not _BENIGN_IP_RE.match(m)})
-    domains = sorted({d.lower() for d in domains
-                      if d and not _BENIGN_DOMAIN_RE.search(d) and not d.isupper()})
-    return {"ips": ips[:50], "domains": domains[:50], "urls": urls[:50]}
+    clean, maybe = set(), set(unverified)
+    for d in domains:
+        d = str(d).lower()
+        if not d or _BENIGN_DOMAIN_RE.search(d) or d.isupper():
+            continue
+        (clean if _valid_host(d) else maybe).add(d)
+    return {"ips": ips[:50], "domains": sorted(clean)[:50], "urls": urls[:50],
+            "unverified": sorted(maybe)[:50]}
 
 
 def extract_threat_iocs(data, bare_domains=True):
     """Full memory-IOC sweep: C2 + Tor + crypto + exfil channels + credential material. Structured,
     de-duplicated, FP-filtered. Plain emails are NOT collected (mostly victim PII)."""
-    out = {"ips": [], "domains": [], "urls": [], "onion": [], "xmr": [],
+    out = {"ips": [], "domains": [], "urls": [], "unverified": [], "onion": [], "xmr": [],
            "aws_keys": [], "telegram_tokens": [], "discord_webhooks": [], "miner_configs": [],
            "wallets": [], "private_keys": 0}
     if not data:
@@ -109,6 +161,7 @@ def extract_threat_iocs(data, bare_domains=True):
     blob = _memblob(data)
     net = extract_c2_iocs(data, bare_domains=bare_domains)
     out["ips"], out["domains"], out["urls"] = net["ips"], net["domains"], net["urls"]
+    out["unverified"] = net.get("unverified", [])
     out["onion"] = sorted(set(_ONION_RE.findall(blob)))[:50]
     out["xmr"] = sorted(set(_XMR_RE.findall(blob)))[:20]
     out["aws_keys"] = sorted(set(_AWS_RE.findall(blob)))[:20]

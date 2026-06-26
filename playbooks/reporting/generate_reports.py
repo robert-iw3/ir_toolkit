@@ -419,6 +419,12 @@ def md_incident(model, host, incident, analyst, when):
             subj = (get(f, "SubjectPath") or "").replace("|", "\\|")
             a(f"| {get(f,'Verdict')} | {get(f,'Confidence')} | {get(f,'Type')} | "
               f"{get(f,'Target')} | `{subj}` |")
+    elif model.get("yara_clusters"):
+        n = sum(len(v) for v in model["yara_clusters"].values())
+        a(f"No findings cleared the **live** adjudication bar - but **{n} memory YARA hit(s) are "
+          "OPEN LEADS**, not yet verified. This host is **NOT clean** until each is resolved: see "
+          "*YARA matches by process* below and `YARA_Pivot_Report.md` (true-positive-class = review "
+          "first), then run the enriched follow-up on every flagged PID (see WORKFLOW-YARA.md).")
     else:
         a("No true-positive-class findings. **No eradication required.**")
     a("")
@@ -429,10 +435,16 @@ def md_incident(model, host, incident, analyst, when):
     yc = model.get("yara_clusters") or {}
     if yc:
         total_hits = sum(len(v) for v in yc.values())
-        a("## YARA matches by process (memory)")
+        a("## YARA matches by process (memory) - OPEN LEADS")
         a("")
         a(f"{total_hits} match(es) across {len(yc)} process(es), clustered per PID. "
           "Context: **anon-exec = injected/unbacked code** (real); file-backed = verify signature/hash.")
+        a("")
+        a("> **These are leads, not verdicts - nothing here is suppressed.** Each PID must be verified "
+          "by the enriched follow-up before it is cleared or eradicated: `YARA_Pivot_Report.md` ranks "
+          "them (true-positive-class = review first), then re-run analysis with enrichment and read "
+          "each PID's footprint. See **WORKFLOW-YARA.md** for reading each hit into a verdict (incl. "
+          "tooling/self-reference traps).")
         a("")
         a("| Process (PID) | Hits | Rule (VAD context) |")
         a("|---|---:|---|")
@@ -1007,6 +1019,22 @@ def emit_iocs(host_folder, incident_id=None):
     return path
 
 
+def update_status_needs_investigation(host_folder, n):
+    """Set `needs_investigation` on an existing _status.json (read-modify-write). A run is only
+    truly clean when tp_count == 0 AND needs_investigation == 0. No-op if the file is absent."""
+    path = os.path.join(host_folder, "_status.json")
+    if not os.path.isfile(path):
+        return
+    try:
+        with open(path, encoding="utf-8-sig") as fh:
+            st = json.load(fh)
+        st["needs_investigation"] = int(n)
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(st, fh, indent=2)
+    except Exception:
+        pass
+
+
 def generate(host_folder, incident_id=None, analyst="IR Automation"):
     if not os.path.isdir(host_folder):
         raise SystemExit(f"host folder not found: {host_folder}")
@@ -1046,6 +1074,12 @@ def generate(host_folder, incident_id=None, analyst="IR Automation"):
             with open(yara_pivot_tp, "w", encoding="utf-8") as fh:
                 json.dump([{"pid": int(p["pid"]), "proc": p["proc"], "score": p["score"],
                             "rules": p["rules"]} for p in tps], fh, indent=2)
+
+    # Refresh _status.json so the machine-readable status agrees with the report: a host with
+    # memory YARA leads flagged true-positive-class still NEEDS INVESTIGATION (not clean) until each
+    # is verified by the enriched follow-up. Additive update - the orchestrator owns the rest.
+    update_status_needs_investigation(
+        host_folder, sum(1 for p in model.get("yara_pivots", []) if p["true_positive"]))
 
     return {
         "incident_report": incident_md,
