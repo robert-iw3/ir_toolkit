@@ -108,14 +108,23 @@ def _lotl(text):
 
 PLUGINS = ("linux.pslist.PsList", "linux.pidhashtable.PIDHashTable",
            "linux.malfind.Malfind", "linux.psaux.PsAux", "linux.bash.Bash",
-           "linux.sockstat.Sockstat", "linux.check_syscall.Check_syscall",
+           "linux.sockstat.Sockstat", "linux.malware.check_syscall.Check_syscall",
            "linux.check_modules.Check_modules", "linux.tty_check.tty_check",
            "linux.envars.Envars", "linux.ptrace.Ptrace",
            "linux.hidden_modules.Hidden_modules",
            "linux.check_afinfo.Check_afinfo", "linux.check_idt.Check_idt",
-           "linux.check_creds.Check_creds", "linux.netfilter.Netfilter",
+           "linux.check_creds.Check_creds", "linux.malware.netfilter.Netfilter",
            "linux.keyboard_notifiers.Keyboard_notifiers", "linux.kthreads.Kthreads",
            "linux.ebpf.EBPF",
+           # vol3 2.28 tracing/malware plugins, validated live against the ubuntu-main image:
+           #   CheckFtrace        -> LTTP-005 inline ftrace hooks (syscall table is clean)
+           #   CheckTracepoints   -> LTTP-001 kprobe/tracepoint hiding hooks
+           #   ProcessSpoofing    -> LTTP-004 comm/argv spoof + deleted-exe (adjudicated, not raw)
+           # NOTE: linux.got_plt.GOT_PLT does NOT exist in vol3 2.28 - removed (it silently
+           # errored every run). analyze_got_plt stays dormant until a real GOT source is wired.
+           "linux.tracing.ftrace.CheckFtrace",
+           "linux.tracing.tracepoints.CheckTracepoints",
+           "linux.malware.process_spoofing.ProcessSpoofing",
            "linux.capabilities.Capabilities", "linux.mountinfo.MountInfo",
            "linux.library_list.LibraryList")
 
@@ -228,18 +237,34 @@ def analyze_cmdlines(rows):
     return out
 
 
+_SEV_ORDER = {"Critical": 3, "High": 2, "Medium": 1, "Low": 0}
+
+
 def analyze_bash(rows):
+    """Recovered shell history. Flag attack STRUCTURE - reverse shells, offensive tools, execution
+    of an implant-dir binary, and GTFOBins/LOTL techniques - NOT a bare reference to a writable dir
+    (ls /tmp, cd /tmp, cat /tmp/x, rm -rf /tmp/x are benign and must not fire). Uses _implant_exec
+    (argv[0] / interpreter-script in an implant dir) instead of the broad IMPLANT_RE substring, and
+    follows the matched technique's severity rather than a blanket High (so `sudo su` -> Medium)."""
     out = []
     for r in rows or []:
         cmd = str(_get(r, "Command", "CommandLine"))
         pid = _get(r, "PID")
-        lotl = _lotl(cmd)
-        if REVSHELL_RE.search(cmd) or OFFENSIVE_RE.search(cmd) or IMPLANT_RE.search(cmd) or lotl:
-            tech = ", ".join(t for t, _s, _m in lotl) or "reverse-shell/offensive/implant"
-            out.append(_finding("High", "Suspicious Shell History (memory)",
-                                f"PID {pid} @ {_get(r, 'CommandTime', 'Time')}",
-                                f"Recovered shell history [{tech}]: {cmd[:300]}",
-                                "T1059.004 (Unix Shell)"))
+        techs = []  # (label, severity)
+        if REVSHELL_RE.search(cmd):
+            techs.append(("reverse shell", "High"))
+        elif OFFENSIVE_RE.search(cmd):
+            techs.append(("offensive tool", "High"))
+        elif _implant_exec(cmd):
+            techs.append(("implant-dir execution", "Medium"))
+        techs += [(t, s) for t, s, _m in _lotl(cmd)]
+        if not techs:
+            continue
+        sev = max((s for _t, s in techs), key=lambda s: _SEV_ORDER.get(s, 1))
+        out.append(_finding(sev, "Suspicious Shell History (memory)",
+                            f"PID {pid} @ {_get(r, 'CommandTime', 'Time')}",
+                            f"Recovered shell history [{', '.join(t for t, _s in techs)}]: {cmd[:300]}",
+                            "T1059.004 (Unix Shell)"))
     return out
 
 
@@ -316,16 +341,29 @@ def analyze_tty(rows):
 
 # -- Userland rootkit / injection / stealth --------------------------
 def analyze_envars(rows):
-    """linux.envars -> dynamic-linker hijack (LD_PRELOAD/LD_AUDIT = userland rootkit)."""
+    """linux.envars -> dynamic-linker hijack. A LD_PRELOAD/LD_AUDIT pointing into a writable/volatile
+    path (or a deleted/memfd library) is the real hijack -> High. A bare soname or a library under a
+    trusted system path is routine: sandboxes (libmozsandbox.so), snap shims and accessibility
+    bridges all set LD_PRELOAD legitimately, so that adjudicates Low, not a blanket High."""
     out = []
     for r in rows or []:
         key = str(_get(r, "KEY", "Key", "Variable")).strip().upper()
         val = str(_get(r, "VALUE", "Value"))
         pid, comm = _get(r, "PID", "Pid"), _get(r, "COMM", "Process", "Comm")
         if key in ("LD_PRELOAD", "LD_AUDIT"):
-            out.append(_finding("High", "Linker Hijack (memory)", f"PID {pid} ({comm})",
-                                f"{key}={val[:200]} - dynamic-linker injection (userland rootkit / "
-                                f"library injection).", "T1574.006 (Dynamic Linker Hijacking)"))
+            untrusted = bool(IMPLANT_RE.search(val)) or "/home/" in val \
+                or "(deleted)" in val or "memfd:" in val \
+                or val.strip().startswith(("./", "../"))
+            if untrusted:
+                out.append(_finding("High", "Linker Hijack (memory)", f"PID {pid} ({comm})",
+                                    f"{key}={val[:200]} - preload from a writable/volatile path "
+                                    f"(userland rootkit / library injection).",
+                                    "T1574.006 (Dynamic Linker Hijacking)"))
+            else:
+                out.append(_finding("Low", "Process Preload (memory)", f"PID {pid} ({comm})",
+                                    f"{key}={val[:200]} - preload from a trusted lib path / bare "
+                                    f"soname (commonly benign: sandbox, snap, a11y shims).",
+                                    "T1574.006 (Dynamic Linker Hijacking)"))
         elif key == "LD_LIBRARY_PATH" and IMPLANT_RE.search(val):
             out.append(_finding("Medium", "Linker Path in Implant Dir (memory)",
                                 f"PID {pid} ({comm})",
@@ -342,16 +380,64 @@ def analyze_envars(rows):
 
 
 def analyze_ptrace(rows):
-    """linux.ptrace -> active ptrace attachment (injection / credential theft / anti-debug)."""
+    """linux.ptrace -> active ptrace attachment (injection / credential theft / anti-debug).
+    Base finding: any active attachment -> Medium (LTTP-003 base).
+    Escalation: if the traced thread's instruction pointer lies in anonymous/unbacked memory,
+    active code injection is underway -> High."""
     out = []
     for r in rows or []:
         tracer = str(_get(r, "Tracer TID", "TracerTID", "Tracer")).strip()
         pid, comm = _get(r, "PID", "Pid"), _get(r, "Process", "COMM", "Comm")
-        if tracer and tracer not in ("", "0", "-", "N/A", "None"):
-            out.append(_finding("Medium", "Ptrace Attachment (memory)", f"PID {pid} ({comm})",
-                                f"Process is being ptrace'd by TID {tracer} - code injection / "
-                                f"credential theft / anti-debug.",
-                                "T1055.008 (Ptrace Injection), T1622 (Debugger Evasion)"))
+        if not tracer or tracer in ("", "0", "-", "N/A", "None"):
+            continue
+        # Base finding - always emit (no signal lost)
+        out.append(_finding("Medium", "Ptrace Attachment (memory)", f"PID {pid} ({comm})",
+                            f"Process is being ptrace'd by TID {tracer} - code injection / "
+                            f"credential theft / anti-debug.",
+                            "T1055.008 (Ptrace Injection), T1622 (Debugger Evasion)"))
+        # Escalation: check where the thread IP points
+        ip = _get(r, "Thread IP", "RIP", "IP", "InstructionPointer")
+        backed = str(_get(r, "Thread Region", "Region", "VMA Backed By", "Backed") or "").strip().lower()
+        if ip and backed in ("anon", "anonymous", "[anon]", "(anon)") or (ip and "anon" in backed):
+            out.append(_finding(
+                "High", "Ptrace Injection - Thread IP in Injected Memory (memory)",
+                f"PID {pid} ({comm})",
+                f"Thread IP ({ip}) is executing in anonymous/unbacked memory (region='{backed}') "
+                f"while ptrace'd by TID {tracer} - active shellcode/payload injection via ptrace.",
+                "T1055.008 (Ptrace Injection), T1622 (Debugger Evasion)"))
+    return out
+
+
+def analyze_got_plt(rows):
+    """linux.got_plt (or equivalent enrichment) -> GOT/PLT pointer overwrites.
+    If the actual address of a GOT entry points outside the expected library's
+    address range (unbacked/anonymous memory), the pointer has been overwritten
+    to redirect execution - a hallmark of userland rootkits targeting sshd/sudo/pam."""
+    out = []
+    for r in rows or []:
+        pid = _get(r, "PID", "Pid")
+        proc = _get(r, "Process", "COMM", "Comm")
+        func = _get(r, "Function", "Symbol")
+        backed = str(_get(r, "Backed_By", "BackedBy", "Region")).strip().lower()
+        actual = _get(r, "Actual_Addr", "ActualAddr", "Address")
+        lib = _get(r, "Library", "Module")
+        if backed in ("anon", "anonymous", "[anon]", "", "none") or "(anon)" in backed:
+            out.append(_finding(
+                "Critical", "GOT/PLT Overwrite (memory)",
+                f"PID {pid} ({proc})",
+                f"GOT entry for {func} in {lib} redirected to anonymous/unbacked memory "
+                f"@ {actual} - userland API hook (rootkit/credential theft).",
+                "T1574.001 (DLL Search Order Hijacking / GOT Overwrite), T1014 (Rootkit)"
+            ))
+        elif backed and "anon" not in backed:
+            # Pointer goes somewhere legitimate but unexpected - annotate for review
+            out.append(_finding(
+                "Medium", "GOT Entry Relocation (verify)",
+                f"PID {pid} ({proc})",
+                f"GOT entry for {func} in {lib} backed by '{backed}' @ {actual} - "
+                f"verify this is expected (could be RELRO, lazy binding, or hook).",
+                "T1574.001 (GOT/PLT Overwrite)"
+            ))
     return out
 
 
@@ -426,6 +512,66 @@ def analyze_keyboard_notifiers(rows):
                                  "T1056.001 (Keylogging)")
 
 
+def analyze_ftrace(rows):
+    """linux.tracing.ftrace.CheckFtrace -> inline kernel hooks via the ftrace framework
+    (register_ftrace_function) - the interception surface linux.check_syscall cannot see. The
+    plugin emits a row only for an actual hook, so every row is a finding (LTTP-005)."""
+    return _analyze_anomaly_rows(rows, "Ftrace Kernel Hook (memory)",
+                                 "T1014 (Rootkit), T1562.001 (Impair Defenses)")
+
+
+def analyze_tracepoints(rows):
+    """linux.tracing.tracepoints.CheckTracepoints -> kprobe/tracepoint hooks, the attach surface
+    eBPF and kernel rootkits use to hide getdents64 / tcp4_seq_show. Anomaly-only output, so each
+    returned row is a hook (LTTP-001 - the hiding-hook visibility linux.ebpf does not expose)."""
+    return _analyze_anomaly_rows(rows, "Tracepoint/Kprobe Hook (memory)",
+                                 "T1014 (Rootkit), T1056 (Input Capture)")
+
+
+# comm names that legitimately differ from the exe basename (kernel threads) - a userland
+# process wearing one of these names is the real masquerade, vs the benign interpreter/helper
+# argv rewrites (python daemons, systemd/firefox helpers) that flood Comm_Spoofed on a clean host.
+_KTHREAD_NAME_RE = re.compile(
+    r"^\[?(kworker|ksoftirqd|kthreadd|migration|rcu_|watchdog|kswapd|kcompactd|ksmd|"
+    r"khugepaged|kdevtmpfs|kauditd|irq/|scsi_|jbd2|ext4-|kblockd|kintegrityd)", re.I)
+
+
+def analyze_process_spoofing(rows):
+    """linux.malware.process_spoofing -> per-process Comm_Spoofed / Cmdline_Spoofed / Exe_Deleted
+    flags. Raw flagging is FP-heavy (validated live: on a clean host 23 procs are Comm_Spoofed and
+    40 Cmdline_Spoofed - all benign python daemons / systemd & firefox helpers). So adjudicate
+    behaviorally and emit only the high-confidence subset:
+      - Exe_Deleted               -> running a binary unlinked from disk (fileless/anti-forensic).
+      - comm = a KERNEL-THREAD name with a real userland exe -> PR_SET_NAME masquerade.
+      - comm/argv spoof with the exe in a writable implant dir.
+    A plain comm/argv difference over a normal exe path is NOT emitted."""
+    out = []
+    for r in rows or []:
+        pid, comm = _get(r, "PID"), str(_get(r, "Comm"))
+        exe = str(_get(r, "Exe_Path", "Exe Path"))
+        comm_sp = _get(r, "Comm_Spoofed") is True
+        cmd_sp = _get(r, "Cmdline_Spoofed") is True
+        deleted = _get(r, "Exe_Deleted") is True
+        in_implant = exe.startswith(("/tmp/", "/var/tmp/", "/dev/shm/"))
+        if deleted:
+            out.append(_finding("High", "Process Running Deleted Binary (memory)",
+                                f"PID {pid} ({comm})",
+                                f"Executable unlinked from disk while running: {exe} - "
+                                f"fileless / anti-forensic.", "T1070.004 (File Deletion), T1055"))
+        elif comm_sp and _KTHREAD_NAME_RE.match(comm) and exe not in ("", "N/A"):
+            out.append(_finding("High", "Kernel-Thread Name Masquerade (memory)",
+                                f"PID {pid} ({comm})",
+                                f"Presents kernel-thread name '{comm}' but runs userland binary "
+                                f"{exe} - PR_SET_NAME masquerade.",
+                                "T1036.004 (Masquerade Task or Service), T1014 (Rootkit)"))
+        elif (comm_sp or cmd_sp) and in_implant:
+            out.append(_finding("High", "Spoofed Process From Implant Dir (memory)",
+                                f"PID {pid} ({comm})",
+                                f"Process name/argv spoofed and exe in a writable dir: {exe}.",
+                                "T1036 (Masquerading)"))
+    return out
+
+
 def analyze_check_idt(rows):
     """IDT can list all entries; flag only the ones whose handler is unresolved/hooked."""
     out = []
@@ -458,19 +604,53 @@ def analyze_kthreads(rows):
     return out
 
 
+_EBPF_HIDING_RE = re.compile(
+    r"getdents|tcp|udp|socket|net|hide|filter|block|drop", re.IGNORECASE)
+_EBPF_KERNEL_HOOK_TYPES = frozenset(
+    ("kprobe", "kretprobe", "tracepoint", "raw_tracepoint", "perf_event"))
+_EBPF_NETWORK_HOOK_TYPES = frozenset(
+    ("socket_filter", "cgroup_skb", "xdp", "sk_skb", "flow_dissector"))
+
+
 def analyze_ebpf(rows):
-    """linux.ebpf -> loaded eBPF programs. Flag ALL of them (Medium/Indeterminate): every program
-    type can be abused (kprobe/tracepoint/xdp for hooking, socket-filter/cgroup for traffic
-    control), so filtering by type would tune out real vectors. The analyst confirms expected vs
-    not - modern rootkits/C2 (bpfdoor, TripleCross, ebpfkit) live here."""
+    """linux.ebpf -> loaded eBPF programs (LTTP-001 tiered detection).
+
+    Base: flag ALL programs at Medium - every program type can be abused (kprobe/tracepoint/xdp
+    for hooking, socket-filter/cgroup for traffic control), so filtering by type would tune out
+    real vectors. Analyst confirms expected vs not (bpfdoor, TripleCross, ebpfkit live here).
+
+    Escalation to High:
+      - Kernel-hook types (kprobe/kretprobe/tracepoint/raw_tracepoint/perf_event) whose name or
+        tag contains process/file/network hiding patterns (getdents, tcp, udp, socket, net, hide,
+        filter, block, drop) - strong rootkit/C2 signal.
+      - Network-hook types (socket_filter, cgroup_skb, xdp, sk_skb, flow_dissector) - purpose-
+        built for traffic interception/filtering; high-risk attack surface regardless of name."""
     out = []
     for r in rows or []:
-        typ = str(_get(r, "Type")).strip().lower()
-        name, tag = _get(r, "Name"), _get(r, "Tag")
-        out.append(_finding("Medium", "eBPF Program (memory)", f"{name} [{typ}]",
-                            f"Loaded eBPF program name='{name}' type='{typ}' tag='{tag}' - eBPF "
-                            f"backs modern rootkits/C2; confirm it is expected.",
-                            "T1014 (Rootkit), T1205 (Traffic Signaling)"))
+        typ = str(_get(r, "Type") or "").strip().lower()
+        name = _get(r, "Name") or ""
+        tag = _get(r, "Tag") or ""
+        loaded_at = _get(r, "Loaded At", "LoadTime") or ""
+        load_note = f" loaded={loaded_at}" if loaded_at else ""
+        name_s, tag_s = str(name), str(tag)
+
+        if typ in _EBPF_NETWORK_HOOK_TYPES:
+            sev = "High"
+            extra = (f" Network-hook type '{typ}' is purpose-built for traffic "
+                     f"interception/filtering - high network-hiding risk.")
+        elif typ in _EBPF_KERNEL_HOOK_TYPES and _EBPF_HIDING_RE.search(name_s + tag_s):
+            sev = "High"
+            extra = (f" Kernel-hook type '{typ}' with hiding-pattern name/tag - "
+                     f"process/file/network concealment (rootkit/C2).")
+        else:
+            sev = "Medium"
+            extra = ""
+
+        out.append(_finding(
+            sev, "eBPF Program (memory)", f"{name_s} [{typ}]",
+            f"Loaded eBPF program name='{name_s}' type='{typ}' tag='{tag_s}'{load_note} - eBPF "
+            f"backs modern rootkits/C2; confirm it is expected.{extra}",
+            "T1014 (Rootkit), T1205 (Traffic Signaling)"))
     return out
 
 
@@ -724,19 +904,24 @@ def analyze(plugin_rows):
         + analyze_bash(g.get("linux.bash.Bash"))
         + analyze_sockstat(g.get("linux.sockstat.Sockstat"),
                            _pid_comm_map(g.get("linux.pslist.PsList")))
-        + analyze_check_syscall(g.get("linux.check_syscall.Check_syscall"))
+        + analyze_check_syscall(g.get("linux.malware.check_syscall.Check_syscall"))
         + analyze_check_modules(g.get("linux.check_modules.Check_modules"))
         + analyze_tty(g.get("linux.tty_check.tty_check"))
         + analyze_envars(g.get("linux.envars.Envars"))
         + analyze_ptrace(g.get("linux.ptrace.Ptrace"))
+        # analyze_got_plt: dormant - linux.got_plt.GOT_PLT does not exist in vol3 2.28.
+        # Needs a real GOT source (linux.elfs + manual GOT walk, or a custom plugin) before re-enabling.
         + analyze_hidden_modules(g.get("linux.hidden_modules.Hidden_modules"))
         + analyze_check_afinfo(g.get("linux.check_afinfo.Check_afinfo"))
         + analyze_check_idt(g.get("linux.check_idt.Check_idt"))
         + analyze_check_creds(g.get("linux.check_creds.Check_creds"))
-        + analyze_netfilter(g.get("linux.netfilter.Netfilter"))
+        + analyze_netfilter(g.get("linux.malware.netfilter.Netfilter"))
         + analyze_keyboard_notifiers(g.get("linux.keyboard_notifiers.Keyboard_notifiers"))
         + analyze_kthreads(g.get("linux.kthreads.Kthreads"))
         + analyze_ebpf(g.get("linux.ebpf.EBPF"))
+        + analyze_ftrace(g.get("linux.tracing.ftrace.CheckFtrace"))
+        + analyze_tracepoints(g.get("linux.tracing.tracepoints.CheckTracepoints"))
+        + analyze_process_spoofing(g.get("linux.malware.process_spoofing.ProcessSpoofing"))
         + analyze_capabilities(g.get("linux.capabilities.Capabilities"))
         + analyze_mountinfo(g.get("linux.mountinfo.MountInfo"))
         + analyze_library_list(g.get("linux.library_list.LibraryList"))

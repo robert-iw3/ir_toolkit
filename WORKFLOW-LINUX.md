@@ -66,11 +66,30 @@ world-writable executables, hidden files, SUID inventory, auth logs, `last`/`las
 current sessions, and a bounded structured journal export (`journal.json`).
 
 ### EDR / fileless hunt (`playbooks/linux/threat_hunting/edr_hunt.py`)
-Inspects `/proc`, the loaded-module list, persistence locations and writable paths:
-hidden processes (thread-group-leader checks), deleted-but-running binaries, anonymous
-executable memory maps (`memfd`/fileless), `LD_PRELOAD`/`ld.so.preload` hijacks,
-out-of-tree/hidden kernel modules, writable+executable paths, unexpected SUID binaries,
-cron/shell-init persistence, webshell patterns, and added capabilities.
+Inspects `/proc`, the loaded-module list, persistence locations and writable paths. Read-only;
+degrades gracefully without root (run as root for `/etc/shadow`, other procs' `fd`/`mem`, full SUID).
+
+**Core checks:** hidden processes (thread-group-leader), deleted-but-running binaries, anonymous
+executable memory (`memfd`/fileless, JIT-runtime-aware), `LD_PRELOAD`/`ld.so.preload` hijacks,
+out-of-tree/hidden kernel modules, writable+executable paths, unexpected SUID, cron/shell-init
+persistence, webshells, added capabilities.
+
+**Static-parity checks (Phase 5):** network connection audit (`/proc/net` parse + inode→PID
+attribution; outbound-to-public / unexpected listeners), ELF magic / extension mismatch,
+logging-tampering (auditd/journald/rsyslog disabled, audit rules cleared, HISTFILE neutered,
+truncated logs), privileged-task binary integrity (root cron/systemd unit world-writable /
+non-root / dropped-at-runtime), extended persistence (rc.local, udev `RUN+=`, XDG autostart,
+at-jobs), credential-access artifacts (world-readable shadow, staged credential files, core dumps),
+and the SSH `authorized_keys` audit re-grounded on attacker-resistant signals (file
+writability/ownership, forced-command backdoor, key reuse across accounts, non-standard
+`AuthorizedKeysFile`) - the comment-string heuristic was dropped as worthless.
+
+**Behavioral correlation (not string matching):** external connection / listener from a
+deleted/`memfd`/writable-path binary = C2 *regardless of port* (beats 443-beacon evasion);
+process ancestry (shell/`nc`/interpreter descended from a network daemon + corroborating factor =
+service RCE / reverse shell); name masquerade (fake kernel thread = bracketed `comm` with a real
+exe; `comm`≠exe from an untrusted path); credential access by open handle (`/etc/shadow`,
+`/proc/kcore`, `/dev/mem`, another task's `/proc/<pid>/mem` from a non-auth process).
 
 ### Remote-access triage (`playbooks/linux/threat_hunting/remote_access_triage.py`)
 Reverse-shell indicators, RMM/tunnelling tooling, and suspicious remote-session artifacts.
@@ -247,9 +266,14 @@ python3 playbooks/linux/threat_hunting/analyze_memory_linux.py --offline-dir vol
 |---|---|---|
 | `linux.pslist` + `linux.pidhashtable` | hidden process (in hashtable, not pslist - DKOM) | T1014 |
 | `linux.malfind` | injected/anonymous executable memory | T1055 |
-| `linux.psaux` / `linux.bash` | reverse-shell / offensive / implant-exec cmdlines + **living-off-the-land** (encoded-exec, download cradles, GTFOBins shell escapes, credential access, defense-evasion/anti-forensics, persistence, tunneling/C2, exfil) | T1059 / T1105 / T1003 / T1070 / T1572 |
+| `linux.psaux` / `linux.bash` | reverse-shell / offensive / implant-**exec** cmdlines (execution from a writable dir via `_implant_exec`, **not** a bare `/tmp` reference - `ls /tmp` etc. no longer fire) + **living-off-the-land** (encoded-exec, download cradles, GTFOBins shell escapes, credential access, anti-forensics, persistence, tunneling/C2, exfil). Severity follows the matched technique (`sudo su` → Medium) | T1059 / T1105 / T1003 / T1070 / T1572 |
+| `linux.envars` | `LD_PRELOAD`/`LD_AUDIT` from a writable/`memfd`/deleted path → **High** linker hijack; bare soname / trusted libdir (Firefox sandbox, snap, a11y shims) → Low | T1574.006 |
 | `linux.sockstat` | external (non-RFC1918) connections at capture (C2), **reputation-ranked** (known network apps → Low, unexpected binaries → Medium) | T1071 |
-| `linux.check_syscall` / `linux.check_modules` / `linux.tty_check` | syscall/module/tty hooks (rootkit) | T1014 |
+| `linux.malware.check_syscall` / `linux.check_modules` / `linux.tty_check` / `linux.check_idt` / `linux.check_afinfo` / `linux.malware.netfilter` | syscall-table / module / tty / IDT / proto-handler / netfilter hooks (rootkit; vol3 2.28 `malware.*` namespace, anomaly-only) | T1014 / T1205 |
+| `linux.tracing.ftrace` / `linux.tracing.tracepoints` | **inline ftrace hooks** and **kprobe/tracepoint hooks** - the interception surfaces `check_syscall` cannot see (LTTP-005, and the eBPF-hiding hook surface `linux.ebpf` does not expose) | T1014 / T1056 |
+| `linux.ptrace` | active `ptrace` attachment (injection/anti-debug); escalates if the traced thread IP is in anonymous memory | T1055.008 |
+| `linux.ebpf` | loaded eBPF programs (type-tiered; observability vs hiding-hook) | T1014 |
+| `linux.malware.process_spoofing` | **behaviorally adjudicated** comm/argv spoof: emits only `Exe_Deleted`, kernel-thread-name masquerade, or implant-dir exe - raw `Comm_Spoofed`/`Cmdline_Spoofed` (benign python/systemd/firefox helpers) suppressed | T1036.004 / T1070.004 |
 | YARA (`--yara`) | rule hits in memory (Linux-applicable rules only - PE/dotnet/macho + Windows-API rules dropped by content, ~9,600→~400; ELF canary proves the engine read memory). **`--yara-engine native`** (default) = yara-python over the whole image, fast + full physical coverage, no per-PID; **`--yara-engine vol`** = per-process worker driving Volatility as a library (init once, loop in-process) for **per-PID attribution + per-process timeout + rolling resumable JSONL** | T1055 / T1027 |
 | **Correlation** | `Correlated Memory Threat` - emitted when a strong signal (injection / hidden-proc / LOTL / YARA hit) and another signal **converge on one PID** → high-confidence compromise | T1055 / T1059 |
 

@@ -1,75 +1,4 @@
-﻿<#
-.SYNOPSIS
-    PowerShell EDR Toolkit - Fileless & Evasion Hunting
-.DESCRIPTION
-    Full-spectrum hunt for hidden processes, fileless persistence (WMI, Registry, Tasks, BITS, COM),
-    injection, BYOVD, ETW/AMSI tampering, PendingFileRenameOperations, ADS, timestomping, and more.
-    Exports structured findings (CSV + styled HTML + JSON) with MITRE ATT&CK mappings.
-    Includes -QuickMode (ultra-fast scan) and optional -AutoUpdateDrivers (live pull from loldrivers.io).
-    Multi-threaded file hunts with smart exclusions and hashtable caching.
-.PARAMETER ScanProcesses
-    Hidden processes, unusual parents, suspicious command lines, LOLBins.
-.PARAMETER ScanFileless
-    Classic WMI + Run keys.
-.PARAMETER ScanTasks
-    Suspicious Scheduled Tasks.
-.PARAMETER ScanDrivers
-    Loaded drivers + known vulnerable (BYOVD).
-.PARAMETER ScanInjection
-    Reflective DLLs, foreign modules, process hollowing indicators.
-.PARAMETER ScanADS
-    NTFS Alternate Data Streams.
-.PARAMETER ScanRegistry
-    Expanded registry persistence (IFEO, AppInit_DLLs, Services).
-.PARAMETER ScanETWAMSI
-    ETW Autologger + AMSI tampering.
-.PARAMETER ScanPendingRename
-    PendingFileRenameOperations (MoveEDR-style EDR kill).
-.PARAMETER ScanBITS
-    BITS jobs (modern fileless persistence).
-.PARAMETER ScanCOM
-    COM hijacking (CLSID InProcServer32).
-.PARAMETER TargetDirectory
-    Directory for file-based hunts (entropy, cloaking, ADS, timestomping).
-.PARAMETER Recursive
-    Recursive file scan.
-.PARAMETER QuickMode
-    Ultra-fast scan: smaller entropy sample + skips large-file checks.
-.PARAMETER AutoUpdateDrivers
-    Fetch the latest vulnerable driver list from loldrivers.io API.
-.PARAMETER ReportPath
-    Output directory (default: current working directory).
-.PARAMETER ExcludePaths
-    Array of specific folder paths to skip during file enumeration.
-.PARAMETER SeverityFilter
-    Only report findings matching these severities (Critical, High, Medium, Low).
-.PARAMETER OutputFormat
-    Specific report formats to generate (All, CSV, JSON, HTML).
-.PARAMETER Quiet
-    Suppress all console output except for critical errors and the final summary.
-.PARAMETER TestMode
-    Injects dummy findings to validate SIEM ingestion and reporting pipelines.
-.NOTES
-    Author: Robert Weber
-.EXAMPLE
-
-    Usage:
-
-    .\EDR_Toolkit.ps1 -ScanProcesses -ScanFileless -ScanTasks -ScanDrivers -ScanInjection -ScanRegistry -ScanETWAMSI -ScanPendingRename -ScanBITS -ScanCOM -TargetDirectory "C:\" -Recursive -ScanADS -QuickMode -AutoUpdateDrivers
-
-    powershell.exe -ExecutionPolicy Bypass -NoProfile -File "C:\Path\To\EDR_Toolkit.ps1" -ScanProcesses -ScanFileless -ScanTasks -ScanDrivers -ScanInjection -ScanRegistry -ScanETWAMSI -ScanPendingRename -ScanBITS -ScanCOM -TargetDirectory "C:\" -Recursive -ScanADS -QuickMode -AutoUpdateDrivers
-
-    Cancelling:
-
-    # Immediate memory cleanup
-    $filesToScan = $null
-    $queue = $null
-    [System.GC]::Collect()
-    [System.GC]::WaitForPendingFinalizers()
-    Write-Host "Memory cleanup completed." -ForegroundColor Green
-#>
-
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param (
     [Switch]$ScanProcesses,
     [Switch]$ScanFileless,
@@ -82,6 +11,7 @@ param (
     [Switch]$ScanPendingRename,
     [Switch]$ScanBITS,
     [Switch]$ScanCOM,
+    [Switch]$ScanNetwork,
     [Switch]$ScanYara,
     [String]$YaraRulesDir,
     [String]$TargetDirectory,
@@ -156,6 +86,8 @@ $Global:MITRE = @{
     BITSJob          = "T1197 (BITS Jobs)"
     RegIFEO          = "T1546.012 (Image File Execution Options)"
     AppInitDLL       = "T1546.010 (AppInit DLLs)"
+    NetworkC2        = "T1071 (Application Layer Protocol), T1095 (Non-Standard Port)"
+    NamedPipe        = "T1559.001 (Inter-Process Communication: Component Object Model)"
 }
 
 function Write-Console {
@@ -302,6 +234,24 @@ function Invoke-ProcessHunt {
 
         # --- Context-aware LOLBin scoring ---
         if (-not $cmdLine) { continue }
+
+        # SEDR-002: comsvcs.dll MiniDump - LSASS credential dump without external tool.
+        # rundll32.exe comsvcs.dll MiniDump <lsass-pid> <output-path> full
+        # No benign use - emit Critical directly.
+        if ($cmdLine -match '(?i)comsvcs.*minidump') {
+            Add-Finding -Type "LSASS Memory Dump" -Target "PID: $($wmi.ProcessId) ($name)" `
+                -Details "comsvcs.dll MiniDump detected - LSASS credential dumping without external tool. CMD=$($cmdLine.Substring(0,[math]::Min(300,$cmdLine.Length)))" `
+                -Severity "Critical" -Mitre "T1003.001 (LSASS Memory)"
+        }
+
+        # GAP-P01: msiexec /i http(s):// - no legitimate enterprise deployment uses raw HTTP.
+        # Check before low-risk filter since msiexec is otherwise excluded from scoring.
+        if ($cmdLine -match '(?i)msiexec.*(/i\s+https?://)') {
+            Add-Finding -Type "LOLBin Execution" -Target "PID: $($wmi.ProcessId) ($name)" `
+                -Details "Score=5 Indicators=[msiexec-remoteURL] CMD=$($cmdLine.Substring(0,[math]::Min(300,$cmdLine.Length)))" `
+                -Severity "High" -Mitre $Global:MITRE.EncodedCommand
+        }
+
         if ($name -in $lowRiskProcesses) { continue }
         # Skip the EDR toolkit's own processes (orchestrator + child phases).
         if ($script:SelfPids.Contains($wmi.ProcessId)) { continue }
@@ -340,6 +290,25 @@ function Invoke-ProcessHunt {
         if ($cmdLine -match '(?i)FromBase64String|ToBase64String') {
             $score += 1; $reasons.Add('Base64 conversion')
         }
+        # GAP-P01: additional high-confidence LOLBin patterns
+        if ($cmdLine -match '(?i)regsvr32.*(/i:|scrobj)') {
+            $score += 2; $reasons.Add('regsvr32-Squiblydoo')
+        }
+        if ($cmdLine -match '(?i)msiexec.*(/i\s+https?://)') {
+            $score += 2; $reasons.Add('msiexec-remoteURL')
+        }
+        if ($cmdLine -match '(?i)\bwmic\b.*process\s+call\s+create') {
+            $score += 2; $reasons.Add('wmic-process-create')
+        }
+        if ($cmdLine -match '(?i)\binstallutil\b') {
+            $score += 2; $reasons.Add('installutil')
+        }
+        if ($cmdLine -match '(?i)\bcmstp\b') {
+            $score += 2; $reasons.Add('cmstp')
+        }
+        if ($cmdLine -match '(?i)\bodbcconf\b') {
+            $score += 2; $reasons.Add('odbcconf')
+        }
 
         # Context multiplier: suspicious parent doubles the score
         if ($parentName -and ($parentName.ToLower() -in $highRiskParents)) {
@@ -350,9 +319,38 @@ function Invoke-ProcessHunt {
             $severity = 'High'
         }
 
+        # SEDR-001: decode -EncodedCommand payload and re-score the decoded content.
+        # The initial score already reflects the -enc flag; this pass adds score for
+        # what the payload actually DOES. Nested encoding bumps score again.
+        $decodedPayload = $null
+        if ($cmdLine -match '(?i)(?:-enc(?:odedcommand)?)\s+([A-Za-z0-9+/=]{20,})') {
+            try {
+                $b64 = $Matches[1]
+                # PowerShell always encodes in UTF-16LE; pad to 4-byte boundary
+                $pad = switch ($b64.Length % 4) { 2 { '==' } 3 { '=' } default { '' } }
+                $bytes = [System.Convert]::FromBase64String($b64 + $pad)
+                $decoded = [System.Text.Encoding]::Unicode.GetString($bytes)
+                if ($decoded -match '[\x20-\x7E]{10}') { $decodedPayload = $decoded }
+            } catch {}
+        }
+        if ($decodedPayload) {
+            if ($decodedPayload -match '(?i)\bIEX\b|Invoke-Expression')               { $score += 2; $reasons.Add('decoded:IEX') }
+            if ($decodedPayload -match '(?i)DownloadString|DownloadFile|Net\.WebClient') { $score += 2; $reasons.Add('decoded:WebClient') }
+            if ($decodedPayload -match '(?i)VirtualAlloc|WriteProcessMemory|Marshal\b') { $score += 2; $reasons.Add('decoded:shellcode-API') }
+            if ($decodedPayload -match '(?i)Add-Type.*DllImport|\[Runtime\.InteropServices')  { $score += 2; $reasons.Add('decoded:PInvoke') }
+            $nestedEnc = $decodedPayload -match '(?i)-enc(?:odedcommand)?|-EncodedCommand'
+            if ($nestedEnc) { $score += 2; $reasons.Add('decoded:nested-encoding') }
+            if ($decodedPayload -match '(?i)FromBase64String|ToBase64String')            { $score += 1; $reasons.Add('decoded:base64-in-payload') }
+            if ($score -ge 3) { $severity = 'High' }
+            if ($score -ge 5) { $severity = 'Critical' }
+            if ($nestedEnc)   { $severity = 'Critical' }  # nested encoding is always Critical
+        }
+
         # Only generate a finding if score meets threshold
         if ($score -ge 3) {
-            $detail = "Score=$score Indicators=[$($reasons -join ', ')] CMD=$($cmdLine.Substring(0,[math]::Min(300,$cmdLine.Length)))"
+            $cmdPreview = $cmdLine.Substring(0,[math]::Min(300,$cmdLine.Length))
+            $payloadPreview = if ($decodedPayload) { " | Decoded=$($decodedPayload.Substring(0,[math]::Min(200,$decodedPayload.Length)))" } else { '' }
+            $detail = "Score=$score Indicators=[$($reasons -join ', ')] CMD=$cmdPreview$payloadPreview"
             Add-Finding -Type "LOLBin Execution" -Target "PID: $($wmi.ProcessId) ($name)" `
                 -Details $detail -Severity $severity -Mitre $Global:MITRE.EncodedCommand
         }
@@ -361,56 +359,200 @@ function Invoke-ProcessHunt {
 
 function Invoke-InjectionHunt {
     Write-Console "[*] Hunting for Reflective DLL Injection / Foreign Modules..." "Cyan"
-    $procs = Get-Process -ErrorAction SilentlyContinue
+
+    # Process.Modules enumerates actual Win32 module list (via NtQueryProcessInformation).
+    # This surfaces ALL loaded DLLs - including injected ones - not just .NET assemblies.
+    $procs    = Get-Process -ErrorAction SilentlyContinue
     $sigCache = @{}
+
+    # System-level processes that legitimately carry many unsigned/vendor DLLs.
+    $trustedProcesses = @('explorer','svchost','lsass','winlogon','services','smss','csrss','wininit')
+
+    $suspPathPattern = '(?i)(\\Temp\\|\\AppData\\Local\\Temp\\|\\Users\\Public\\|\\ProgramData\\(?!Microsoft))'
+
+    # MSIX / Store / SystemApps are PACKAGE-signed: the OS validates the package signature,
+    # so individual DLLs (esp. self-contained .NET / NativeAOT runtimes) report 'NotSigned'
+    # per-file by design. These dirs are ACL-protected and not user-controllable, so an
+    # unsigned DLL here is not a meaningful injection signal - downgrade but still surface.
+    $packageSignedPaths = '(?i)(\\Program Files( \(x86\))?\\WindowsApps\\|\\Windows\\SystemApps\\)'
+
     foreach ($p in $procs) {
+        if ($p.ProcessName -in $trustedProcesses) { continue }
         try {
-            $modules = Get-Module -InputObject $p -ErrorAction SilentlyContinue
-            foreach ($m in $modules) {
-                if ($m.ModuleName -like "*.dll" -and $m.Path) {
-                    if (-not (Test-Path $m.Path)) {
-                        Add-Finding -Type "Reflective DLL Injection" -Target "$($p.ProcessName) (PID $($p.Id))" `
-                            -Details "Module '$($m.ModuleName)' loaded but file does not exist on disk" -Severity "High" -Mitre $Global:MITRE.ProcessInjection
-                        continue
+            $modules = $p.Modules
+        } catch {
+            # 32-bit process accessed from 64-bit PS raises PermissionDenied or Win32Exception
+            continue
+        }
+        foreach ($m in $modules) {
+            $dllPath = [string]$m.FileName
+            if (-not $dllPath -or $dllPath -notmatch '\.dll$') { continue }
+
+            # 1. Module loaded but file is gone from disk (classic reflective injection artifact)
+            if (-not (Test-Path $dllPath -ErrorAction SilentlyContinue)) {
+                Add-Finding -Type "Reflective DLL Injection" -Target "$($p.ProcessName) (PID $($p.Id))" `
+                    -Details "DLL loaded but absent from disk: $dllPath" `
+                    -Severity "High" -Mitre $Global:MITRE.ProcessInjection
+                continue
+            }
+
+            # 2. Signature check (cached) - only for DLLs outside trusted Windows paths
+            $isWindowsDLL = $dllPath -match '(?i)\\Windows\\(System32|SysWOW64|WinSxS|assembly)\\'
+            if (-not $isWindowsDLL) {
+                if (-not $sigCache.ContainsKey($dllPath)) {
+                    $sigCache[$dllPath] = (Get-AuthenticodeSignature -FilePath $dllPath -ErrorAction SilentlyContinue).Status
+                }
+                $sigStatus = $sigCache[$dllPath]
+                if ($sigStatus -ne "Valid") {
+                    $note = ''
+                    if ($dllPath -match $packageSignedPaths) {
+                        $sev  = 'Low'
+                        $note = ' (MSIX/Store package-signed path - per-file Authenticode not meaningful)'
+                    } elseif ($dllPath -match $suspPathPattern) {
+                        $sev = 'Critical'
+                    } else {
+                        $sev = 'Medium'
                     }
-                    if (-not $sigCache.ContainsKey($m.Path)) {
-                        $sigCache[$m.Path] = (Get-AuthenticodeSignature -FilePath $m.Path -ErrorAction SilentlyContinue).Status
-                    }
-                    $sigStatus = $sigCache[$m.Path]
-                    if ($sigStatus -ne "Valid" -and $p.ProcessName -notin @("explorer","svchost","lsass","winlogon","services")) {
-                        Add-Finding -Type "Suspicious Injected DLL" -Target "$($p.ProcessName) (PID $($p.Id))" `
-                            -Details "Unsigned DLL: $($m.Path)" -Severity "High" -Mitre $Global:MITRE.ProcessInjection
-                    }
+                    Add-Finding -Type "Suspicious Injected DLL" -Target "$($p.ProcessName) (PID $($p.Id))" `
+                        -Details "Unsigned DLL outside Windows paths. Sig=$sigStatus Path=$dllPath$note" `
+                        -Severity $sev -Mitre $Global:MITRE.ProcessInjection
                 }
             }
-        } catch {}
+        }
     }
 }
 
 function Invoke-FilelessHunt {
     Write-Console "[*] Hunting for Classic Fileless Persistence..." "Cyan"
-    $wmiConsumers = Get-WmiObject -Namespace root\subscription -Class __EventConsumer -ErrorAction SilentlyContinue
-    foreach ($consumer in $wmiConsumers) {
-        if ($consumer.Name -notmatch "BVTConsumer|SCM Event Log Consumer") {
-            Add-Finding -Type "WMI Persistence" -Target "WMI Consumer: $($consumer.Name)" `
-                -Details "Suspicious WMI Event Consumer" -Severity "High" -Mitre $Global:MITRE.WMIPersistence
+
+    # A WMI subscription requires all three objects to be active together.
+    # Checking only __EventConsumer misses orphaned filters and active bindings
+    # where the consumer name happens to match an allowlist entry.
+    $wmiNS = 'root\subscription'
+    $knownGoodConsumers = '(?i)^(BVTConsumer|SCM Event Log Consumer)$'
+
+    $consumers = Get-CimInstance -Namespace $wmiNS -ClassName __EventConsumer -ErrorAction SilentlyContinue
+    $filters   = Get-CimInstance -Namespace $wmiNS -ClassName __EventFilter   -ErrorAction SilentlyContinue
+    $bindings  = Get-CimInstance -Namespace $wmiNS -ClassName __FilterToConsumerBinding -ErrorAction SilentlyContinue
+
+    # Index by name for fast cross-reference
+    $consumerMap = @{}; foreach ($c in $consumers) { $consumerMap[$c.Name] = $c }
+    $filterMap   = @{}; foreach ($f in $filters)   { $filterMap[$f.Name]   = $f }
+
+    foreach ($b in $bindings) {
+        # Extract consumer and filter names from the binding reference strings
+        $cName = if ($b.Consumer  -match '__EventConsumer\.Name="([^"]+)"') { $Matches[1] } else { [string]$b.Consumer  }
+        $fName = if ($b.Filter    -match '__EventFilter\.Name="([^"]+)"')   { $Matches[1] } else { [string]$b.Filter }
+
+        if ($cName -match $knownGoodConsumers) { continue }
+
+        $consumer = $consumerMap[$cName]
+        $filter   = $filterMap[$fName]
+
+        $query     = if ($filter)   { $filter.Query }                 else { 'UNKNOWN' }
+        $cmdOrPath = if ($consumer) { [string]$consumer.CommandLineTemplate + [string]$consumer.ScriptText } else { 'UNKNOWN' }
+
+        Add-Finding -Type "WMI Persistence" -Target "WMI Subscription: Consumer=$cName / Filter=$fName" `
+            -Details "Query=[$query] Action=[$($cmdOrPath.Substring(0,[math]::Min(300,$cmdOrPath.Length)))]" `
+            -Severity "High" -Mitre $Global:MITRE.WMIPersistence
+    }
+
+    # Also flag unbound consumers that are not in the allowlist (subscription half-installed,
+    # or consumer registered for later binding by a dropper).
+    foreach ($c in $consumers) {
+        if ($c.Name -match $knownGoodConsumers) { continue }
+        $isBound = $bindings | Where-Object { $_ -match $c.Name }
+        if (-not $isBound) {
+            Add-Finding -Type "WMI Persistence" -Target "WMI Orphan Consumer: $($c.Name)" `
+                -Details "Consumer exists without active FilterToConsumerBinding - possible partial install" `
+                -Severity "Medium" -Mitre $Global:MITRE.WMIPersistence
         }
     }
-    $runKeys = @("HKLM:\Software\Microsoft\Windows\CurrentVersion\Run","HKCU:\Software\Microsoft\Windows\CurrentVersion\Run")
+    $lolbinPattern = '(?i)(powershell|cmd\.exe|wscript|cscript|mshta|regsvr32|rundll32|certutil|bitsadmin|installutil|cmstp|odbcconf|msiexec)'
+
+    # Run / RunOnce across HKLM and HKCU, including Wow6432Node (32-bit on 64-bit OS)
+    $runKeys = @(
+        "HKLM:\Software\Microsoft\Windows\CurrentVersion\Run",
+        "HKLM:\Software\Microsoft\Windows\CurrentVersion\RunOnce",
+        "HKLM:\Software\Wow6432Node\Microsoft\Windows\CurrentVersion\Run",
+        "HKLM:\Software\Wow6432Node\Microsoft\Windows\CurrentVersion\RunOnce",
+        "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run",
+        "HKCU:\Software\Microsoft\Windows\CurrentVersion\RunOnce",
+        "HKCU:\Software\Wow6432Node\Microsoft\Windows\CurrentVersion\Run",
+        "HKCU:\Software\Wow6432Node\Microsoft\Windows\CurrentVersion\RunOnce"
+    )
+    $skipProps = @("PSPath","PSParentPath","PSChildName","PSDrive","PSProvider")
     foreach ($key in $runKeys) {
-        if (Test-Path $key) {
-            $entries = Get-ItemProperty -Path $key -ErrorAction SilentlyContinue
-            foreach ($property in $entries.PSObject.Properties) {
-                if ($property.Name -notin @("PSPath","PSParentPath","PSChildName","PSDrive","PSProvider")) {
-                    $val = $property.Value
-                    if ($val -match "powershell|cmd\.exe|wscript|cscript|mshta|regsvr32|rundll32|certutil|bitsadmin") {
-                        Add-Finding -Type "Suspicious Registry Key" -Target "$key\$($property.Name)" `
-                            -Details "LOLBin in Run Key: $val" -Severity "High" -Mitre $Global:MITRE.RegPersistence
-                    }
-                }
+        if (-not (Test-Path $key)) { continue }
+        $entries = Get-ItemProperty -Path $key -ErrorAction SilentlyContinue
+        foreach ($prop in $entries.PSObject.Properties) {
+            if ($prop.Name -in $skipProps) { continue }
+            $val = [string]$prop.Value
+            if ($val -match $lolbinPattern) {
+                Add-Finding -Type "Suspicious Registry Key" -Target "$key\$($prop.Name)" `
+                    -Details "LOLBin in Run Key: $val" -Severity "High" -Mitre $Global:MITRE.RegPersistence
             }
         }
     }
+
+    # Winlogon Userinit and Shell - attackers append to or replace these to run at logon
+    $winlogon = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon"
+    if (Test-Path $winlogon) {
+        $wl = Get-ItemProperty $winlogon -ErrorAction SilentlyContinue
+        foreach ($prop in @('Userinit','Shell')) {
+            $val = [string]$wl.$prop
+            # Userinit should only be C:\Windows\system32\userinit.exe,
+            # Shell should only be explorer.exe. Any addition is suspicious.
+            $expected = if ($prop -eq 'Userinit') { '(?i)^\s*[a-z]:\\windows\\system32\\userinit\.exe,?\s*$' } `
+                        else                        { '(?i)^explorer\.exe$' }
+            if ($val -and $val -notmatch $expected) {
+                Add-Finding -Type "Winlogon Hijack" -Target "$winlogon\$prop" `
+                    -Details "Value: $val" -Severity "High" -Mitre "T1547.004 (Winlogon Helper DLL)"
+            }
+        }
+    }
+
+    # BootExecute - should only contain 'autocheck autochk *' on a healthy system
+    $smKey = "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager"
+    $be = (Get-ItemProperty $smKey -Name BootExecute -ErrorAction SilentlyContinue).BootExecute
+    foreach ($entry in $be) {
+        if ($entry -and $entry -notmatch '(?i)^autocheck\s+autochk\s+\*$') {
+            Add-Finding -Type "BootExecute Persistence" -Target "$smKey\BootExecute" `
+                -Details "Unexpected entry: $entry" -Severity "Critical" -Mitre $Global:MITRE.RegPersistence
+        }
+    }
+
+    # LSA Security Packages and Authentication Packages - used for credential interception
+    $lsaKey = "HKLM:\SYSTEM\CurrentControlSet\Control\Lsa"
+    if (Test-Path $lsaKey) {
+        $lsa = Get-ItemProperty $lsaKey -ErrorAction SilentlyContinue
+        foreach ($prop in @('Security Packages','Authentication Packages')) {
+            $vals = @($lsa.$prop) | Where-Object { $_ -and $_ -notmatch '(?i)^("")?(kerberos|msv1_0|schannel|wdigest|tspkg|pku2u|cloudap|negoexts|livessp)?("")?$' }
+            foreach ($v in $vals) {
+                Add-Finding -Type "LSA Package Injection" -Target "$lsaKey\$prop" `
+                    -Details "Unexpected package: $v" -Severity "Critical" -Mitre "T1547.005 (Security Support Provider)"
+            }
+        }
+    }
+
+    # Common startup folders (all users and current user)
+    $startupFolders = @(
+        "$env:ProgramData\Microsoft\Windows\Start Menu\Programs\Startup",
+        "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Startup"
+    )
+    foreach ($folder in $startupFolders) {
+        if (-not (Test-Path $folder)) { continue }
+        Get-ChildItem $folder -ErrorAction SilentlyContinue | Where-Object { -not $_.PSIsContainer } |
+            ForEach-Object {
+                if ($_.Extension -match '\.(exe|dll|ps1|bat|vbs|js|hta|lnk|scr)') {
+                    Add-Finding -Type "Startup Folder Entry" -Target $_.FullName `
+                        -Details "File in startup folder: $($_.Name) ($(([math]::Round($_.Length/1KB,0))) KB)" `
+                        -Severity "Medium" -Mitre $Global:MITRE.RegPersistence
+                }
+            }
+    }
+
+    Invoke-LsassDumpHunt
 }
 
 function Invoke-AdvancedRegistryHunt {
@@ -444,19 +586,80 @@ function Invoke-AdvancedRegistryHunt {
     }
 }
 
+function Invoke-LsassDumpHunt {
+    Write-Console "[*] Hunting for LSASS memory dump artifacts..." "Cyan"
+    # Minimum size for a real LSASS dump: ~10 MB on a minimally-loaded system.
+    # ProcDump and comsvcs MiniDump both produce files in this range.
+    $MinDumpBytes = 10MB
+    $ScanRoots = [System.Collections.Generic.List[string]]::new()
+    foreach ($p in @($env:TEMP, $env:TMP, "$env:SystemDrive\Windows\Temp",
+                     "$env:SystemDrive\Users\Public", "$env:SystemDrive\ProgramData")) {
+        if ($p -and (Test-Path $p)) { $ScanRoots.Add($p) }
+    }
+    foreach ($user in (Get-ChildItem "$env:SystemDrive\Users" -Directory -ErrorAction SilentlyContinue)) {
+        foreach ($sub in @('AppData\Local\Temp','Documents','Desktop','Downloads')) {
+            $full = Join-Path $user.FullName $sub
+            if (Test-Path $full) { $ScanRoots.Add($full) }
+        }
+    }
+    $seen = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    $allOpts = [System.IO.SearchOption]::AllDirectories
+    foreach ($root in ($ScanRoots | Select-Object -Unique)) {
+        foreach ($ext in @('*.dmp','*.mdmp')) {
+            try {
+                foreach ($filePath in [System.IO.Directory]::EnumerateFiles($root, $ext, $allOpts)) {
+                    if (-not $seen.Add($filePath)) { continue }
+                    try {
+                        $fi = [System.IO.FileInfo]::new($filePath)
+                        if ($fi.Length -ge $MinDumpBytes) {
+                            $lsassName = $fi.Name -match '(?i)lsass|lsas\d+|debug|cred'
+                            $sev = if ($lsassName) { 'Critical' } else { 'High' }
+                            Add-Finding -Type "LSASS Memory Dump" -Target $fi.FullName `
+                                -Details "Dump file in user-writable path ($([math]::Round($fi.Length/1MB,1)) MB). Name: $($fi.Name)" `
+                                -Severity $sev -Mitre "T1003.001 (LSASS Memory)"
+                        }
+                    } catch {}
+                }
+            } catch {}
+        }
+    }
+}
+
 function Invoke-BITSHunt {
     Write-Console "[*] Hunting for Suspicious BITS Jobs..." "Cyan"
-    # Allow-list covers OS update mechanisms, browser auto-update, and common vendor
-    # update frameworks. Flag only jobs whose display name AND source URL don't match.
     $allowedNames = '(?i)Microsoft|Windows.Update|Background.Intelligent|MicrosoftEdge|Edge.Component|' +
                     'Google.Update|Chrome|Firefox|OneDrive|Sysinternals|Defender|Office|Teams|' +
                     'Visual.Studio|WinGet|StoreSvc|Xbox|Nvidia|Intel|AMD'
+    # Destination paths that indicate malware staging (not a legitimate update location)
+    $suspDestPattern = '(?i)(\\Temp\\|\\AppData\\|\\Users\\Public\\|\\ProgramData\\(?!Microsoft\\Windows\\(?:Start Menu|WindowsUpdate)))'
+    # Source URL patterns that are suspicious regardless of display name
+    $suspUrlPattern  = '(?i)\.(exe|dll|ps1|bat|vbs|js|hta|msi|scr)(\?|$)|:\\/\\/\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}'
+    $trustedCDN      = '(?i)(microsoft\.com|windowsupdate\.com|google\.com|mozilla\.org|akamaiedge\.net|azureedge\.net|cloudfront\.net|akamaitechnologies\.com)'
+
     $jobs = Get-BitsTransfer -AllUsers -ErrorAction SilentlyContinue
     foreach ($job in $jobs) {
-        if ($job.DisplayName -notmatch $allowedNames) {
-            $src = try { ($job.FileList | Select-Object -First 1 -ExpandProperty Source) } catch { '' }
+        $src  = ''
+        $dest = ''
+        try {
+            $fl   = $job.FileList | Select-Object -First 1
+            $src  = [string]$fl.RemoteName
+            $dest = [string]$fl.LocalName
+        } catch {}
+
+        $nameUnknown  = $job.DisplayName -notmatch $allowedNames
+        $srcTrusted   = $src -and $src -match $trustedCDN
+        $suspUrl      = $src -and (($src -match $suspUrlPattern -and -not $srcTrusted) -or (-not $srcTrusted -and $nameUnknown))
+        $suspDest     = $dest -and $dest -match $suspDestPattern
+
+        if ($nameUnknown -or $suspUrl -or $suspDest) {
+            $sev    = if ($suspUrl -or $suspDest) { 'High' } else { 'Medium' }
+            $reason = @()
+            if ($nameUnknown) { $reason += 'UnknownName' }
+            if ($suspUrl)     { $reason += 'SuspiciousURL' }
+            if ($suspDest)    { $reason += 'SuspiciousDestination' }
             Add-Finding -Type "Suspicious BITS Job" -Target "Job: $($job.DisplayName)" `
-                -Details "URL: $src | State: $($job.JobState)" -Severity "High" -Mitre $Global:MITRE.BITSJob
+                -Details "Flags=[$($reason -join '|')] URL=$src Dest=$dest State=$($job.JobState)" `
+                -Severity $sev -Mitre $Global:MITRE.BITSJob
         }
     }
 }
@@ -518,12 +721,14 @@ function Invoke-COMHijackHunt {
 
 function Invoke-ETWAMSITamperHunt {
     Write-Console "[*] Hunting for ETW / AMSI Tampering..." "Cyan"
+
+    # AMSI provider registry
     $amsiProv = "HKLM:\SOFTWARE\Microsoft\AMSI\Providers"
     if (Test-Path $amsiProv) {
         $count = (Get-ChildItem $amsiProv -ErrorAction SilentlyContinue).Count
         if ($count -eq 0) {
             Add-Finding -Type "AMSI Tampering" -Target "AMSI Providers" `
-                -Details "0 providers registered. AMSI is completely blinded!" -Severity "Critical" -Mitre $Global:MITRE.AMSITampering
+                -Details "0 providers registered. AMSI is completely blinded." -Severity "Critical" -Mitre $Global:MITRE.AMSITampering
         }
     }
     $amsiKey = "HKLM:\SOFTWARE\Microsoft\Windows Script\Settings"
@@ -534,15 +739,49 @@ function Invoke-ETWAMSITamperHunt {
                 -Details "AMSI explicitly disabled in registry" -Severity "Critical" -Mitre $Global:MITRE.AMSITampering
         }
     }
+
+    # ETW Autologger sessions disabled
     $auto = "HKLM:\SYSTEM\CurrentControlSet\Control\WMI\Autologger"
     if (Test-Path $auto) {
-        $sessions = Get-ChildItem $auto -ErrorAction SilentlyContinue
-        foreach ($s in $sessions) {
+        foreach ($s in (Get-ChildItem $auto -ErrorAction SilentlyContinue)) {
             $enabled = Get-ItemProperty -Path $s.PSPath -Name "Enabled" -ErrorAction SilentlyContinue
             if ($enabled.Enabled -eq 0) {
                 Add-Finding -Type "ETW Tampering" -Target $s.PSChildName `
                     -Details "Autologger session disabled" -Severity "High" -Mitre $Global:MITRE.ETWTampering
             }
+        }
+    }
+
+    # Critical event log channels - stopped or max-size weaponized
+    $criticalChannels = @(
+        @{ Name = 'Security';                    Log = 'Security' }
+        @{ Name = 'System';                      Log = 'System' }
+        @{ Name = 'Microsoft-Windows-Sysmon/Operational'; Log = 'Microsoft-Windows-Sysmon/Operational' }
+        @{ Name = 'Microsoft-Windows-Windows Defender/Operational'; Log = 'Microsoft-Windows-Windows Defender/Operational' }
+    )
+    foreach ($ch in $criticalChannels) {
+        try {
+            $log = Get-WinEvent -ListLog $ch.Log -ErrorAction Stop
+            if (-not $log.IsEnabled) {
+                Add-Finding -Type "ETW Tampering" -Target "EventLog: $($ch.Name)" `
+                    -Details "Critical event log channel disabled - logging gap created" `
+                    -Severity "Critical" -Mitre $Global:MITRE.ETWTampering
+            } elseif ($log.MaximumSizeInBytes -gt 0 -and $log.MaximumSizeInBytes -lt 1048576) {
+                Add-Finding -Type "ETW Tampering" -Target "EventLog: $($ch.Name)" `
+                    -Details "Max log size set to $([math]::Round($log.MaximumSizeInBytes/1KB,0)) KB - tiny size rotates log almost immediately, weaponized to lose events" `
+                    -Severity "High" -Mitre $Global:MITRE.ETWTampering
+            }
+        } catch {}
+    }
+
+    # Windows Error Reporting disabled - suppresses crash dump uploads (attacker hides crashes)
+    $werKey = "HKLM:\SOFTWARE\Microsoft\Windows\Windows Error Reporting"
+    if (Test-Path $werKey) {
+        $wer = Get-ItemProperty $werKey -ErrorAction SilentlyContinue
+        if ($wer.Disabled -eq 1) {
+            Add-Finding -Type "ETW Tampering" -Target "Windows Error Reporting" `
+                -Details "WER disabled - crash telemetry and dump uploads suppressed" `
+                -Severity "Medium" -Mitre $Global:MITRE.ETWTampering
         }
     }
 }
@@ -551,83 +790,172 @@ function Invoke-PendingRenameHunt {
     Write-Console "[*] Checking PendingFileRenameOperations (MoveEDR)..." "Cyan"
     $key = "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager"
     $val = Get-ItemProperty -Path $key -Name "PendingFileRenameOperations" -ErrorAction SilentlyContinue
-    if ($val.PendingFileRenameOperations) {
+    $entries = @($val.PendingFileRenameOperations) | Where-Object { $_ }
+    if (-not $entries) { return }
+
+    # Security-relevant targets: EDR/AV agents and their supporting files.
+    # Windows itself creates benign entries for installer cleanup (MsiExec, .tmp files).
+    $securityToolPattern = '(?i)(MsMpEng|MpCmdRun|MpDefenderCore|MpDlp|NisSrv|SenseCncProxy|SenseIR|MsSense|' +
+                           'Sysmon|Sysmon64|WdFilter|WdNisDrv|WdBoot|' +
+                           'csagent|csfalcon|CSFalconService|' +   # CrowdStrike
+                           'SentinelAgent|SentinelOne|sentinel\.exe|' +
+                           'MDE|mdatp|wdavdaemon|' +
+                           'cbdefense|CarbonBlack|' +
+                           'elastic-endpoint|' +
+                           'edrsensor|edrserver)'
+    $suspDestPattern = '(?i)(\\Temp\\|\\AppData\\|\\Users\\Public\\|NUL$|^$)'
+
+    $hitEntries   = [System.Collections.Generic.List[string]]::new()
+    $criticalHits = [System.Collections.Generic.List[string]]::new()
+
+    for ($i = 0; $i -lt $entries.Count; $i++) {
+        $entry = $entries[$i]
+        if (-not $entry) { continue }
+        if ($entry -match $securityToolPattern) { $criticalHits.Add($entry) }
+        # Destination is the NEXT entry (rename pairs: source, dest, source, dest...)
+        elseif ($i -gt 0 -and $entries[$i-1] -match $securityToolPattern -and $entry -match $suspDestPattern) {
+            $criticalHits.Add("$($entries[$i-1]) -> $entry")
+        } elseif ($entry -match $securityToolPattern -or ($i % 2 -eq 1 -and $entry -match $suspDestPattern)) {
+            $hitEntries.Add($entry)
+        }
+    }
+
+    if ($criticalHits.Count -gt 0) {
         Add-Finding -Type "PendingFileRenameOperations" -Target "Session Manager" `
-            -Details "Entries present - possible boot-time EDR deletion" -Severity "High" -Mitre $Global:MITRE.PendingRename
+            -Details "Security tool targeted for boot-time rename/deletion: $($criticalHits -join '; ')" `
+            -Severity "Critical" -Mitre $Global:MITRE.PendingRename
+    } elseif ($hitEntries.Count -gt 0) {
+        Add-Finding -Type "PendingFileRenameOperations" -Target "Session Manager" `
+            -Details "Pending renames present including suspicious destinations: $($hitEntries -join '; ')" `
+            -Severity "High" -Mitre $Global:MITRE.PendingRename
+    } else {
+        # Generic - entries exist but don't match security tools (likely legitimate installer cleanup)
+        Add-Finding -Type "PendingFileRenameOperations" -Target "Session Manager" `
+            -Details "Entries present ($($entries.Count)) - review manually. Common source: Windows Installer cleanup." `
+            -Severity "Low" -Mitre $Global:MITRE.PendingRename
     }
 }
 
 function Invoke-DriverHunt {
     Write-Host "[*] Hunting Loaded Drivers & Known Vulnerable (BYOVD)..." -ForegroundColor Cyan
 
-    $knownVulnerable = @(
-        "capcom.sys", "iqvw64.sys", "RTCore64.sys", "DBUtil_2_3.sys", "TfSysMon.sys",
-        "gdrv.sys", "AsrDrv.sys", "AsrDrv101.sys", "AsrDrv102.sys", "AsrDrv103.sys",
-        "AsrDrv104.sys", "AsrDrv105.sys", "amifldrv64.sys", "AMIFLDRV.sys",
-        "aswArPot.sys", "aswSP.sys", "BdApiUtil64.sys", "ksapi64.sys", "ksapi64_del.sys",
-        "NSecKrnl.sys", "TrueSight.sys", "ThrottleStop.sys", "probmon.sys", "IoBitUnlocker.sys",
-        "Zemana.sys", "kavservice.sys", "agent64.sys", "AODDriver.sys", "ASUS.sys",
-        "ASMMAP.sys", "ASRDRV.sys", "DBUtil.sys", "DBUtil_2_3_0_4.sys",
-        "MsIo64.sys", "MsIo64_2.sys", "WinRing0x64.sys", "WinRing0.sys",
-        "Truesight.sys", "wsftprm.sys", "BdApiUtil.sys", "K7RKScan.sys",
-        "CcProtect.sys", "ProcessMonitorDriver.sys", "Safetica.sys"
-    )
+    # Static name list - fast pre-filter only. A renamed driver bypasses this;
+    # hash-based detection below is the rename-resistant primary signal.
+    $knownVulnNames = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    @(
+        "capcom.sys","iqvw64.sys","RTCore64.sys","DBUtil_2_3.sys","TfSysMon.sys",
+        "gdrv.sys","AsrDrv.sys","AsrDrv101.sys","AsrDrv102.sys","AsrDrv103.sys",
+        "AsrDrv104.sys","AsrDrv105.sys","amifldrv64.sys","AMIFLDRV.sys",
+        "aswArPot.sys","aswSP.sys","BdApiUtil64.sys","ksapi64.sys","ksapi64_del.sys",
+        "NSecKrnl.sys","TrueSight.sys","ThrottleStop.sys","probmon.sys","IoBitUnlocker.sys",
+        "Zemana.sys","kavservice.sys","agent64.sys","AODDriver.sys","ASUS.sys",
+        "ASMMAP.sys","ASRDRV.sys","DBUtil.sys","DBUtil_2_3_0_4.sys",
+        "MsIo64.sys","MsIo64_2.sys","WinRing0x64.sys","WinRing0.sys",
+        "Truesight.sys","wsftprm.sys","BdApiUtil.sys","K7RKScan.sys",
+        "CcProtect.sys","ProcessMonitorDriver.sys","Safetica.sys"
+    ) | ForEach-Object { $null = $knownVulnNames.Add($_) }
 
+    # SHA256 hash set populated from loldrivers.io API or offline cache.
+    # Catches renamed BYOVD drivers that still contain identical bytes.
+    $knownVulnHashes = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    $lolCache = Join-Path $PSScriptRoot '..\..\..\..\..\tools\loldrivers.json'
+
+    $apiDrivers = $null
     if ($AutoUpdateDrivers) {
-        # Try live API first; fall back to staged offline cache if present.
-        $lolCache = Join-Path $PSScriptRoot '..\..\..\..\..\tools\loldrivers.json'
-        $loaded   = $false
+        $loaded = $false
         try {
             Write-Host "[*] Fetching latest vulnerable drivers from loldrivers.io..." -ForegroundColor Cyan
             $apiDrivers = Invoke-RestMethod -Uri "https://www.loldrivers.io/api/drivers.json" -Method Get -ErrorAction Stop
-            $liveList = $apiDrivers | Where-Object { $_.KnownVulnerable } | ForEach-Object { $_.Filename.ToLower() }
-            $knownVulnerable = ($knownVulnerable + $liveList) | Select-Object -Unique
-            Write-Host "[+] Loaded $($liveList.Count) live vulnerable drivers from loldrivers.io" -ForegroundColor Green
+            Write-Host "[+] Loaded $($apiDrivers.Count) records from loldrivers.io" -ForegroundColor Green
             $loaded = $true
         } catch {
             Write-Host "[-] Could not reach loldrivers.io. Checking offline cache..." -ForegroundColor Yellow
         }
         if (-not $loaded -and (Test-Path $lolCache)) {
             try {
-                $cachedDrivers = Get-Content $lolCache -Raw | ConvertFrom-Json
-                $cacheList = $cachedDrivers | Where-Object { $_.KnownVulnerable } | ForEach-Object { $_.Filename.ToLower() }
-                $knownVulnerable = ($knownVulnerable + $cacheList) | Select-Object -Unique
-                Write-Host "[+] Loaded $($cacheList.Count) drivers from offline cache (loldrivers.json)" -ForegroundColor Green
+                $apiDrivers = Get-Content $lolCache -Raw | ConvertFrom-Json
+                Write-Host "[+] Loaded $($apiDrivers.Count) records from offline cache" -ForegroundColor Green
             } catch {
                 Write-Host "[-] Offline cache unreadable. Using built-in list only." -ForegroundColor Yellow
             }
         } elseif (-not $loaded) {
-            Write-Host "[-] No offline cache found. Using built-in list only." -ForegroundColor Yellow
+            Write-Host "[-] No offline cache found. Using built-in names only." -ForegroundColor Yellow
         }
+    } elseif (Test-Path $lolCache) {
+        # Always load offline cache for hashes even without -AutoUpdateDrivers
+        try {
+            $apiDrivers = Get-Content $lolCache -Raw | ConvertFrom-Json
+            Write-Host "[+] Loaded hash index from offline cache ($($apiDrivers.Count) records)" -ForegroundColor Gray
+        } catch {}
     }
 
-    $drivers = Get-WmiObject Win32_SystemDriver -ErrorAction SilentlyContinue
+    if ($apiDrivers) {
+        foreach ($d in ($apiDrivers | Where-Object { $_.KnownVulnerable })) {
+            # Add names from API to the name set
+            $fnames = if ($d.Filename -is [array]) { $d.Filename } else { @($d.Filename) }
+            foreach ($fn in $fnames) { if ($fn) { $null = $knownVulnNames.Add($fn) } }
+
+            # Add all SHA256 hashes (file hash + PE authentihash) for rename-resistant matching.
+            # loldrivers stores both $.SHA256[] (file hash) and $.Authentihash.SHA256[] (PE hash).
+            foreach ($h in @($d.SHA256)) { if ($h) { $null = $knownVulnHashes.Add($h.ToUpper()) } }
+            if ($d.Authentihash -and $d.Authentihash.SHA256) {
+                foreach ($h in @($d.Authentihash.SHA256)) { if ($h) { $null = $knownVulnHashes.Add($h.ToUpper()) } }
+            }
+        }
+        Write-Host "[*] BYOVD index: $($knownVulnNames.Count) names | $($knownVulnHashes.Count) hashes" -ForegroundColor Cyan
+    }
+
+    # Paths where legitimate vendor drivers normally reside. An unsigned driver
+    # OUTSIDE these paths is far more suspicious than one inside System32\drivers.
+    $trustedDriverPaths = '(?i)(\\System32\\drivers\\|\\SysWOW64\\drivers\\|\\SystemRoot\\|Windows\\inf\\)'
+
+    $drivers = Get-CimInstance Win32_SystemDriver -ErrorAction SilentlyContinue
     foreach ($drv in $drivers) {
         if ([string]::IsNullOrWhiteSpace($drv.Name)) { continue }
 
-        $name = $drv.Name.ToLower()
+        $nameHit    = $knownVulnNames.Contains($drv.Name)
+        $hashHit    = $false
+        $fileHash   = ''
+        $sigStatus  = 'N/A'
         $isUnsigned = $false
-        $sigStatus = "N/A (Virtual Driver)"
 
-        # Check Signature ONLY if the driver has a physical file path on disk
-        if (-not [string]::IsNullOrWhiteSpace($drv.Path) -and (Test-Path -Path $drv.Path -ErrorAction SilentlyContinue)) {
-            $sig = Get-AuthenticodeSignature -FilePath $drv.Path -ErrorAction SilentlyContinue
+        $hasFile = -not [string]::IsNullOrWhiteSpace($drv.PathName) -and
+                   (Test-Path -Path $drv.PathName -ErrorAction SilentlyContinue)
+
+        if ($hasFile) {
+            $sig = Get-AuthenticodeSignature -FilePath $drv.PathName -ErrorAction SilentlyContinue
             if ($sig) {
-                $sigStatus = $sig.Status
-                if ($sig.Status -ne "Valid") {
-                    $isUnsigned = $true
-                }
+                $sigStatus  = $sig.Status
+                $isUnsigned = ($sig.Status -ne 'Valid')
+            }
+            if ($knownVulnHashes.Count -gt 0) {
+                try {
+                    $fileHash = (Get-FileHash -Path $drv.PathName -Algorithm SHA256 -ErrorAction Stop).Hash
+                    $hashHit  = $knownVulnHashes.Contains($fileHash)
+                } catch {}
             }
         }
 
-        # Alert if in vulnerable list OR if it is a physical file that is unsigned
-        if ($name -in $knownVulnerable -or $isUnsigned) {
-            Add-Finding -Type "Suspicious Kernel Driver" `
-                -Target "$($drv.DisplayName) ($($drv.Path))" `
-                -Details "Signed: $sigStatus | Vulnerable/Unsigned driver loaded (BYOVD risk)" `
-                -Severity "Critical" `
-                -Mitre $Global:MITRE.BYOVD
-        }
+        # Unsigned driver only matters if it is outside the trusted driver path -
+        # many legitimate vendor drivers have broken/expired certs in System32\drivers.
+        $suspiciousUnsigned = $isUnsigned -and $drv.PathName -and
+                              ($drv.PathName -notmatch $trustedDriverPaths)
+
+        if (-not ($hashHit -or $nameHit -or $suspiciousUnsigned)) { continue }
+
+        $basis = [System.Collections.Generic.List[string]]::new()
+        if ($hashHit)           { $basis.Add("HASH-MATCH:$($fileHash.Substring(0,16))...") }
+        if ($nameHit)           { $basis.Add("NAME-MATCH:$($drv.Name)") }
+        if ($suspiciousUnsigned){ $basis.Add("UNSIGNED-SUSPICIOUS-PATH") }
+
+        # Hash match is highest confidence (rename-resistant); name match is medium;
+        # unsigned-in-bad-path is informational without other evidence.
+        $sev = if ($hashHit) { 'Critical' } elseif ($nameHit) { 'High' } else { 'Medium' }
+
+        Add-Finding -Type "Suspicious Kernel Driver" `
+            -Target "$($drv.DisplayName) ($($drv.PathName))" `
+            -Details "Detection=[$($basis -join '|')] Signed=$sigStatus$(if($fileHash){" SHA256=$fileHash"})" `
+            -Severity $sev -Mitre $Global:MITRE.BYOVD
     }
 }
 
@@ -635,15 +963,91 @@ function Invoke-ScheduledTaskHunt {
     Write-Console "[*] Hunting Scheduled Tasks for suspicious persistence..." "Cyan"
     $tasks = Get-ScheduledTask -ErrorAction SilentlyContinue | Where-Object { $_.State -ne "Disabled" }
 
+    $userWritablePaths = '(?i)(\\Users\\(?!Public\\Windows\\)|\\AppData\\|\\Temp\\|\\ProgramData\\(?!Microsoft\\Windows\\))'
+
+    # Path patterns that make a missing binary genuinely suspicious (fileless loaders
+    # drop here and self-delete). A missing binary under Program Files / Windows is
+    # almost always a stale task left after an uninstall - not a threat.
+    $suspiciousDropPaths = '(?i)(\\Temp\\|\\AppData\\|\\Users\\Public\\|\\ProgramData\\(?!Microsoft\\Windows\\)|\\Downloads\\)'
+
     foreach ($task in $tasks) {
         $cmdLine = ""
+        $exePath = ""
         if ($task.Actions) {
-            $cmdLine = ($task.Actions | ForEach-Object { "$($_.Execute) $($_.Arguments)".Trim() }) -join " "
+            # Only MSFT_TaskExecAction has an Execute property. COM-handler actions
+            # (MSFT_TaskComHandlerAction) expose ClassId instead - guard against both
+            # so -ExpandProperty / property access never throws on a COM task.
+            $execActions = @($task.Actions | Where-Object { $_.PSObject.Properties['Execute'] -and $_.Execute })
+            if ($execActions.Count -gt 0) {
+                $cmdLine = ($execActions | ForEach-Object { "$($_.Execute) $($_.Arguments)".Trim() }) -join " "
+                $exePath = [string]$execActions[0].Execute
+            }
         }
 
-        # Score-based detection - same principle as process hunt.
-        # A scheduled task using PowerShell from System32 is normal (Windows Update, etc.).
-        # Flag only when obfuscation OR high-risk LOLBin patterns are present.
+        # --- GAP-D02: structural checks ---
+
+        # Binary-not-on-disk: fileless loaders often clean up the binary post-execution.
+        if ($exePath -and $exePath -notmatch '(?i)^cmd|^powershell|^pwsh|^wscript|^cscript|^mshta') {
+            # Strip surrounding quotes and expand environment variables (%windir% etc.)
+            # before resolving, or every env-var-pathed vendor task is a false positive.
+            $resolvedExe = $exePath -replace '^"([^"]+)".*$','$1'
+            $resolvedExe = [System.Environment]::ExpandEnvironmentVariables($resolvedExe)
+            $onDisk = $true
+            if ($resolvedExe -match '^[A-Za-z]:\\') {
+                $onDisk = Test-Path -LiteralPath $resolvedExe -ErrorAction SilentlyContinue
+            }
+            if (-not $onDisk) {
+                # Only Critical when the missing binary lived in a suspicious drop path;
+                # a missing Program Files/Windows binary is a stale uninstall remnant.
+                if ($resolvedExe -match $suspiciousDropPaths) {
+                    Add-Finding -Type "Suspicious Scheduled Task" -Target "Task: $($task.TaskName)" `
+                        -Details "BinaryNotOnDisk: Enabled task, binary missing from suspicious path. Exe=$exePath" `
+                        -Severity "Critical" -Mitre $Global:MITRE.ScheduledTask
+                } else {
+                    Add-Finding -Type "Suspicious Scheduled Task" -Target "Task: $($task.TaskName)" `
+                        -Details "BinaryNotOnDisk: Enabled task, binary missing (likely stale/uninstalled). Exe=$exePath" `
+                        -Severity "Low" -Mitre $Global:MITRE.ScheduledTask
+                }
+            }
+        }
+
+        # SYSTEM task with binary in user-writable path (privilege escalation vector)
+        $runAsSystem = $false
+        try {
+            $p = $task.Principal
+            if ($p.UserId -match '(?i)SYSTEM|S-1-5-18' -or $p.RunLevel -eq 'HighestAvailable') { $runAsSystem = $true }
+        } catch {}
+        if ($runAsSystem -and $exePath -match $userWritablePaths) {
+            # The privesc premise is "a standard user can overwrite this SYSTEM-run binary."
+            # A validly-signed binary is NOT attacker-controllable, so verify the signature
+            # before calling it Critical. This keeps the detection generic (no vendor names)
+            # while downgrading legit signed binaries that live under ProgramData - e.g.
+            # Defender's "C:\ProgramData\Microsoft\Windows Defender\Platform\<ver>\MpCmdRun.exe".
+            $resolvedSys = $exePath -replace '^"([^"]+)".*$','$1'
+            $resolvedSys = [System.Environment]::ExpandEnvironmentVariables($resolvedSys)
+            $sysSig = $null
+            if (Test-Path -LiteralPath $resolvedSys -ErrorAction SilentlyContinue) {
+                $sysSig = (Get-AuthenticodeSignature -LiteralPath $resolvedSys -ErrorAction SilentlyContinue).Status
+            }
+            if ($sysSig -eq 'Valid') {
+                Add-Finding -Type "Suspicious Scheduled Task" -Target "Task: $($task.TaskName)" `
+                    -Details "SYSTEM-SignedBinaryNonStdPath: SYSTEM task runs a SIGNED binary from a non-standard (ProgramData/user) path - low risk, file not user-controllable. Exe=$exePath" `
+                    -Severity "Low" -Mitre $Global:MITRE.ScheduledTask
+            } else {
+                Add-Finding -Type "Suspicious Scheduled Task" -Target "Task: $($task.TaskName)" `
+                    -Details "SYSTEM-UserWritableBinary: SYSTEM task binary UNSIGNED in user-writable path (privilege-escalation vector). Sig=$sysSig Exe=$exePath" `
+                    -Severity "Critical" -Mitre $Global:MITRE.ScheduledTask
+            }
+        }
+
+        # UNC path execution (lateral movement / network-backed persistence)
+        if ($exePath -match '^\\\\' -or $cmdLine -match '(?i)\\\\[a-z0-9._-]+\\[a-z$]') {
+            Add-Finding -Type "Suspicious Scheduled Task" -Target "Task: $($task.TaskName)" `
+                -Details "UNCPathExecution: Task executes from network path. Exe=$exePath" `
+                -Severity "High" -Mitre $Global:MITRE.ScheduledTask
+        }
+
+        # --- Score-based LOLBin / obfuscation detection ---
         $score   = 0
         $taskSev = 'High'
 
@@ -653,7 +1057,11 @@ function Invoke-ScheduledTaskHunt {
         if ($cmdLine -match '(?i)mshta\b')                                         { $score += 3 }
         if ($cmdLine -match '(?i)certutil.*-decode|certutil.*-urlcache')           { $score += 3 }
         if ($cmdLine -match '(?i)bitsadmin.*/transfer')                            { $score += 3 }
-        if ($cmdLine -match '(?i)-w\s+hid|-windowstyle\s+hid')                     { $score += 1 }
+        if ($cmdLine -match '(?i)regsvr32.*(/i:|scrobj)')                            { $score += 3 }
+        if ($cmdLine -match '(?i)msiexec.*(/i\s+https?://)')                      { $score += 3 }
+        if ($cmdLine -match '(?i)\bwmic\b.*process\s+call\s+create')              { $score += 3 }
+        if ($cmdLine -match '(?i)installutil|cmstp|odbcconf')                     { $score += 3 }
+        if ($cmdLine -match '(?i)-w\s+hid|-windowstyle\s+hid')                    { $score += 1 }
         if ($cmdLine -match '(?i)-nop\b|-noprofile\b')                             { $score += 1 }
         if ($cmdLine -match '(?i)wscript|cscript' -and
             $cmdLine -notmatch '(?i)Windows\\System32\\|Windows\\SysWOW64\\')      { $score += 2 }
@@ -667,6 +1075,17 @@ function Invoke-ScheduledTaskHunt {
                 -Details "Score=$score Action: $cmdLine" -Severity $taskSev -Mitre $Global:MITRE.ScheduledTask
         }
     }
+}
+
+# Single source of truth for the magic-byte masquerade severity decision. A PE with a
+# non-PE extension is a real dropper signal only in user-writable locations; under
+# ACL-protected install/staging trees (Windows Installer cache, vendor package dirs) a
+# PE-in-.tmp/.bin is expected, so it is surfaced at Low rather than High.
+$script:MagicHighRiskPaths = '(?i)(\\Temp\\|\\AppData\\|\\Downloads\\|\\Users\\Public\\|\\\$Recycle\.Bin\\)'
+
+function Get-MagicByteSeverity {
+    param([string]$Path)
+    if ($Path -match $script:MagicHighRiskPaths) { 'High' } else { 'Low' }
 }
 
 function Invoke-FileHunt {
@@ -760,7 +1179,8 @@ function Invoke-FileHunt {
 
     Write-Console "[*] High-Speed File Hunt in: $Path $(if($QuickMode){'(QuickMode)'}) $(if($LowMemoryMode){'(LowMemory)'})" "Cyan"
 
-    $filesToScan = [System.Collections.Generic.List[string]]::new()
+    $filesToScan     = [System.Collections.Generic.List[string]]::new()
+    $magicCheckFiles = [System.Collections.Generic.List[string]]::new()
     $queue = [System.Collections.Generic.Queue[string]]::new()
     $queue.Enqueue($Path)
     $folderCount = 0
@@ -790,16 +1210,20 @@ function Invoke-FileHunt {
                 }
 
                 foreach ($file in $di.EnumerateFiles()) {
-                    if ($file.Extension -match "\.(exe|dll|sys|ps1|bat|vbs|js)$") {
+                    # GAP-FL01: expanded script/link/dropper extensions
+                    if ($file.Extension -match "\.(exe|dll|sys|ps1|bat|vbs|js|hta|lnk|scr|vbe|jse)$") {
                         $fileAttr = $file.Attributes.ToString()
                         if ($fileAttr -match "Offline|RecallOnData|RecallOnOpen|ReparsePoint") { continue }
-                        # QuickMode: skip files untouched before the cutoff date -
-                        # old, unmodified files are low-priority in an active incident.
                         if ($QuickMode -and $file.LastWriteTime -lt $QuickModeCutoff -and
                             $file.CreationTime -lt $QuickModeCutoff) { continue }
                         if ($file.Length -le $MaxSizeBytes) {
                             $filesToScan.Add($file.FullName)
                         }
+                    }
+                    # GAP-FL02: common disguise extensions - checked only for MZ magic-byte
+                    elseif ($file.Extension -match "\.(jpg|jpeg|png|gif|bmp|pdf|dat|tmp|bin|log|docx?|xlsx?)$" -and
+                            $file.Length -ge 2 -and $file.Length -le $MaxSizeBytes) {
+                        $magicCheckFiles.Add($file.FullName)
                     }
                 }
             } catch {}
@@ -837,9 +1261,45 @@ function Invoke-FileHunt {
     $runspacePool.Open()
     $jobs = @()
 
+    # GAP-FL02: non-PE extensions that should never carry an MZ (PE) header
+    $nonPeExtList = [string[]]@('.ps1','.bat','.cmd','.vbs','.js','.hta','.lnk','.vbe','.jse')
+
+    # Magic-byte masquerade severity is path-tiered (see Get-MagicByteSeverity). The runspace
+    # block cannot see script-scope functions, so it receives the pattern by value and applies
+    # the same match inline - $script:MagicHighRiskPaths is the single source of truth.
+    $magicHighRiskPaths = $script:MagicHighRiskPaths
+
+    # -- Lightweight magic-byte-only scriptblock for camouflage extensions --
+    $magicOnlyBlock = {
+        param([string[]]$fileList, [string]$HighRiskPaths)
+        $results = [System.Collections.Generic.List[PSCustomObject]]::new()
+        foreach ($filePath in $fileList) {
+            try {
+                $fs  = [System.IO.File]::OpenRead($filePath)
+                $hdr = New-Object byte[] 4
+                $n   = $fs.Read($hdr, 0, 4)
+                $fs.Close()
+                if ($n -ge 2 -and $hdr[0] -eq 0x4D -and $hdr[1] -eq 0x5A) {
+                    $ext = [System.IO.Path]::GetExtension($filePath).ToLowerInvariant()
+                    if ($HighRiskPaths -and $filePath -match $HighRiskPaths) {
+                        $sev = 'High'; $msg = "PE (MZ) header in $ext file in a user-writable path - executable disguised as non-executable"
+                    } else {
+                        $sev = 'Low';  $msg = "PE (MZ) header in $ext file under an install/staging tree (likely installer cache or packaged resource)"
+                    }
+                    $results.Add([PSCustomObject]@{
+                        Type="MagicByte Mismatch"; Target=$filePath
+                        Details=$msg
+                        Severity=$sev; Mitre="T1036.008"
+                    })
+                }
+            } catch {}
+        }
+        return $results
+    }
+
     # -- Worker scriptblock -------------------------------------------------
     $huntingBlock = {
-        param([string[]]$fileList, [int]$SampleBytes, [bool]$IsQuickMode, [string]$TsSkipPattern, [string[]]$HighEntropyAllowExts)
+        param([string[]]$fileList, [int]$SampleBytes, [bool]$IsQuickMode, [string]$TsSkipPattern, [string[]]$HighEntropyAllowExts, [string[]]$NonPeExts)
         $threadResults = [System.Collections.Generic.List[PSCustomObject]]::new()
 
         foreach ($filePath in $fileList) {
@@ -850,6 +1310,7 @@ function Invoke-FileHunt {
                 # by design (minified JS/CSS, source maps, WASM, compiled .NET assets).
                 $ext = [System.IO.Path]::GetExtension($filePath).ToLowerInvariant()
                 $skipEntropy = $HighEntropyAllowExts -and $HighEntropyAllowExts.Contains($ext)
+                $bytes = $null
                 if (-not $skipEntropy -and (-not $IsQuickMode -or $file.Length -le 10485760)) {
                     $bytes = if ($file.Length -gt $SampleBytes) {
                         $fs = [System.IO.File]::OpenRead($filePath)
@@ -872,6 +1333,28 @@ function Invoke-FileHunt {
                         if ($entropy -ge 7.2) {
                             $threadResults.Add([PSCustomObject]@{Type="High Entropy File"; Target=$filePath; Details="Entropy: $([math]::Round($entropy,2))"; Severity="High"; Mitre="T1027"})
                         }
+                    }
+                }
+
+                # GAP-FL02: magic-byte mismatch - non-PE extension with PE (MZ) header
+                if ($NonPeExts -and $NonPeExts.Contains($ext)) {
+                    $hdr = if ($bytes -and $bytes.Count -ge 2) {
+                        $bytes
+                    } else {
+                        try {
+                            $fs = [System.IO.File]::OpenRead($filePath)
+                            $b4  = New-Object byte[] 4
+                            $fs.Read($b4, 0, 4) | Out-Null
+                            $fs.Close()
+                            $b4
+                        } catch { $null }
+                    }
+                    if ($hdr -and $hdr.Count -ge 2 -and $hdr[0] -eq 0x4D -and $hdr[1] -eq 0x5A) {
+                        $threadResults.Add([PSCustomObject]@{
+                            Type="MagicByte Mismatch"; Target=$filePath
+                            Details="PE (MZ) header in $ext file - executable masquerading as script/link"
+                            Severity="High"; Mitre="T1036.008"
+                        })
                     }
                 }
 
@@ -899,9 +1382,23 @@ function Invoke-FileHunt {
     # Launch parallel jobs (simple, reliable style that actually scans)
     try {
         foreach ($chunk in $chunks) {
-            $ps = [powershell]::Create().AddScript($huntingBlock).AddArgument($chunk).AddArgument($EntropySampleBytes).AddArgument([bool]$QuickMode).AddArgument($tsSkipPattern).AddArgument($highEntropyAllowExts)
+            $ps = [powershell]::Create().AddScript($huntingBlock).AddArgument($chunk).AddArgument($EntropySampleBytes).AddArgument([bool]$QuickMode).AddArgument($tsSkipPattern).AddArgument($highEntropyAllowExts).AddArgument($nonPeExtList)
             $ps.RunspacePool = $runspacePool
             $jobs += [PSCustomObject]@{ PowerShell = $ps; Handle = $ps.BeginInvoke() }
+        }
+
+        # GAP-FL02: add magic-byte-only jobs for camouflage extension files
+        if ($magicCheckFiles.Count -gt 0) {
+            $mChunks = [System.Collections.Generic.List[System.Object[]]]::new()
+            for ($i = 0; $i -lt $magicCheckFiles.Count; $i += $FilesPerChunk) {
+                $end = [math]::Min($i + $FilesPerChunk, $magicCheckFiles.Count)
+                $mChunks.Add($magicCheckFiles.GetRange($i, $end - $i).ToArray())
+            }
+            foreach ($mc in $mChunks) {
+                $ps = [powershell]::Create().AddScript($magicOnlyBlock).AddArgument($mc).AddArgument($magicHighRiskPaths)
+                $ps.RunspacePool = $runspacePool
+                $jobs += [PSCustomObject]@{ PowerShell = $ps; Handle = $ps.BeginInvoke() }
+            }
         }
 
         # -- Real-time progress - stdout so it travels through the pipe --------
@@ -1214,6 +1711,166 @@ function Invoke-ADSHunt {
     }
 }
 
+function Get-NamedPipeName {
+    # List named-pipe NAMES only. [System.IO.Directory]::GetFiles on the pipe namespace
+    # uses FindFirstFile/FindNextFile - it lists names WITHOUT opening or connecting to
+    # any pipe. This is deliberately NOT Get-ChildItem (whose provider can stat/open each
+    # pipe and on a live host wedged core networking-service RPC pipes - 2026-06-26).
+    try { return [System.IO.Directory]::GetFiles('\\.\pipe\') } catch { return @() }
+}
+
+function Invoke-NetworkHunt {
+    Write-Console "[*] Auditing Network Connections, Listeners & Named Pipes..." "Cyan"
+
+    # High-noise beacon ports that are expected on managed Windows endpoints.
+    # Only flag ESTABLISHED connections to non-RFC1918 IPs on unusual ports.
+    $trustedPorts = [System.Collections.Generic.HashSet[int]]@(
+        80, 443, 8080, 8443,
+        53,
+        135, 445, 139, 389, 636,
+        3268, 3269,
+        5985, 5986,
+        1688
+    )
+
+    # RFC1918 and loopback CIDR blocks - outbound to these is never flagged.
+    $privateRanges = @(
+        @{ Start = [Net.IPAddress]::Parse('10.0.0.0');      Mask = 8  }
+        @{ Start = [Net.IPAddress]::Parse('172.16.0.0');    Mask = 12 }
+        @{ Start = [Net.IPAddress]::Parse('192.168.0.0');   Mask = 16 }
+        @{ Start = [Net.IPAddress]::Parse('127.0.0.0');     Mask = 8  }
+        @{ Start = [Net.IPAddress]::Parse('169.254.0.0');   Mask = 16 }
+    )
+
+    function Test-PrivateAddress {
+        param([string]$IpStr)
+        try {
+            $addr = [Net.IPAddress]::Parse($IpStr)
+            if ($addr.AddressFamily -ne [Net.Sockets.AddressFamily]::InterNetwork) { return $true }
+            $addrBytes = $addr.GetAddressBytes()
+            foreach ($r in $privateRanges) {
+                $maskBits  = $r.Mask
+                $baseBytes = $r.Start.GetAddressBytes()
+                $match     = $true
+                $fullBytes = [math]::Floor($maskBits / 8)
+                for ($i = 0; $i -lt $fullBytes; $i++) {
+                    if ($addrBytes[$i] -ne $baseBytes[$i]) { $match = $false; break }
+                }
+                if ($match -and ($maskBits % 8) -ne 0) {
+                    $remBits = $maskBits % 8
+                    $maskByte = 0xFF -shl (8 - $remBits) -band 0xFF
+                    if (($addrBytes[$fullBytes] -band $maskByte) -ne ($baseBytes[$fullBytes] -band $maskByte)) {
+                        $match = $false
+                    }
+                }
+                if ($match) { return $true }
+            }
+            return $false
+        } catch { return $true }
+    }
+
+    # Processes that legitimately hold many outbound connections.
+    $trustedOutboundProcs = @(
+        'svchost','lsass','SearchIndexer','MsMpEng','MsSense','WaaSMedicAgent',
+        'OneDrive','Teams','slack','discord','chrome','msedge','firefox',
+        'Defender','SecurityHealthService','MpCmdRun','SgrmBroker',
+        'TiWorker','TrustedInstaller','wuauclt'
+    )
+
+    # -- 1. Outbound ESTABLISHED connections to public IPs on non-standard ports --
+    $conns = Get-NetTCPConnection -State Established -ErrorAction SilentlyContinue |
+             Where-Object { $_.RemotePort -ne 0 }
+
+    $pidProcMap = @{}
+    Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+        ForEach-Object { $pidProcMap[$_.ProcessId] = [PSCustomObject]@{ Name = $_.Name; Path = $_.ExecutablePath } }
+
+    foreach ($c in $conns) {
+        $remoteIp   = $c.RemoteAddress
+        $remotePort = $c.RemotePort
+        $ownerPid   = $c.OwningProcess
+        $info       = $pidProcMap[$ownerPid]
+        $procName   = if ($info) { $info.Name } else { $null }
+
+        if (-not $remoteIp -or (Test-PrivateAddress $remoteIp)) { continue }
+        if ($procName -and ($procName.TrimEnd('.exe') -in $trustedOutboundProcs)) { continue }
+        if ($trustedPorts.Contains([int]$remotePort)) { continue }
+
+        $sev = if ($remotePort -in @(4444,1234,8888,9999,31337,6666,7777)) { 'High' } else { 'Medium' }
+        Add-Finding -Type "Suspicious Outbound Connection" `
+            -Target "PID: $ownerPid ($procName)" `
+            -Details "ESTABLISHED to $remoteIp`:$remotePort (non-standard port, public IP)" `
+            -Severity $sev -Mitre "T1071 (Application Layer Protocol), T1095 (Non-Standard Port)"
+    }
+
+    # -- 2. Unexpected listeners (LISTEN state on non-system ports) --
+    # Ephemeral ports 49152+ are dynamic RPC and always expected.
+    $ephemeralStart = 49152
+    $expectedListeners = [System.Collections.Generic.HashSet[int]]@(
+        80, 443, 445, 139, 135, 3389,
+        5985, 5986, 1688
+    )
+
+    $listeners = Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue
+    $sigCache  = @{}
+    foreach ($l in $listeners) {
+        $port    = $l.LocalPort
+        $ownerP  = $l.OwningProcess
+        $info    = $pidProcMap[$ownerP]
+        $proc    = if ($info) { $info.Name } else { $null }
+        $exe     = if ($info) { $info.Path } else { $null }
+        if ($port -ge $ephemeralStart) { continue }
+        if ($expectedListeners.Contains([int]$port)) { continue }
+
+        # A validly-signed owning process listening is far more likely a legit service /
+        # vendor agent (Hyper-V vmms, CDPSvc, ASUS/Adobe helpers) than a backdoor. Verify
+        # the binary signature and downgrade signed listeners - still surfaced, not screamed.
+        $signed = $false
+        if ($exe) {
+            if (-not $sigCache.ContainsKey($exe)) {
+                $sigCache[$exe] = if (Test-Path -LiteralPath $exe -ErrorAction SilentlyContinue) {
+                    (Get-AuthenticodeSignature -LiteralPath $exe -ErrorAction SilentlyContinue).Status
+                } else { 'NoPath' }
+            }
+            $signed = ($sigCache[$exe] -eq 'Valid')
+        }
+        if ($signed) {
+            $sev = 'Low'
+        } else {
+            $sev = if ($port -lt 1024) { 'High' } else { 'Medium' }
+        }
+        Add-Finding -Type "Unexpected Network Listener" `
+            -Target "PID: $ownerP ($proc)" `
+            -Details "Listening on port $port (not in expected service list; owner signed=$signed)" `
+            -Severity $sev -Mitre "T1071 (Application Layer Protocol)"
+    }
+
+    # -- 3. Named pipe enumeration for suspicious C2 pipes --
+    # Common C2 framework default pipe names: Cobalt Strike, Metasploit, impacket, etc.
+    # NOTE: 'mojo.' is deliberately EXCLUDED - it is legitimate Chromium/Edge IPC and
+    # appears in the hundreds, producing a false-positive storm with zero IR value.
+    # Anchor framework tokens to whole-word-ish boundaries to avoid matching substrings
+    # inside benign service pipe names.
+    $suspPipePattern = '(?i)(msagent_[0-9a-f]+|postex_[0-9a-f]+|status_[0-9a-f]+|metsvc|' +
+                       'RemCom_communication|MSSE-[0-9a-f]+-server|' +
+                       '\bcobalt|\bbeacon\b|\bhavoc\b|\bsliver\b|\bmythic\b|' +
+                       'PSEXESVC|paexec|csexecsvc)'
+
+    # Enumerate pipe NAMES ONLY via Get-NamedPipeName (never opens a pipe).
+    $pipes = @(Get-NamedPipeName)
+
+    foreach ($pipe in $pipes) {
+        $name = [System.IO.Path]::GetFileName($pipe)
+        if ($name -match $suspPipePattern) {
+            Add-Finding -Type "Suspicious Named Pipe" `
+                -Target "Pipe: $name" `
+                -Details "Named pipe matches C2 framework pattern: $pipe" `
+                -Severity "High" -Mitre "T1071 (Application Layer Protocol), T1559.001 (Inter-Process Communication)"
+        }
+    }
+}
+
+
 function Export-Reports {
     param([string]$OutDir)
     if (-not (Test-Path $OutDir)) { New-Item -ItemType Directory -Path $OutDir | Out-Null }
@@ -1368,9 +2025,9 @@ if ($TestMode) {
     exit
 }
 
-if (-not ($ScanProcesses -or $ScanFileless -or $TargetDirectory -or $ScanTasks -or $ScanDrivers -or $ScanInjection -or $ScanADS -or $ScanRegistry -or $ScanETWAMSI -or $ScanPendingRename -or $ScanBITS -or $ScanCOM -or $ScanYara)) {
+if (-not ($ScanProcesses -or $ScanFileless -or $TargetDirectory -or $ScanTasks -or $ScanDrivers -or $ScanInjection -or $ScanADS -or $ScanRegistry -or $ScanETWAMSI -or $ScanPendingRename -or $ScanBITS -or $ScanCOM -or $ScanNetwork -or $ScanYara)) {
     Write-Host "Usage examples:" -ForegroundColor Yellow
-    Write-Host " .\EDR_Toolkit.ps1 -ScanProcesses -ScanFileless -ScanTasks -ScanDrivers -ScanInjection -ScanRegistry -ScanETWAMSI -ScanPendingRename -ScanBITS -ScanCOM"
+    Write-Host " .\EDR_Toolkit.ps1 -ScanProcesses -ScanFileless -ScanTasks -ScanDrivers -ScanInjection -ScanRegistry -ScanETWAMSI -ScanPendingRename -ScanBITS -ScanCOM -ScanNetwork"
     Write-Host " .\EDR_Toolkit.ps1 -TargetDirectory 'C:\' -Recursive -ScanADS -QuickMode -SeverityFilter Critical,High -OutputFormat JSON -Quiet"
     Exit
 }
@@ -1385,6 +2042,7 @@ if ($ScanBITS)       { Invoke-BITSHunt }
 if ($ScanCOM)        { Invoke-COMHijackHunt }
 if ($ScanETWAMSI)    { Invoke-ETWAMSITamperHunt }
 if ($ScanPendingRename) { Invoke-PendingRenameHunt }
+if ($ScanNetwork)    { Invoke-NetworkHunt }
 
 if ($TargetDirectory) {
     Invoke-FileHunt -Path $TargetDirectory -Recurse:$Recursive `
@@ -1400,8 +2058,8 @@ Export-Reports -OutDir $ReportPath
 # SIG # Begin signature block
 # MIIcDgYJKoZIhvcNAQcCoIIb/zCCG/sCAQExDzANBglghkgBZQMEAgEFADB5Bgor
 # BgEEAYI3AgEEoGswaTA0BgorBgEEAYI3AgEeMCYCAwEAAAQQH8w7YFlLCE63JNLG
-# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCBt1oG1eaXZkXOq
-# FGJ9tW9XHUGsyRPYMLcW6Cqts/Pc/KCCFlIwggMUMIIB/KADAgECAhAfQMjwyAWn
+# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCApLqrKlyzLiuQV
+# ja70RDnHspSFA+UGJ9ydEFSPGj9I9KCCFlIwggMUMIIB/KADAgECAhAfQMjwyAWn
 # lEKgkjdOOOytMA0GCSqGSIb3DQEBCwUAMCIxIDAeBgNVBAMMF0lSIFRvb2xraXQg
 # Q29kZSBTaWduaW5nMB4XDTI2MDYyNjAyMjc0OFoXDTI5MDYyNjAyMzc0OFowIjEg
 # MB4GA1UEAwwXSVIgVG9vbGtpdCBDb2RlIFNpZ25pbmcwggEiMA0GCSqGSIb3DQEB
@@ -1524,28 +2182,28 @@ Export-Reports -OutDir $ReportPath
 # A1UEAwwXSVIgVG9vbGtpdCBDb2RlIFNpZ25pbmcCEB9AyPDIBaeUQqCSN0447K0w
 # DQYJYIZIAWUDBAIBBQCggYQwGAYKKwYBBAGCNwIBDDEKMAigAoAAoQKAADAZBgkq
 # hkiG9w0BCQMxDAYKKwYBBAGCNwIBBDAcBgorBgEEAYI3AgELMQ4wDAYKKwYBBAGC
-# NwIBFTAvBgkqhkiG9w0BCQQxIgQgSVjRpIlISDhxo7pLNtjQsl5+3Ov546uCYj3f
-# VZST2QkwDQYJKoZIhvcNAQEBBQAEggEACcjXQCjG/ohNRwNBwDSiC8Tv1s0asVm8
-# gjzKcCBhAqmc2SjDZUVT/I/ZqLip+6tiDpfi+8VuZdLItDoJXAUbUhGz4ZydJ9zf
-# zQTkI6VAv9muugcpGHYWvcpJGdEz3l8C3K+hQTUR6Y0Fu0wk3fvdf/FOVuVdzeje
-# CDDQf0T9uOcYGX2fg4A+9RN8n553Jg0mn2ATCpl2UxKOdslFuB2Fb9qgGN675SJ9
-# OnFYD9DMF0LODaq3Dy5Bg/YFK2RxfU848hcJZTYDyfP10kD4jG1y9jhzhxSRlVYB
-# i834dNBO1UlYmhUSe6lbgLsSzGyfUeFjToV/F76J2iqnHCQUU3fHTqGCAyYwggMi
+# NwIBFTAvBgkqhkiG9w0BCQQxIgQg/bDWEDH7DlmBKhES/B3E8HTGL5sJ5lWH+5JO
+# I1ymyYYwDQYJKoZIhvcNAQEBBQAEggEARQ6vdyQKNViJqPryqC8yiOIDq7yW7ZTG
+# 50H2JKZsb1/j1zLDD736J8saS3SWprhvXmlKBLXSAJjBcWftvqdJd9S/gSD0/v4q
+# oofUXI750dDWid36Jt8xuBwsIY4+OE2dkjqmT+YPwF6Xd0QyXeEoSZjoMC1CZlUO
+# wkkYo157qp+6PccrWuTsB89ps8eJ0oaGyuhwWaykWhVoAUwIE8ltdWOmYFc2JbjC
+# woc0+NQwdfndVa33FnjfdEA/CZpWsq3nMEwAiYnmZ2VTj0jrqf0rKGaKPanSp0lD
+# sRJzEtNaDtICASTtLuON9GTU5OczDHq36dRve4N/PvPeFREyqc4LIaGCAyYwggMi
 # BgkqhkiG9w0BCQYxggMTMIIDDwIBATB9MGkxCzAJBgNVBAYTAlVTMRcwFQYDVQQK
 # Ew5EaWdpQ2VydCwgSW5jLjFBMD8GA1UEAxM4RGlnaUNlcnQgVHJ1c3RlZCBHNCBU
 # aW1lU3RhbXBpbmcgUlNBNDA5NiBTSEEyNTYgMjAyNSBDQTECEAqA7xhLjfEFgtHE
 # dqeVdGgwDQYJYIZIAWUDBAIBBQCgaTAYBgkqhkiG9w0BCQMxCwYJKoZIhvcNAQcB
-# MBwGCSqGSIb3DQEJBTEPFw0yNjA2MjYwMjM4MjFaMC8GCSqGSIb3DQEJBDEiBCDi
-# /tfwHxKhoImFYuSocyvd9J2jx5Xi7zcb+jZnil0r9zANBgkqhkiG9w0BAQEFAASC
-# AgA+u2CeponKNo1ISyD3NFqTmEQqR0H14YSgwA0DUW8cx8OVswfvdrqu9HZ3EOBO
-# +1i1O8n49CJGOe4rsKjJrDX1XGQvFoMSP7LKO8xNX4yOXgcKe1KVAuwV617aL54H
-# vkgPlb9b6foA6AnbqbFv2IR7bKJ/UskLmRZLZGs9pKoidHWvEaAaVEnq/pTuNhuH
-# cAb16xVMxHzu2RJgpV316fiKCtPaNmendnhOxNjDQFQLppZO0VqaUidKkekV55nl
-# mADUNqghFaVtrfPG+4MO0ThJUyMpm3mZlZu9lTd01M/5wMHYRLMNHAUDbe00tQYh
-# okCPIupd1E0dGMhMsTo9Qu219++cgBH7KxcK1Nd6FQRFqPGMlHacOhT+4TNyefxR
-# Y9XdQ66z+zFOR9QRRzenXurkenXrQjZQ+JziPPppq63yvdE+Sp26zAOZj1pYOgzV
-# cEZVpJmYoYR8uzG6CS38fsT382d9PrpuukL77qp2et3d1aALl3pNI9V6QxDIpVSP
-# Li0r9IexEsCAy2cB7ASNR3uzSSB1GegNv0VTgr2McXnbP0CKnGn24QCP8JrfsRud
-# 3gEJVM7zmKoL3j7mt8bFBFJ7xqQ+iBKLA/qGAsUny335me2xdrBAG8inLGebdAnc
-# rQtjtgp4IcsvsoRV8TIwqnLvHA8rEHXYE4R5m5RYv+0HAA==
+# MBwGCSqGSIb3DQEJBTEPFw0yNjA2MjYyMzI3MjFaMC8GCSqGSIb3DQEJBDEiBCC5
+# cv8YbFuMoz1l5v+n4RGFgZjnLbMBA+Xqw6f/MP57OjANBgkqhkiG9w0BAQEFAASC
+# AgBXTpe8ZvAFecpKae3v31en0rtxFA3BpZVJzGKCpY1oDN7PTjA7SOOHEZWQpQ/E
+# +nAld8rDhTS/YqzGcNhtm/XEo6fpKGACKHK7aYw2jw55n30lNZ6mFFT+SRH8lmpl
+# 6aVIXD2iVgHBZ84dyJZU50D4nheF6QQ1Fhoo4DONN4U6YSzBshDxWcfSRh/Rd45z
+# oESKfJl5sQ9Zo0PpOElidRLLaL4ZwsYX7lqiQtVSIuTMTSKMd6uIV2cbxt57Swfe
+# jTFYg8pNtL+5qzPsrsCRbA3r5pqNr8I9j0UTFvzfBhEIO4VzffDM2K6j4tkuv3NJ
+# 1E5xjny6qN95LkBHT7XmDwHAoPLD8dzRE4kpDtJ1I0ShvIdOcNj84YkdnStwfGhY
+# InQTaNUxQ/wmj/baPC4qfz3OUZHY5YCgITTQntLYecej8NcH3aZ1LXiHWXBsHMnl
+# ys6+igTWcs7x58yK9YvkfnK6MLjXGmna4qq4CSsPkhGX5BskZ8VUIb0eGFfSdlfF
+# 1LJEtf9sF92IbJYKzaSJp7txIVrzlH/GZj7ux1bmkEBpzPiP2d9Px93Y+Z5GM1A3
+# HITBrllp8Z+mMQq0qmVO/nDP3HmG1SXrsEtDByeSsk6DQqn+tXDpJu4xyEzn/lD8
+# BeiUZ0RiH7/bn8NnSdrWKypFm6PV/0x9Vr7DiSXrnlD/tg==
 # SIG # End signature block

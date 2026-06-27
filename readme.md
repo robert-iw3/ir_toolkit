@@ -1,7 +1,5 @@
 # IR Toolkit - Offline Incident Response Workflow
 
-***This incident response toolkit is derived from an autonomous defensive cyber operations (DCO) platform, optimized for decoupled execution on air-gapped endpoints during post-compromise scenarios. The core logic reflects the precise remediation workflow executed by the autonomous AI agents following a high-confidence threat detection verdict. Please note that this repository serves as a stable, downstream release; new automated workflows and self-healing logic flows are integrated into this toolkit only after undergoing rigorous validation.***
-
 Single-command incident response for **Windows**, **Linux**, and **Cloud** (AWS / Azure / GCP).
 
 This file is the summary. The detailed, per-platform operating instructions live in:

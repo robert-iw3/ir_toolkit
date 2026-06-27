@@ -370,6 +370,14 @@ $results = foreach ($f in $findings) {
     $subjName = if ($subjectPath) { Split-Path -Leaf $subjectPath } else { '' }
     $rmmPat   = '(?i)(anydesk|teamviewer|screenconnect|connectwise|splashtop|rustdesk|client32|ateraagent|action1|logmein|lmiguardian|gotoassist|zohoassist|za_connect|winvnc|tvnserver|vncserver|uvnc|remoting_host|dwagent|supremo|meshagent|quickassist)'
     $lolPat   = '(?i)^(mshta|rundll32|regsvr32|certutil|bitsadmin|wscript|cscript|installutil|msbuild)\.exe$'
+    # JIT-host processes: JVM, V8, .NET, Electron, and IDE runtimes generate private
+    # executable regions and unbacked threads as a normal consequence of JIT compilation.
+    # A Shellcode Thread or Injected Memory Region finding against one of these is a
+    # strong FP candidate unless corroborated by other evidence (see cross-finding pass).
+    $JitHostPattern = '(?i)(acrobat|acrord32|acrocef|acrobatnotif|acrocef|msedge|chrome|chromium|firefox|brave|opera|vivaldi|msedgewebview2|webview2|java|javaw|javaws|node|electron|code|rider|idea|pycharm|clion|goland|webstorm|phpstorm|datagrip|rubymine|applesimulator)\.exe$'
+    $isJitType  = ($f.Type -match '(?i)Shellcode Thread|Injected Memory Region')
+    $isJitHost  = ($subjName -match $JitHostPattern) -or
+                  (("$($f.Target) $($f.Details)") -match $JitHostPattern)
     $isRmmType = ($f.Type -match '(?i)Remote Access|ClickFix|RunMRU|LOLBin')
     # Script hosts (powershell/pwsh/cmd) run constantly for legit reasons (VS Code,
     # automation, the toolkit itself). They are abuse ONLY when the command line shows
@@ -397,6 +405,16 @@ $results = foreach ($f in $findings) {
             if ($conf -eq 'Low') { $conf = 'Medium' }
             $notes.Add('OVERRIDE: remote-access/LOLBin abuse class - signature does not clear it; verify connection logs / command line (T1219/T1218)')
         }
+    }
+
+    # ----- JIT-host cap: JIT runtimes produce private exec regions by design ------
+    # Chrome, Edge, Java, Electron, JetBrains IDEs, etc. JIT-compile into anonymous
+    # executable pages. A Shellcode Thread or Injected Memory Region finding against
+    # one of these hosts is almost always a false positive unless hard evidence
+    # corroborates it (the cross-finding pass below may escalate it back).
+    if ($isJitType -and $isJitHost -and $verdict -in 'Likely True Positive','True Positive') {
+        $verdict = 'Indeterminate'; $conf = 'Low'
+        $notes.Add('CAPPED: JIT-host process (browser/JVM/Electron/IDE) - private executable regions are expected from JIT compilation; verdict will be escalated if corroborating evidence exists for this PID')
     }
 
     # ----- clearance: IR Toolkit's own staged tools are known-good ---------------
@@ -456,6 +474,44 @@ $results = foreach ($f in $findings) {
         EvidenceDir = $evDir
         Pivots      = ($pivots | Select-Object -Unique) -join '; '
         Notes       = ($notes -join '; ')
+    }
+}
+
+# ==============================================================================
+# Cross-finding correlation pass (runs AFTER the per-finding loop)
+# Escalates "Shellcode Thread" / "Injected Memory Region" findings that were
+# left as Indeterminate when the same PID also has hard evidence (hook / PE /
+# YARA hit). This implements TTP-001's planned corroboration path.
+# ==============================================================================
+$pidPidRe = [regex]'(?:PID[:\s]+)(\d+)'
+
+# Index all results by every PID they reference
+$byPid = @{}
+foreach ($r in $results) {
+    $searchText = "$($r.Target) $($r.Details)"
+    foreach ($m in $pidPidRe.Matches($searchText)) {
+        $k = $m.Groups[1].Value
+        if (-not $byPid.ContainsKey($k)) { $byPid[$k] = [System.Collections.Generic.List[object]]::new() }
+        $byPid[$k].Add($r)
+    }
+}
+
+$softTypes = @('Shellcode Thread (Memory)', 'Injected Memory Region')
+$hardTypes = @('Inline API Hook (Memory)', 'Manually-Mapped PE (Memory)', 'YARA Match', 'YARA Match (Memory)',
+               'Injected Code (memory YARA)', 'Module Stomping Indicator (Memory)')
+
+foreach ($pidKey in $byPid.Keys) {
+    $group = $byPid[$pidKey]
+    $hasSoft = $group | Where-Object { $_.Type -in $softTypes }
+    $hasHard = $group | Where-Object { $_.Type -in $hardTypes }
+    if (-not $hasSoft -or -not $hasHard) { continue }
+    foreach ($r in $hasSoft) {
+        if ($r.Verdict -ne 'Indeterminate') { continue }
+        $r.Verdict    = 'True Positive'
+        $r.Confidence = 'High'
+        $hardEvidence = ($hasHard | Select-Object -ExpandProperty Type | Select-Object -Unique) -join ', '
+        $corrobNote   = "CORROBORATED: hard evidence ($hardEvidence) found for same PID - confidence escalated to High"
+        if ($r.Notes) { $r.Notes = "$($r.Notes); $corrobNote" } else { $r.Notes = $corrobNote }
     }
 }
 
@@ -592,8 +648,8 @@ if ($evCount) { Write-Host "[+] Evidence bundles for $evCount finding(s): $Evide
 # SIG # Begin signature block
 # MIIcDgYJKoZIhvcNAQcCoIIb/zCCG/sCAQExDzANBglghkgBZQMEAgEFADB5Bgor
 # BgEEAYI3AgEEoGswaTA0BgorBgEEAYI3AgEeMCYCAwEAAAQQH8w7YFlLCE63JNLG
-# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCACJnA3+tt1rfEj
-# vLH/Eqjl5XSYh3SEdsFjD5Z5Z0q9Y6CCFlIwggMUMIIB/KADAgECAhAfQMjwyAWn
+# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCCOFJ0HoMYO8g5m
+# VOaF9ud5kuleCYSVqChV9W3J04/206CCFlIwggMUMIIB/KADAgECAhAfQMjwyAWn
 # lEKgkjdOOOytMA0GCSqGSIb3DQEBCwUAMCIxIDAeBgNVBAMMF0lSIFRvb2xraXQg
 # Q29kZSBTaWduaW5nMB4XDTI2MDYyNjAyMjc0OFoXDTI5MDYyNjAyMzc0OFowIjEg
 # MB4GA1UEAwwXSVIgVG9vbGtpdCBDb2RlIFNpZ25pbmcwggEiMA0GCSqGSIb3DQEB
@@ -716,28 +772,28 @@ if ($evCount) { Write-Host "[+] Evidence bundles for $evCount finding(s): $Evide
 # A1UEAwwXSVIgVG9vbGtpdCBDb2RlIFNpZ25pbmcCEB9AyPDIBaeUQqCSN0447K0w
 # DQYJYIZIAWUDBAIBBQCggYQwGAYKKwYBBAGCNwIBDDEKMAigAoAAoQKAADAZBgkq
 # hkiG9w0BCQMxDAYKKwYBBAGCNwIBBDAcBgorBgEEAYI3AgELMQ4wDAYKKwYBBAGC
-# NwIBFTAvBgkqhkiG9w0BCQQxIgQgsrvhGAKbUqpPRGao9whefg56f7AYJACWnE7+
-# bQ2aGIYwDQYJKoZIhvcNAQEBBQAEggEAF+dhjQqsiZDvn/ChPXCI3qSoe/gLy1PY
-# cn2j4SEZMBkMaejM/txgl15DtW9c3zvfpIPYtvgX9nM4C+LBLyVqrb4wPPiZhQTo
-# l9FRWtbkABw+ylDYTb0fbPeNhBsbsdkIkuNCRWIU2jhk0Wc0J7rZiTiH/zNIIG/H
-# PXfJSvm1WMEP5hvyuROpaflop6EBWWUbdBDe7tcxiiYAsr3bakUn81KWbcnsuTCV
-# OhbsMkiFX6coThAN4c+4H+fpUks5EYJa46ea5VbirnfNwaKAJpFTSNeQdzVx7i9H
-# BXUoLm9liXpetO9oDTkQpup+LX4/CoVEhHHcP1fBj2Dyo0aP7siDaqGCAyYwggMi
+# NwIBFTAvBgkqhkiG9w0BCQQxIgQgS2lBoepoViqMSZNGFHApFP7BTU6PT9WlBwOB
+# rK6d4CEwDQYJKoZIhvcNAQEBBQAEggEAimhe33Ju92AZcrOceihVawvv2tnImZy9
+# rWMPL+IbZioDGkRPmtl2mcSB8HD1h6Ea3ZHlR8temRehNzuVHeeWkVUS091gn9sm
+# B9uN87fUnsv+ZGxqIvCxFj13OB/b9476FfMizwOHCojPMfugfXSDMJZ6ib3vU8r2
+# 6yhobGzyiz+uUnQFTZV2A0KrNnqm4j7mOtypxEM/5rFHlV6LvaeCZw2YTqO1ggQ9
+# L5iiD8nPUFVHIlZ+2As+861r98PXtMUhg4NoxbuUTTDOrltaS3Lws7ORB+dYQ70X
+# B39h2FacWBUQAZB8FvDgY1NvC9OTpPqBfSVTvo/bVpQBUVoETgbGeaGCAyYwggMi
 # BgkqhkiG9w0BCQYxggMTMIIDDwIBATB9MGkxCzAJBgNVBAYTAlVTMRcwFQYDVQQK
 # Ew5EaWdpQ2VydCwgSW5jLjFBMD8GA1UEAxM4RGlnaUNlcnQgVHJ1c3RlZCBHNCBU
 # aW1lU3RhbXBpbmcgUlNBNDA5NiBTSEEyNTYgMjAyNSBDQTECEAqA7xhLjfEFgtHE
 # dqeVdGgwDQYJYIZIAWUDBAIBBQCgaTAYBgkqhkiG9w0BCQMxCwYJKoZIhvcNAQcB
-# MBwGCSqGSIb3DQEJBTEPFw0yNjA2MjYwMjM4MjJaMC8GCSqGSIb3DQEJBDEiBCAv
-# rZi699oNl4VgdcrW+d1lkR7zo/HvJBWvy8hjHmnlXjANBgkqhkiG9w0BAQEFAASC
-# AgC4+TmxcfaG4peYziQemJKZGsrqSdjFantqQh9QX1mrHu9gFfDaYWagcwMhgEGL
-# 0yVjcCi5JNX+b6a09YcfcT3lp2N74W2Blqyyz8WWfjoUyqxcF3iMNndDfTD4xzcj
-# aIxfQBV3g+BJjqMYaNTLs7t1CMqmNLQDViKOHdPsguh3U5iW9l9TLNPCHnHu9jNf
-# h/9T42DzKx7STbplAIFY+BqteqIy6JWUgIBxVd4kTizlnjBW7hm/W0XEzi3oPVjc
-# bxMB2W6UozexS4iqBWLf7n28tkBCPrVEAxCoyom+8F4lJK9gkZxW7U7o6w+WppMR
-# bzq2SH3Etfz5b2anU1ytbqH1e0cvnK3fqlhHhxbCmZc4s2nYqe2oefqYoMo+E1LS
-# Odd0sFohQ31WI1ZXpUuTCZRv7nB0gyYLHFUPmqE2vFWVwnY5qOwIGKP+74vNO1VI
-# NgvHuTCmrTbHpXIp3Qn8uiW3YcLj3Fbjc9xhlz8RIG50hs24U5J34Lh0DBFVTHGB
-# /W3nZhNCszTQ1/oQgSyd6z4CHM4atmYcbWGfdNrcHdzDhqWWz4j/sCEqS7w0yYVZ
-# vlNrNhgFwr/TK0z4g5JM1fCCOAQdFclXSs2zeqR1+ZmHtmmMLUPtjYQ8BmCCA7cw
-# REg0/FaXO/ovQU3QTZoWedaLq9SG9BX2IT3w5SObnHoVbg==
+# MBwGCSqGSIb3DQEJBTEPFw0yNjA2MjYyMzI3MjFaMC8GCSqGSIb3DQEJBDEiBCDe
+# FZNH0zW0rpyIPCDy9olOil36+Mx0CBu6d8SXRBK42zANBgkqhkiG9w0BAQEFAASC
+# AgAvo3cvAc+Ix6KV9WBT/OSsxue1ssTVwIma6sAtIWqsNOL3R3T/3ikpmBhUnBbB
+# oftvoMvOX0PJTup2pUCoouY/Q5VUjOLHWViyYZ5A0fB6WQ1Eg5EIg4kODprTHtmh
+# 5kwmou7uYbdxbwH09VPtwotIibxDThTkuLh8KobTxRHWTHZ3tyHnv+XN7HA3PNf5
+# wn5JAe4tYmLCzgO1IbxBMyPgmihSO3QRCDjkgECDD+NivN2NuDLNBihihW8Lov9S
+# 417+RXVNhd2I1z44T1NcjEhp7e4/QFU/3lWbnGiJsVwyNu6y7bJbne9zNi7eliSQ
+# gBx7fPhfDaK21GEc4BvczI4+eZp21MdrZsEHwU0AS6/OFBvTxZTRqlC5cqyEtzyT
+# okQ6w7DVJVF8SB9/eAt4PeMHzZ6+9FuCIq5aR42x4KjiRMyfrmD0Zm2cb8nglJNR
+# pYa3DCb0WhH+TwRNuaN+cQvp3CaIOmOymVaCGlHp4TNRwRnSQmesmYT2miyzo1wi
+# n5FKYKltPfTGttBwNAkVfOjtrN0CrKx/UtE8dvDAxstixMQ3OEXKP4leQrSKnEcT
+# 47n17vGyczqmh0IQBDt2gYm9FhrKjmktm7rkxbXOIa0cP/oR5KStSf8iGuwBMD+P
+# 2wQwx05KVILxLMTqhrER4MbWQlLP/OTOEeZlacrHz9R71g==
 # SIG # End signature block

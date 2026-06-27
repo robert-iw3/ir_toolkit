@@ -1,94 +1,137 @@
-# Windows EDR Hunting Toolkit
+# Windows Threat Hunting & Forensics Toolkit
 
-A high-performance PowerShell Endpoint Detection and Response (EDR) hunting script. This toolkit is designed to detect advanced evasion techniques, fileless malware, and stealthy persistence mechanisms across Windows environments.
+A self-contained set of PowerShell and Python tools for endpoint threat hunting,
+forensic collection, and incident adjudication on Windows hosts. Every detection
+emits findings in one canonical schema — `Timestamp / Severity / Type / Target /
+Details / MITRE` — so output from any script flows into the same adjudication and
+reporting pipeline.
 
-## Features
-
-* **Deep Fileless Hunting:** Detects WMI Event Subscriptions, advanced Registry hooks (IFEO, AppInit_DLLs), COM Hijacking, and malicious BITS jobs.
-* **Memory & Process Evasion:** Identifies hidden processes (API vs. WMI discrepancies), reflective DLL injection, and unusual parent-child process relationships.
-* **Defense Evasion Detection:** Spots ETW Autologger disabling, AMSI provider tampering, and `PendingFileRenameOperations` (MoveEDR-style evasion).
-* **BYOVD (Bring Your Own Vulnerable Driver) Detection:** Scans loaded kernel drivers against a known-vulnerable list, with an option to pull live updates from `loldrivers.io`.
-* **High-Speed File Analysis:** Utilizes PowerShell Runspace Thread Pools to rapidly scan directories for file cloaking (Standard I/O vs. Memory-Mapped I/O), high Shannon entropy (packed/encrypted payloads), timestomping, and NTFS Alternate Data Streams (ADS).
-* **SIEM-Ready Output:** Automatically maps all findings to MITRE ATT&CK tactics and exports them as CSV, JSON, and styled HTML reports.
+Design intent: **forensic visibility first.** The tools look at everything an
+analyst would need, then use severity tiers and context (not scope cuts) to keep
+the signal-to-noise ratio high. Run from an **elevated** prompt; most collectors
+also support an **offline** mode against mounted hives / captured images.
 
 ---
 
-## Development & Building
+## The workflow
 
-This project uses a modular development structure to ensure maintainability and CI/CD readiness. **Do not edit the monolithic release script directly.** All development happens in the `dev/` directory:
-* `dev/src/` - Contains the individual numbered modules.
-* `dev/tests/` - Contains the Pester 5 test suite with mocked API calls.
-* `dev/Build-Toolkit.ps1` - Compiles the modules into the final deployable payload.
-* `dev/Run-Tests.ps1` - Executes the test suite to validate logic before compilation.
+```
+  1. HUNT            2. COLLECT DEPTH        3. ADJUDICATE          4. REPORT
+  EDR_Toolkit.ps1    Get-Persistence...      Get-FindingContext     Analyze-EDRReport
+  (+ memory image)   Get-RemoteAccess...     (TP vs FP, hard        (fleet baseline,
+                     Get-USBDeviceHistory    evidence per finding)  SIEM export)
+                     Invoke-*Parser
+                     Analyze-Memory
+```
 
-**To build a new release:**
-1. Make your changes in the `dev/src/` modules.
-2. Run `.\dev\Run-Tests.ps1` to ensure no logic regressions.
-3. Run `.\dev\Build-Toolkit.ps1` to generate the monolithic `EDR_Toolkit_Deploy.ps1` in the `Release/` folder.
+---
+
+## Scripts
+
+### Primary hunter
+| Script | Purpose |
+| :--- | :--- |
+| **EDR_Toolkit.ps1** | The main live-host hunter. Detects hidden processes, LOLBin execution, reflective DLL injection, fileless persistence (WMI / Run keys / IFEO / AppInit / COM hijack), BYOVD drivers, scheduled-task abuse, ETW/AMSI tampering, PendingFileRename (MoveEDR), BITS jobs, suspicious network connections/listeners/named pipes, and on-disk evasion (entropy, timestomping, ADS, magic-byte/extension mismatch). Maps every hit to MITRE ATT&CK and exports CSV / JSON / HTML. See **Hunt modules** below. |
+
+### Adjudication & reporting
+| Script | Purpose |
+| :--- | :--- |
+| **Get-FindingContext.ps1** | Wave 2. For every base finding it resolves the concrete artifact behind it (PID → live process + parent + egress, CLSID → registry server, path/name → on-disk file) and proves True vs False Positive with SHA256, Authenticode signer, path trust, and version info. It does not guess from names. |
+| **Analyze-EDRReport.ps1** | Fleet analysis. Ingests JSON reports from many endpoints, applies a universal Windows baseline to strip OS noise, and exports clean actionable alerts for SIEM. |
+
+### Depth collectors (live or offline)
+| Script | Purpose |
+| :--- | :--- |
+| **Get-PersistenceSnapshot.ps1** | Pure-PowerShell persistence-breadth + security-tamper snapshot using only built-in binaries (runs on a fully isolated host). Covers IFEO, Winlogon, AppInit/AppCert, LSA packages, BootExecute, netsh helpers, Active Setup, all-user Run keys; flags WDigest cleartext, LSASS PPL off, UAC/Defender/PS-logging disabled. Also stages raw evidence (`.evtx`, task XML, firewall, audit policy) for the parsers below. |
+| **Get-RemoteAccessTriage.ps1** | Targets interactive-remote-control compromise: RMM/remote-access tooling, ClickFix / fake-update lures, browser artifacts, and active sessions — the gap that process/persistence hunts miss. |
+| **Get-USBDeviceHistory.ps1** | Read-only removable-media timeline. Reconstructs every USB-storage device ever connected (vendor/serial/label, first/last-connect, removal) and correlates against an infection time or payload first-run to identify the entry-vector device. |
+
+### Artifact parsers (consume collector output)
+| Script | Purpose |
+| :--- | :--- |
+| **Invoke-AmcacheParser.ps1** | Turns Amcache / ShimCache execution evidence into findings (ran from user-writable/suspicious/network paths, LOLBin names outside System32, unsigned non-Microsoft binaries). |
+| **Invoke-EventLogAnalysis.ps1** | Turns collected event-log CSVs into findings (4688 process creation, 4625 brute force, 4648 explicit creds, 4698/4702 tasks, 4720 account create, 1102 log cleared, 7045 services, 4104 PS script block, 4656/4663 LSASS access, 4624 RDP logon). |
+
+### Memory analysis
+| Script | Purpose |
+| :--- | :--- |
+| **Analyze-Memory.ps1** | Orchestrator. Runs offline memory analysis on a captured `.raw` / `.mem` / `.aff4` image on the **analyst** machine and emits findings in the canonical schema. |
+| **memory_forensic.py** | Core engine (MemProcFS API). Detects LOLBin cmdlines, hidden/DKOM processes, injected executable VADs, shellcode threads, parent-child & path-spoof anomalies, external C2, credential tooling, suspicious binds, and BYOVD drivers. |
+| **memory_yara.py / memory_yara_worker.py** | YARA scan of process memory. The worker runs as an isolated subprocess so a native scanner crash on a pathological process cannot kill the analysis; a DOS-stub canary rule verifies the engine actually inspected memory. |
+| **memory_enrich.py** | Per-true-positive footprint extractor for eradication scope: handles (dropped files, persistence, mutexes, pipes), modules, C2 endpoints, process lineage, and the carved injected region with recovered IOCs. |
+
+> Memory tooling requires staged binaries (`vol.exe` / MemProcFS / YARA) — see the
+> header of `Analyze-Memory.ps1` for `Build-OfflineToolkit.ps1` staging flags.
 
 ---
 
 ## Usage
 
-Run the compiled release script from an **Elevated (Administrator)** PowerShell prompt.
+Run the hunter from an **elevated (Administrator)** PowerShell prompt.
 
-**1. Full System Memory & Fileless Scan (Fastest)**
-Runs all memory, registry, and fileless checks without crawling the hard drive.
+**1. Full memory + fileless scan (fast — no disk crawl)**
 ```powershell
-.\Release\EDR_Toolkit_Deploy.ps1 -ScanProcesses -ScanFileless -ScanTasks -ScanDrivers -ScanInjection -ScanRegistry -ScanETWAMSI -ScanPendingRename -ScanBITS -ScanCOM
+.\EDR_Toolkit.ps1 -ScanProcesses -ScanFileless -ScanTasks -ScanDrivers -ScanInjection -ScanRegistry -ScanETWAMSI -ScanPendingRename -ScanBITS -ScanCOM -ScanNetwork
 ```
 
-**2. Deep Target Directory Scan (File Evasion)**
-Recursively scans the `C:\` drive utilizing the heavily optimized multithreaded engine, while filtering for High/Critical alerts only.
+**2. Deep target-directory scan (file evasion, High/Critical only)**
 ```powershell
-.\Release\EDR_Toolkit_Deploy.ps1 -TargetDirectory "C:\" -Recursive -ScanADS -QuickMode -SeverityFilter Critical,High
+.\EDR_Toolkit.ps1 -TargetDirectory "C:\" -Recursive -ScanADS -QuickMode -SeverityFilter Critical,High
 ```
+> Calling with `-SeverityFilter` as an array requires the call operator (`& .\EDR_Toolkit.ps1 ...`)
+> or dot-sourcing — not `pwsh -File`, which passes `Critical,High` as one string.
 
-**3. Enterprise WinRM Deployment (Silent)**
-Deploy over the network without console spam, outputting only JSON for SIEM ingestion.
+**3. Silent WinRM deployment (JSON for SIEM)**
 ```powershell
-Invoke-Command -ComputerName SRV-WEB-01 -FilePath ".\Release\EDR_Toolkit_Deploy.ps1" -ArgumentList @("-ScanProcesses", "-ScanFileless", "-Quiet", "-OutputFormat", "JSON")
+Invoke-Command -ComputerName SRV-WEB-01 -FilePath ".\EDR_Toolkit.ps1" -ArgumentList @("-ScanProcesses","-ScanFileless","-Quiet","-OutputFormat","JSON")
 ```
 
 ---
 
-## Command-Line Parameters
+## EDR_Toolkit.ps1 parameters
 
-### Hunt Modules
+### Hunt modules
+| Parameter | Detects |
+| :--- | :--- |
+| `-ScanProcesses` | Hidden processes (API vs WMI), unusual parents, LOLBin command lines (encoded PS, Squiblydoo, msiexec remote MSI, wmic process-create, installutil/cmstp/odbcconf). |
+| `-ScanInjection` | Reflective DLLs and foreign modules via real `Process.Modules` enumeration (module-not-on-disk, unsigned DLL outside Windows paths). |
+| `-ScanFileless` | WMI event subscriptions (filter/consumer/binding correlation), Run/RunOnce, Winlogon, BootExecute, startup folders, LSA packages. |
+| `-ScanRegistry` | IFEO debuggers, AppInit_DLLs, suspicious Services. |
+| `-ScanTasks` | Scheduled tasks: binary-not-on-disk, SYSTEM task with user-writable binary, UNC execution, LOLBin actions. |
+| `-ScanDrivers` | Loaded kernel drivers vs BYOVD list by **SHA256 hash** (rename-resistant) and name; path-aware unsigned check. |
+| `-ScanBITS` | Suspicious BITS jobs by display name, source URL (non-CDN/IP), and destination path. |
+| `-ScanCOM` | COM hijacking via `CLSID\InProcServer32`. |
+| `-ScanETWAMSI` | Disabled ETW channels, weaponized log rotation (tiny max-size), WER disabled, AMSI tampering. |
+| `-ScanPendingRename` | `PendingFileRenameOperations` targeting security tools (MoveEDR-style delete-on-reboot). |
+| `-ScanNetwork` | Outbound connections to public IPs on non-standard ports, unexpected listeners, C2-pattern named pipes. |
+
+### File scanning
 | Parameter | Description |
 | :--- | :--- |
-| `-ScanProcesses` | Hunts for hidden processes, unusual parents, and suspicious command lines (LOLBins). |
-| `-ScanInjection` | Looks for reflective DLLs, foreign modules, and process hollowing indicators. |
-| `-ScanFileless` | Checks classic WMI subscriptions and user/system Run keys. |
-| `-ScanRegistry` | Expanded registry hunting (IFEO, AppInit_DLLs, suspicious Services). |
-| `-ScanTasks` | Analyzes Scheduled Tasks for malicious triggers and actions. |
-| `-ScanDrivers` | Checks loaded kernel drivers against known BYOVD hashes/names. |
-| `-ScanBITS` | Finds suspicious or non-standard Background Intelligent Transfer Service jobs. |
-| `-ScanCOM` | Hunts for COM hijacking via `CLSID InProcServer32` hooks. |
-| `-ScanETWAMSI` | Detects disabled ETW Autologgers and tampered AMSI registry keys. |
-| `-ScanPendingRename`| Checks for `PendingFileRenameOperations` often used by malware to delete EDR agents on reboot. |
+| `-TargetDirectory <Path>` | Root for file-based hunts (entropy, timestomping, magic-byte mismatch). |
+| `-Recursive` | Crawl all subdirectories. |
+| `-ScanADS` | Hunt NTFS Alternate Data Streams. |
+| `-QuickMode` | Recommended for disk scans: restricts to recently-touched files (full depth, faster). |
+| `-QuickModeDaysBack <N>` | QuickMode recency window (default 90). |
 
-### File Scanning Options
+### Global & filtering
 | Parameter | Description |
 | :--- | :--- |
-| `-TargetDirectory <Path>` | The root folder to begin file-based hunts (entropy, cloaking, timestomping). |
-| `-Recursive` | Crawls all subdirectories within the `-TargetDirectory`. |
-| `-ScanADS` | Specifically hunts for NTFS Alternate Data Streams (hidden files within files). |
-| `-QuickMode` | **Highly Recommended.** Reduces the entropy sample size and skips massive files to vastly speed up disk scans. |
+| `-AutoUpdateDrivers` | Fetch the latest vulnerable-driver list from `loldrivers.io`. |
+| `-ReportPath <Path>` | Output directory (default: current dir). |
+| `-ExcludePaths <String[]>` | Folders to skip during disk scans. |
+| `-SeverityFilter <String[]>` | Restrict output, e.g. `Critical,High`. |
+| `-OutputFormat <String[]>` | `All` \| `JSON` \| `CSV` \| `HTML`. |
+| `-Quiet` | Suppress console output and progress bars. |
+| `-TestMode` | Inject simulated findings to validate SIEM ingestion. |
 
-### Global & Filtering Options
-| Parameter | Description |
-| :--- | :--- |
-| `-AutoUpdateDrivers` | Reaches out to the `loldrivers.io` API to fetch the latest vulnerable driver list. |
-| `-ReportPath <Path>` | Directory where reports will be saved (Default: Current Directory). |
-| `-ExcludePaths` | Array of strings. Skips specific folders during disk scans. Ex: `-ExcludePaths "C:\Docker", "C:\Apps"` |
-| `-SeverityFilter` | Array of strings. Restricts output. Ex: `-SeverityFilter Critical,High` |
-| `-OutputFormat` | Restricts the generated report files. Options: `All`, `JSON`, `CSV`, `HTML`. |
-| `-Quiet` | Suppresses console chatter and progress bars. Ideal for automated tasks via Orchestrator or GPO. |
-| `-TestMode` | Skips all scans and injects simulated findings to test SIEM ingestion and alert rules. |
+Output is a timestamped report package plus a Top-10 findings summary on the console.
 
 ---
 
-## Outputs
+## Development
 
-Upon completion, the toolkit automatically generates a timestamped package (based on `-OutputFormat`) and prints a **Top 10 Findings Summary** to the console.
+Active development lives in **`dev/`** — `dev/src/` holds the numbered modules,
+`dev/Build-Toolkit.ps1` concatenates them into the deployable `EDR_Toolkit.ps1`
+(and `dev/Release/EDR_Toolkit_Deploy.ps1`). Pester tests live in `test/windows/`.
+**Edit `dev/src/`, not the compiled output**, then rebuild and re-run the tests.

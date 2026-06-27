@@ -203,6 +203,25 @@ foreach ($ev in @(Read-EventCsv 'events_ps_scriptblock.csv')) {
 }
 Write-Host "    4104 (PS script block): -> $(($Findings.Count - $prevCount)) findings" -ForegroundColor Gray
 
+# -- 4656/4663 - LSASS handle open / object access (credential theft) ---------
+$prevCount = $Findings.Count
+$lsassAccess = @(Read-EventCsv 'events_4656.csv') + @(Read-EventCsv 'events_4663.csv')
+foreach ($ev in $lsassAccess) {
+    $msg = [string]$ev.Message
+    # Object name must reference lsass.exe; access mask must include VM_READ (0x10) or
+    # PROCESS_ALL_ACCESS (0x1F0FFF). Filter out SYSTEM and known-good callers.
+    if ($msg -match '(?i)lsass\.exe' -and
+        $msg -match '(?i)0x10\b|0x1f0fff\b|0x1f1fff\b|ReadData|ReadVirtualMemory') {
+        if ($msg -notmatch '(?i)SYSTEM|NT AUTHORITY\\SYSTEM|MsMpEng|SenseCncProxy|SenseIR|MpDefender|SecurityHealth') {
+            Add-EvtFinding -Severity 'Critical' -Type 'LSASS Handle Open (credential theft)' `
+                -Target "Event $($ev.Id) @ $($ev.TimeCreated)" `
+                -Details ($msg -replace '\s+',' ').Substring(0,[math]::Min(350,($msg -replace '\s+',' ').Length)) `
+                -Mitre 'T1003.001 (LSASS Memory), T1055 (Process Injection)'
+        }
+    }
+}
+Write-Host "    4656/4663 (LSASS access): $($lsassAccess.Count) events -> $(($Findings.Count - $prevCount)) findings" -ForegroundColor Gray
+
 # -- 4624 - Successful logon (type 10 = RDP, type 3 = network) ----------------
 $prevCount = $Findings.Count
 foreach ($ev in @(Read-EventCsv 'events_4624.csv')) {
@@ -245,8 +264,8 @@ $Findings | Group-Object Severity | Sort-Object @{E={@('Critical','High','Medium
 # SIG # Begin signature block
 # MIIcDgYJKoZIhvcNAQcCoIIb/zCCG/sCAQExDzANBglghkgBZQMEAgEFADB5Bgor
 # BgEEAYI3AgEEoGswaTA0BgorBgEEAYI3AgEeMCYCAwEAAAQQH8w7YFlLCE63JNLG
-# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCANBTkSCLhy5+/m
-# 4gpogll5iNet1OFmkSW0FPYa0sDic6CCFlIwggMUMIIB/KADAgECAhAfQMjwyAWn
+# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCDH4+ZiKx69UAh3
+# nOof6ZhHIeSf4+bSQSb3UYcQVde9KqCCFlIwggMUMIIB/KADAgECAhAfQMjwyAWn
 # lEKgkjdOOOytMA0GCSqGSIb3DQEBCwUAMCIxIDAeBgNVBAMMF0lSIFRvb2xraXQg
 # Q29kZSBTaWduaW5nMB4XDTI2MDYyNjAyMjc0OFoXDTI5MDYyNjAyMzc0OFowIjEg
 # MB4GA1UEAwwXSVIgVG9vbGtpdCBDb2RlIFNpZ25pbmcwggEiMA0GCSqGSIb3DQEB
@@ -369,28 +388,28 @@ $Findings | Group-Object Severity | Sort-Object @{E={@('Critical','High','Medium
 # A1UEAwwXSVIgVG9vbGtpdCBDb2RlIFNpZ25pbmcCEB9AyPDIBaeUQqCSN0447K0w
 # DQYJYIZIAWUDBAIBBQCggYQwGAYKKwYBBAGCNwIBDDEKMAigAoAAoQKAADAZBgkq
 # hkiG9w0BCQMxDAYKKwYBBAGCNwIBBDAcBgorBgEEAYI3AgELMQ4wDAYKKwYBBAGC
-# NwIBFTAvBgkqhkiG9w0BCQQxIgQg72AKOWQ433YlTemybUsRdWejqiACUNPigAzV
-# kKhp/LowDQYJKoZIhvcNAQEBBQAEggEAOzwJMY8ehthuZw/qTFWaXr/veGJriiIk
-# Cdb/F1WT8NjuLlXJkIaOmDVOwJYlgO0HtR3l0V18irzmQaraDx5kbcYnesJBLvXU
-# NT8Qf/HBkVXLvnkCTGqxsM0gW0T1PlxtjxuEn/wzkHkN07f3J+EqZ6h/uYyU8Te7
-# aks3evTgsR7XebbXVXJP+04jaRQGKo1pJonozANojtnbVhtUJ/Z3FDhHItN4YCV7
-# EYcCjtjHKumEsNFcoEM6OTuPGQG4jSADzZ9ZgjJV9piiFyGgnCWnJbQ7lMC1e3nM
-# zaHw7W8JdTN+AkMxDCBjqx+v8S1uvByHa0KMmcN2XOSVvxUIlzbEAKGCAyYwggMi
+# NwIBFTAvBgkqhkiG9w0BCQQxIgQgSLgX47zMLJa8l0w8sNVTEpIBI5wi2dWEzcmr
+# aaVRYzEwDQYJKoZIhvcNAQEBBQAEggEAGQOAMkTja90sLrjc3SBn3/J0uOBPABoa
+# dTJtFxRg8XBg6WSI7J7g5nyEP983o3EgGow1OHKGqHoVBGCPjVUaswSluxk2JRRr
+# t9fGesTN0CIM2w6oq2B+kUOtMe6qE2VdLEjFWqI3PcmVfa8ByvXW0v4s7Z2G4Alu
+# HEHNDC6i3piboS9XCTuWB4JmUToC8QWOwS6z6geC5fA6zAIqh93XNybzMlQmVpXH
+# WvXeHXvKb4CzC88VYEYf2AvdNmL0JE7LSBvrf/wdBQ4ZCcZa1Q/xwXU4Eq5smtV/
+# /OxaTIyKKIU/83rbotIGiT5qGfjEZtJRrV+kCeE9NVco+0DkV54nSqGCAyYwggMi
 # BgkqhkiG9w0BCQYxggMTMIIDDwIBATB9MGkxCzAJBgNVBAYTAlVTMRcwFQYDVQQK
 # Ew5EaWdpQ2VydCwgSW5jLjFBMD8GA1UEAxM4RGlnaUNlcnQgVHJ1c3RlZCBHNCBU
 # aW1lU3RhbXBpbmcgUlNBNDA5NiBTSEEyNTYgMjAyNSBDQTECEAqA7xhLjfEFgtHE
 # dqeVdGgwDQYJYIZIAWUDBAIBBQCgaTAYBgkqhkiG9w0BCQMxCwYJKoZIhvcNAQcB
-# MBwGCSqGSIb3DQEJBTEPFw0yNjA2MjYwMjM4MjNaMC8GCSqGSIb3DQEJBDEiBCDt
-# mwystd35E64S/skLWW5itiqsdRy27l0kqVnEaH/rpjANBgkqhkiG9w0BAQEFAASC
-# AgDHqmdR5jgbEqYeOEf3JHs0zxhElVDlf3I+1HR2V0H/njWrgq413SBpaxKqSuNJ
-# yDlX+/qz8OUWgPphPP0OlRd7Ns79ZYLIiNmsvRl8GViB4jIO9FOEGh3hjgJOhGkD
-# DEShe30zuUBKXL44jNl2B4BAElVCxctbh4Mt5LNE+PPgAuEQPl80dLijUjDiMaG5
-# 0TWlAaFjZytLf7nYcGWeb6H6XlrMWSc1I9xBeXsk24akHKTLH3iO3qX21gHp11bB
-# Az13DwnpdoYMjLrEIMtHiQhKRDZQP3ZB0jVjCamFDObmxTynqLLTpa5kJ8Yx1zZk
-# KcCLeKjkzos+hN54kKAGrtn8D+4Eh711vutg7Qu8WceKREgLbErSGyB9DcgrpzXh
-# GB390dvXyfAQrAV21cbobYxJwRI1Z7pCCBbl/fouMWnsKmfYCJd9C+hu4cVdnSSd
-# av3qpeXx6rdMa/yL8PhsVmh6cBcCgTGJIt8Jym/WMdzmuBZAul25cboIgnGkaSyL
-# KYh0q4H6E1d2XvB01PIjfz5raYaUHIpTN9r73AAht2dT6laReLTUfILsxsotaqKx
-# pzCHD3h+pWwMq9mceMnVW2pZeGx6QJRbgSkdo6QIeaiML5S2nzaAXrSIv/z6kvP9
-# P+i59NjY35QsOfA+Qj6e2lIh92A3GonBIPjIlATTm2IZ8A==
+# MBwGCSqGSIb3DQEJBTEPFw0yNjA2MjYyMzI3MjNaMC8GCSqGSIb3DQEJBDEiBCAf
+# ohp8If9W4RU4qbmp8VolmCFirCaiSTzFHP0m6EAHBjANBgkqhkiG9w0BAQEFAASC
+# AgApYpp7IelTAZ+rcQDGZPICLHD1m3v1Uh/Rxxvsm67GaO76hPEcDVMMKOiWw7Rc
+# U7G3uXMpIvfAeLlLZLTr3C+NKyvDaNy7ev3cEIEV+szGcpRIYwGbPr15VnAsjrTv
+# LSgSRVwsCRuu14LaWUmLDY6cXIxyn2zKbA2SMvYXg6ajU+o6rGY3JHxlZRr0Srcn
+# H52D68IQEGN9RWPH9o3Lc0wJic48/M1jzG+7aAwH7Yghud47+vBkU/svoh4LIKlr
+# ke2XtfNsHNEMn8KDR2KzzkPT5iOdLckcvLcmoeyfVstyI1vg0lK4tTuD9K2CNqXb
+# TgCn/D12VWFONhTp3Uo4PEvvgB6z9ERTDrV0rvwD+9roIupoxm3kT1MSRek/aaUV
+# SqP7x2SCv1sZTQykXs2HeDCcCfLydlpYwakIDQ/sDfO5caEJAwl+Tp4Wn7B44CCO
+# citQY9nyikTaPiuvoJry/MWtD+5wtfdP2473KtuLwNrwScUFqtR0MuWGolPlPBhL
+# 3RO/2JSGSCeN1l7RmfQ1HRU/Py7TUB9Em/sqKIZnM4rG7J0idTvJIxKeGb6FKtbg
+# o5FJEZLnoKeC7nSQ3RJbwkKti3vRMCFh4FgWJUV51ZoMMOwvW8+cFAag20FHdVFp
+# ylpyNSvSFSq5zGL82hbv8F+enlPHzkz5krWV7xvtTMR6QA==
 # SIG # End signature block

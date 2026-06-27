@@ -288,15 +288,16 @@ never treats it as complete. Enable with `-CaptureMemory`.
 
 | Module | What it looks for |
 |---|---|
-| Process hunt | Hidden processes (API vs WMI mismatch); LOLBin score ≥ 3 (encoded cmds, IEX, WebClient, mshta, certutil); high-risk parent multiplier |
-| Injection scan | Reflective DLL injection; unsigned modules in signed processes; DLLs loaded from Temp/AppData |
-| Driver hunt | BYOVD - loaded drivers checked against built-in list + live/offline loldrivers.io feed |
-| COM hijacking | HKCU InProcServer32 shadows existing HKLM CLSID AND points to unsigned/user-writable DLL |
-| BITS jobs | Transfer jobs not matching Microsoft/Windows-Update/vendor updater naming patterns |
-| ETW/AMSI tamper | ETW autologger sessions disabled; AMSI provider registry keys missing or renamed |
-| Registry | WMI event subscriptions; PendingFileRenameOperations; services running from Temp/AppData; IFEO debugger hijacks; AppInit DLLs |
-| Scheduled tasks | Score-based: encoded commands, IEX, WebClient download, hidden window, mshta in task action |
-| File hunt (optional) | Epoch/impossible timestamps (pre-2003 - timestomping); entropy ≥7.2 in non-image/non-script files; Alternate Data Streams in high-risk paths; YARA scan over the **full** Windows-applicable rule set (Linux/macOS rules filtered out) with a marker **self-test** so a "0 matches" result is provable |
+| Process hunt | Hidden processes (API vs WMI mismatch); encoded-PowerShell **decode + re-score** (nested encoding = Critical); LOLBin scoring incl. **Squiblydoo** (`regsvr32 /i:http`), `msiexec /i http`, `wmic process create`, `installutil`, `cmstp`, `odbcconf` + IEX/WebClient/mshta/certutil; high-risk parent multiplier; own-PID ancestry excluded |
+| Injection scan | Reflective DLL injection; **real DLL enumeration via `Process.Modules`** (not .NET-only); unsigned modules in signed processes; DLLs loaded from Temp/AppData |
+| Driver hunt | BYOVD via **SHA256 hash** (rename-resistant) + name list + live/offline loldrivers.io feed; path-aware unsigned-driver check (outside `System32\drivers`) |
+| COM hijacking | HKCU InProcServer32 shadows an HKLM CLSID AND points to an unsigned/user-writable DLL |
+| BITS jobs | Job naming + **FileList URL** (non-CDN domain) and **destination path** (Temp/AppData) inspection |
+| ETW/AMSI tamper | ETW autologger sessions disabled; AMSI keys missing/renamed; **event-log channel status** (Security/Sysmon stopped/cleared), WER disabled, max-size=0 abuse |
+| Registry / fileless | **WMI subscriptions** (all 3 objects: `__EventFilter` + `__FilterToConsumerBinding` + `__EventConsumer`, correlated); persistence keys (Run/**RunOnce**, **Winlogon** Userinit/Shell, **BootExecute**, startup folders, **LSA** Security/Auth packages); **PendingFileRenameOperations targeting security tools** (MsMpEng/Sysmon/SenseCncProxy/MDE); services from Temp/AppData; IFEO debugger hijacks; AppInit DLLs |
+| Scheduled tasks | Score-based actions **+ binary-not-on-disk; SYSTEM task with user-writable binary; UNC-path trigger** |
+| Network audit (`Invoke-NetworkHunt`) | Outbound ESTABLISHED to public IPs on non-standard ports; unexpected listeners; **named-pipe enumeration** for C2-framework pipe patterns |
+| File hunt (optional) | Extensions incl. `.hta/.lnk/.scr/.vbe/.jse`; **magic-byte/extension mismatch** (PE `MZ` hiding under a non-exe extension); epoch/impossible timestamps (timestomping); entropy ≥7.2 in non-image/non-script files; ADS in high-risk paths; YARA over the **full** Windows-applicable rule set with a marker **self-test** so a "0 matches" result is provable |
 
 **Remote-access triage** (`Get-RemoteAccessTriage.ps1`) - installed and running RMM agents (60+
 signatures); ClickFix / CAPTCHA-lure PowerShell drops; browser history for RMM download pages; RunMRU
@@ -649,15 +650,16 @@ The reports are intentionally split: the three **final reports** show only beyon
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `-ScanProcesses` | switch | **on** | Hidden process detection (API vs WMI); context-aware LOLBin scoring (threshold ≥ 3). |
-| `-ScanFileless` | switch | **on** | WMI event subscriptions, suspicious Registry Run key values. |
+| `-ScanFileless` | switch | **on** | WMI subscriptions (3-object correlation); persistence keys (Run/RunOnce, Winlogon, BootExecute, startup, LSA packages). |
 | `-ScanRegistry` | switch | **on** | IFEO debugger hijacks, AppInit_DLLs, services from Temp/AppData. |
-| `-ScanTasks` | switch | **on** | Scheduled task detection with score-based LOLBin matching. |
-| `-ScanDrivers` | switch | **on** | BYOVD list + (with `-AutoUpdateDrivers`) live loldrivers.io / offline cache. |
+| `-ScanTasks` | switch | **on** | Score-based LOLBin matching + binary-not-on-disk / SYSTEM-user-writable / UNC trigger. |
+| `-ScanDrivers` | switch | **on** | BYOVD via SHA256 hash + name list + (with `-AutoUpdateDrivers`) live loldrivers.io / offline cache. |
 | `-ScanInjection` | switch | **on** | Reflective DLL injection and unsigned modules in processes. |
 | `-ScanBITS` | switch | **on** | BITS jobs not matching Microsoft/Windows Update naming. |
 | `-ScanCOM` | switch | **on** | COM hijacking via HKCU InProcServer32 overrides. |
 | `-ScanETWAMSI` | switch | **on** | ETW autologger sessions disabled and AMSI provider tampering. |
-| `-ScanPendingRename` | switch | **on** | PendingFileRenameOperations (boot-time EDR kill). |
+| `-ScanPendingRename` | switch | **on** | PendingFileRenameOperations (boot-time EDR kill; flags security-tool targets). |
+| `-ScanNetwork` | switch | **on** | Outbound-to-public on non-standard ports, unexpected listeners, C2-pattern named pipes. |
 | `-ScanADS` | switch | off | ADS scan in high-risk paths. Auto-enabled with `-DeepFileScan`/`-FullScan`. |
 | `-ScanYara` | switch | off | Two-phase YARA scan (select minimal rule subset from prior findings, scan only flagged files). Requires staged `tools\yara64.exe` + `tools\yara_rules\`. |
 | `-AutoUpdateDrivers` | switch | off | Fetch latest loldrivers.io list; falls back to `tools\loldrivers.json`. |

@@ -230,6 +230,51 @@ for p in procs:
 log(f'  Shellcode threads: {n}')
 
 # ==============================================================================
+# 5b. Manual-Map PE injection (TTP-002) and Module Stomping (TTP-003)
+# ==============================================================================
+log('=== 5b. Manual-map PE / Module Stomping detection ===')
+n_mmap = 0
+n_stomp = 0
+for p in procs:
+    if is_system_proc(p): continue
+    try: vads = p.maps.vad()
+    except: continue
+    for v in vads:
+        prot = str(v.get('protection', '') or '')
+        typ  = str(v.get('type', '') or '')
+        tag  = str(v.get('tag', '') or '')
+        prot_upper = prot.upper()
+        addr = v.get('start', 0)
+
+        # TTP-002: Manual-map PE - EXECUTE in private/anon VAD with MZ header
+        if 'EXECUTE' in prot_upper:
+            is_private = typ.lower() in ('private', '') and 'image' not in tag.lower() and 'mapped' not in typ.lower()
+            if is_private:
+                try:
+                    hdr = p.memory.read(addr, 2)
+                    if hdr and len(hdr) >= 2 and hdr[0] == 0x4D and hdr[1] == 0x5A:
+                        add('Critical', 'Manually-Mapped PE (Memory)',
+                            f'PID {p.pid} ({p.name}) @ {addr:#x}',
+                            f'MZ header in private executable VAD (no backing image). '
+                            f'PID={p.pid} Name={p.name} Addr={addr:#x} Protection={prot}',
+                            'T1055.004 (Asynchronous Procedure Call), T1055')
+                        n_mmap += 1
+                except Exception:
+                    pass
+
+        # TTP-003: Module stomping - image/mapped region with RWX protection
+        is_image_backed = ('image' in tag.lower()) or ('mapped' in typ.lower())
+        if is_image_backed and ('EXECUTE_READWRITE' in prot_upper or 'RWX' in prot_upper or
+                                ('EXECUTE' in prot_upper and 'READWRITE' in prot_upper)):
+            add('High', 'Module Stomping Indicator (Memory)',
+                f'PID {p.pid} ({p.name}) @ {addr:#x}',
+                f'Image-backed region with execute+readwrite protection suggests stomped module. '
+                f'PID={p.pid} Name={p.name} Addr={addr:#x} Tag={tag} Protection={prot}',
+                'T1055.001 (DLL Injection), T1055')
+            n_stomp += 1
+log(f'  Manually-mapped PEs: {n_mmap}  Module-stomping indicators: {n_stomp}')
+
+# ==============================================================================
 # 6. Parent-child anomalies
 # ==============================================================================
 log('=== 6. Parent-child relationship anomalies ===')
