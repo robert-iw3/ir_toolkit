@@ -253,6 +253,12 @@ powershell.exe -ExecutionPolicy Bypass -NoProfile -File .\Invoke-IRCollection.ps
 # Override the output location (e.g. USB drive)
 powershell.exe -ExecutionPolicy Bypass -NoProfile -File .\Invoke-IRCollection.ps1 `
     -DeepFileScan -OutputRoot "E:\Evidence"
+
+# Redirect the AFF4 memory image to a specific path (different volume or folder)
+# Default: reports\<HOST>\memory_<HOST>.aff4
+powershell.exe -ExecutionPolicy Bypass -NoProfile -File .\Invoke-IRCollection.ps1 `
+    -CaptureMemory -DeepFileScan -ScanYara `
+    -MemoryOutputPath "C:\captures\memory_$env:COMPUTERNAME.aff4"
 ```
 
 > Full flag list: **[Invoke-IRCollection.ps1 parameter reference](#invoke-ircollectionps1---full-parameters)** in Part 3.
@@ -396,22 +402,30 @@ to the analyst machine and run `Analyze-Memory.ps1`.
    | `.aff4` (go-winpmem, the **default** capture) | **MemProcFS** via `memory_forensic.py` (`vmmpyc` Python API) | pure library - no driver/Dokany/WinFsp | primary path, fully offline |
    | `.raw` / `.mem` / `.dmp` | **Volatility 3** (`vol.exe`) | standalone build | fallback; fetches MS symbols on first run unless pre-staged with `-StageSymbols` |
 
-2. **Detect** - `memory_forensic.py` runs 12 modules over the image:
+2. **Detect** - `memory_forensic.py` runs 19 modules over the image:
 
-   | Check | What it detects |
+   | Module | What it detects |
    |---|---|
    | LOLBin cmdlines | Encoded commands, IEX, WebClient downloads, mshta - same scoring as the live EDR hunt, but from memory |
    | Hidden processes | DKOM / PEB-unlink artifacts flagged by the MemProcFS state field |
-   | Injected memory | Executable private VAD regions with no backing file - classic shellcode/reflective-DLL footprint |
+   | Injected memory | Executable private VAD regions with no backing file — classic shellcode/reflective-DLL footprint; PE hollowing (zeroed TimeDateStamp/CheckSum/SizeOfImage) |
    | External network | Established/listening connections to non-RFC1918 IPs present at capture time (C2 dwell) |
-   | Shellcode threads | User-mode threads whose start address falls outside every loaded module |
+   | Shellcode threads | User-mode threads whose start address falls outside every loaded module; JIT-host threads carry a corroboration note rather than a clearance — the attack surface (JMP-AMSI, reflective injection) overlaps with legitimate JIT |
+   | Manual-map / module stomping | MZ header in anonymous exec region (manually-mapped PE); image-backed VAD with RWX protection (stomped DLL section) |
    | Parent-child anomalies | High-risk children (powershell, cmd, wscript, mshta, regsvr32) from unexpected parents |
    | Process path spoofing | System binaries (lsass, svchost, smss…) running from a path other than System32 |
    | Known offensive tooling | Names/cmdlines matching Mimikatz, Cobalt Strike, Meterpreter, BloodHound, Rubeus, PsExec, etc. |
    | Suspicious listeners | User processes listening on high ports (>1024) on non-loopback interfaces |
    | BYOVD drivers | Loaded kernel drivers matching known vulnerable driver names |
    | Registry Run keys | LOLBin commands in Run/RunOnce keys from the live registry hive in memory |
-   | YARA memory scan | Staged rules (Elastic + ReversingLabs + Neo23x0) scanned per-process, 15s abort timeout, noise-rule suppression, with a DOS-stub **canary** that proves the engine actually inspected memory |
+   | ntdll stub integrity | Patched `mov r10,rcx` syscall preambles replaced with JMP or NOP sleds — SysWhispers, Hell's Gate, EDR hook footprints |
+   | Dormant beacon / W^X | High-entropy private RW regions with uniform byte distribution (CV < 15%) adjacent to anonymous exec — sleep-masked / encrypted beacon at rest (Ekko, Cronos, Foliage, Gargoyle) |
+   | Thread-pool / Ekko | ntdll thread-pool workers co-located with beacon PIDs from the W^X scan — corroborated Ekko/Foliage sleep-mask pattern |
+   | PEB cmdline pointer | `RtlUserProcessParameters->CommandLine.Buffer` pointing outside the process heap — Argue-style post-launch PEB tamper |
+   | CLR execute-assembly | ECMA-335 BSJB metadata root in a private exec region of a non-.NET host process — Donut / execute-assembly footprint |
+   | PPID orphan / spoof | Parent PID absent from the process list (orphan) or parent created after child (temporal impossibility) — PROC_THREAD_ATTRIBUTE_PARENT spoof |
+   | COM VTable hijacking | Image-backed data-section pointer resolving into an anonymous exec region — in-memory COM object VTable redirect |
+   | YARA memory scan | Staged rules (Elastic + ReversingLabs + Neo23x0) scanned per-process, crash-isolated worker, noise-rule suppression, with a DOS-stub **canary** that proves the engine actually inspected memory |
 
 3. **Write** - concerning findings only → `Memory_Findings_<stamp>.json` (same schema as the rest of
    the pipeline) + `_MemProcFS_<stamp>.log`.

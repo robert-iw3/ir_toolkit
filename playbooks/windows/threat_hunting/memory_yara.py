@@ -186,14 +186,17 @@ def compile_ruleset(rule_files, yarac_exe, out_path, external_vars=None):
         except OSError:
             pass
     # Fallback: drop the rules that fail to compile, retry with the good set.
+    # Third return value is always total-excluded = dedup-dropped + compile-failed,
+    # consistent with the success-path convention (len(_dupe_dropped)).
     good, failed = validate_rule_files(rule_files, yarac_exe, external_vars)
+    _total_excl = len(_dupe_dropped) + len(failed)
     if not good:
-        return None, 0, len(failed)
+        return None, 0, _total_excl
     combined2 = _write_combined_include(good, work)
     try:
         if _run_yarac([combined2], yarac_exe, out_path, external_vars):
-            return out_path, len(good), len(failed)
-        return None, 0, len(rule_files)
+            return out_path, len(good), _total_excl
+        return None, 0, len(_dupe_dropped) + len(rule_files)
     finally:
         try:
             os.unlink(combined2)

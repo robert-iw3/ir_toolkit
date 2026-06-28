@@ -239,14 +239,61 @@ $c2 = foreach ($r in $relays) {
 } | ConvertTo-Json -Depth 5 | Out-File -FilePath (Join-Path $HostFolder 'IOCs.json') -Encoding UTF8
 
 # -- ATT&CK Navigator layer (attck_navigator_layer.json) ----------------------
-# Exports a Navigator v4.9 compatible JSON layer for the techniques observed.
+# Exports a Navigator layer (ATT&CK v19) for the techniques observed.
 # Open at https://mitre-attack.github.io/attack-navigator/ to visualise coverage.
+# Tactic lookup: primary tactic for common technique IDs so each renders in the
+# correct matrix column. Unknown IDs omit the tactic field (shows in all columns).
+$navTacticMap = @{
+    'T1055'    = 'privilege-escalation'; 'T1055.001' = 'privilege-escalation'
+    'T1055.002'= 'privilege-escalation'; 'T1055.003' = 'privilege-escalation'
+    'T1055.004'= 'privilege-escalation'; 'T1055.005' = 'privilege-escalation'
+    'T1055.008'= 'privilege-escalation'; 'T1055.009' = 'privilege-escalation'
+    'T1055.011'= 'privilege-escalation'; 'T1055.012' = 'privilege-escalation'
+    'T1055.013'= 'privilege-escalation'; 'T1055.014' = 'privilege-escalation'
+    'T1053'    = 'persistence';          'T1053.005' = 'persistence'
+    'T1059'    = 'execution';            'T1059.001' = 'execution'
+    'T1059.003'= 'execution';            'T1059.005' = 'execution'
+    'T1059.007'= 'execution';            'T1059.008' = 'execution'
+    'T1197'    = 'persistence'
+    'T1218'    = 'defense-evasion';      'T1218.005' = 'defense-evasion'
+    'T1218.007'= 'defense-evasion';      'T1218.011' = 'defense-evasion'
+    'T1562'    = 'defense-evasion';      'T1562.001' = 'defense-evasion'
+    'T1562.002'= 'defense-evasion';      'T1562.004' = 'defense-evasion'
+    'T1027'    = 'defense-evasion';      'T1027.001' = 'defense-evasion'
+    'T1027.002'= 'defense-evasion';      'T1027.010' = 'defense-evasion'
+    'T1027.013'= 'defense-evasion'
+    'T1036'    = 'defense-evasion';      'T1036.003' = 'defense-evasion'
+    'T1036.005'= 'defense-evasion';      'T1036.008' = 'defense-evasion'
+    'T1204'    = 'execution';            'T1204.002' = 'execution'
+    'T1546'    = 'persistence';          'T1546.003' = 'persistence'
+    'T1546.007'= 'persistence'
+    'T1547'    = 'persistence';          'T1547.001' = 'persistence'
+    'T1543'    = 'persistence';          'T1543.003' = 'persistence'
+    'T1588'    = 'resource-development'; 'T1588.001' = 'resource-development'
+    'T1134'    = 'privilege-escalation'; 'T1134.004' = 'privilege-escalation'
+    'T1071'    = 'command-and-control';  'T1071.001' = 'command-and-control'
+    'T1082'    = 'discovery';            'T1083'     = 'discovery'
+    'T1016'    = 'discovery';            'T1057'     = 'discovery'
+    'T1033'    = 'discovery';            'T1069'     = 'discovery'
+    'T1012'    = 'discovery';            'T1049'     = 'discovery'
+    'T1003'    = 'credential-access';    'T1003.001' = 'credential-access'
+    'T1110'    = 'credential-access';    'T1552'     = 'credential-access'
+    'T1552.001'= 'credential-access';    'T1555'     = 'credential-access'
+    'T1219'    = 'command-and-control';  'T1105'     = 'command-and-control'
+    'T1021'    = 'lateral-movement';     'T1021.001' = 'lateral-movement'
+    'T1560'    = 'collection';           'T1114'     = 'collection'
+    'T1566'    = 'initial-access';       'T1190'     = 'initial-access'
+    'T1078'    = 'initial-access';       'T1133'     = 'initial-access'
+    'T1102'    = 'command-and-control';  'T1090'     = 'command-and-control'
+    'T1140'    = 'defense-evasion';      'T1202'     = 'defense-evasion'
+    'T1220'    = 'defense-evasion';      'T1548'     = 'privilege-escalation'
+}
 $navTechniques = @($techniques.Keys | ForEach-Object {
-    $tid = $_
-    [ordered]@{
+    $tid    = $_
+    $tactic = $navTacticMap[$tid]
+    $entry  = [ordered]@{
         techniqueID = $tid
-        tactic      = $null          # Navigator resolves tactic from technique ID
-        score       = 1              # 1 = observed
+        score       = 75
         color       = ''
         comment     = "Observed in $IncidentId"
         enabled     = $true
@@ -254,19 +301,20 @@ $navTechniques = @($techniques.Keys | ForEach-Object {
         links       = @()
         showSubtechniques = $false
     }
+    if ($tactic) { $entry['tactic'] = $tactic }
+    $entry
 })
 [ordered]@{
     name        = "IR Toolkit - $IncidentId"
-    versions    = [ordered]@{ attack = '14'; navigator = '4.9'; layer = '4.5' }
+    versions    = [ordered]@{ attack = '19'; navigator = '4.9'; layer = '4.5' }
     domain      = 'enterprise-attack'
     description = "ATT&CK techniques observed during $IncidentId on $HostName. Generated $(((Get-Date).ToUniversalTime().ToString('s')) + 'Z')."
-    filters     = [ordered]@{ platforms = @('Windows','Linux','macOS','Cloud') }
+    filters     = [ordered]@{ platforms = @('Windows','Linux','macOS') }
     sorting     = 0
-    layout      = [ordered]@{ layout = 'side'; aggregateFunction = 'average'; showID = $true; showName = $true; showAggregateScores = $false; countUnscored = $false }
+    layout      = [ordered]@{ layout = 'side' }
     hideDisabled = $false
     techniques  = $navTechniques
-    gradient    = [ordered]@{ colors = @('#ff6666','#ffe766','#8ec843'); minValue = 0; maxValue = 1 }
-    legendItems = @()
+    gradient    = [ordered]@{ colors = @('#ff6666','#ffcc66','#66cc66'); minValue = 0; maxValue = 100 }
     metadata    = @()
     links       = @()
     showTacticRowBackground = $false
@@ -445,24 +493,29 @@ foreach ($pid_ in $byPid.Keys) {
     if ($injSig.Count)  { $score += 3; [void]$reasons.Add("co-occurs with injection evidence ($($injSig -join ', '))") }
     if ($otherStrong.Count) { $score += 1; [void]$reasons.Add("co-occurs with $($otherStrong -join ', ')") }
     $isTp = ($score -ge 3)
+    # Demote: score=0 + single generic rule + no named family + no other signals
+    # -> pivot lead only (visible in footer note + CSV), not a ## PID section in main report
+    $demote = ($score -eq 0 -and $rules.Count -eq 1 -and $named.Count -eq 0 -and $signals.Count -eq 0)
     $pvSev = ($group | ForEach-Object { Field $_ @('Severity') } | Where-Object { $_ } |
             Sort-Object { $sevRank[$_] } | Select-Object -First 1)
     if (-not $pvSev) { $pvSev = 'High' }
     [void]$pivots.Add([pscustomobject]@{
         Pid = $pid_; Proc = $proc; Rules = $rules; Named = $named; Signals = $signals;
-        Severity = $pvSev; Score = $score; Reasons = $reasons; TruePositive = $isTp
+        Severity = $pvSev; Score = $score; Reasons = $reasons; TruePositive = $isTp; Demoted = $demote
     })
 }
 if ($pivots.Count) {
     $pivots = @($pivots | Sort-Object @{E={if($_.TruePositive){0}else{1}}}, @{E={-$_.Score}}, @{E={$sevRank[$_.Severity]}})
-    $tps = @($pivots | Where-Object { $_.TruePositive })
+    $tps      = @($pivots | Where-Object { $_.TruePositive })
+    $demoted  = @($pivots | Where-Object { $_.Demoted })
+    $mainPivots = @($pivots | Where-Object { -not $_.Demoted })
     $yp = [System.Collections.Generic.List[string]]::new()
     $yp.Add("# Memory YARA - Hit Pivot & Eradication Scope - $HostName"); $yp.Add("")
     $yp.Add("**Incident:** $IncidentId * **Host:** $HostName * **Generated:** $(Get-Date -Format 'yyyy-MM-dd')"); $yp.Add("")
     $yp.Add("$($pivots.Count) process(es) with a memory YARA hit * **$($tps.Count) true-positive-class** (review/eradicate first)."); $yp.Add("")
-    $yp.Add("> Ranked by **true-positive confidence** from hit quality - a named malware/APT-family signature, multiple distinct rules on one PID, or a hit in injected/unbacked memory each raise it; a lone generic/LOLBin rule (even alongside a path-spoof, which is FP-prone) stays *investigate*. **Nothing is suppressed** - lower-confidence hits are ranked below, not hidden."); $yp.Add("")
+    $yp.Add("> Ranked by **true-positive confidence** from hit quality - a named malware/APT-family signature, multiple distinct rules on one PID, or a hit in injected/unbacked memory each raise it; a lone generic/LOLBin rule (even alongside a path-spoof, which is FP-prone) stays *investigate*. **Nothing is suppressed** - lower-confidence hits are ranked below, not hidden. Single-generic-rule PIDs with no corroborating signals are demoted to pivot leads only (see footer)."); $yp.Add("")
     $yp.Add("---"); $yp.Add("")
-    foreach ($p in $pivots) {
+    foreach ($p in $mainPivots) {
         $tag = if ($p.TruePositive) { " - **Likely True Positive**" } else { " - _investigate_" }
         $title = "PID $($p.Pid)" + $(if ($p.Proc) { " ($($p.Proc))" } else { "" })
         $yp.Add("## $title$tag"); $yp.Add("")
@@ -489,6 +542,16 @@ if ($pivots.Count) {
             $yp.Add("**Eradication scope - enrich this PID:** pull handles (dropped files, registry persistence, mutexes, named pipes), loaded/injected modules, network endpoints (C2 to block), process lineage, and carve the matched region for offline C2-config extraction. See ``Memory_Enrichment_*.json`` for this PID's full footprint."); $yp.Add("")
         }
         $yp.Add("---"); $yp.Add("")
+    }
+    if ($demoted.Count) {
+        $yp.Add("---"); $yp.Add("")
+        $yp.Add("**$($demoted.Count) PID(s) with a single generic rule and no corroborating signals are in Adjudication_PivotLeads CSV only** (score=0, demoted from main report body). Review only if they corroborate a finding above."); $yp.Add("")
+        $yp.Add("| PID | Process | Rule |"); $yp.Add("|---|---|---|")
+        foreach ($p in $demoted) {
+            $ruleList = if ($p.Rules.Count) { ($p.Rules | ForEach-Object { "``$_``" }) -join ', ' } else { '(unparsed)' }
+            $yp.Add("| $($p.Pid) | $($p.Proc) | $ruleList |")
+        }
+        $yp.Add("")
     }
     $yp.Add("_Hit-context detail (region / perms / backing path / matched strings) is in ``Memory_Findings_*.json``; per-PID clustering is also summarized in ``Incident_Report.md`` section 5._"); $yp.Add("")
     $yp -join "`n" | Out-File -FilePath (Join-Path $HostFolder 'YARA_Pivot_Report.md') -Encoding UTF8

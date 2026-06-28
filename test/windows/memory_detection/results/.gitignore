@@ -1,0 +1,6 @@
+# Ignore live-test output JSON and logs -- these are machine-local.
+# Baseline files committed explicitly with: git add -f results/baseline/*.json
+*.json
+*.log
+!baseline/
+!.gitignore

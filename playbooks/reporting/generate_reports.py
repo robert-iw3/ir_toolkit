@@ -113,8 +113,13 @@ ENDPOINT = re.compile(
 
 def extract_c2_endpoint(finding):
     """Pull a plain C2 endpoint (IP/host[:port]) from a C2-typed finding. Used by
-    the cloud workflow, where C2 IOCs arrive as addresses rather than RAT relays."""
+    the cloud workflow, where C2 IOCs arrive as addresses rather than RAT relays.
+    Memory-forensic findings are excluded: their Type carries '(Memory)' and their
+    Target is always a PID/region reference, never a network address. C2 IOCs for
+    memory findings are recovered by memory_enrich.py from the enrichment JSON."""
     ftype = get(finding, "Type")
+    if "(Memory)" in ftype:
+        return None
     if not C2_TYPE.search(ftype):
         return None
     blob = " ".join([get(finding, "Details"), get(finding, "Target"),

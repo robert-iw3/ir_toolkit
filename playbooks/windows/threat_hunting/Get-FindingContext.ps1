@@ -65,9 +65,18 @@ $Data = @{}
 $zip  = Get-ChildItem -Path $HostFolder -Filter 'forensics-*.zip' -File -ErrorAction SilentlyContinue |
         Sort-Object LastWriteTime -Descending | Select-Object -First 1
 $rawDir = $null
+$cleanupRawDir = $false
 if ($zip) {
     $rawDir = Join-Path ([System.IO.Path]::GetTempPath()) ("fctx_" + [guid]::NewGuid().ToString('N'))
     Expand-Archive -LiteralPath $zip.FullName -DestinationPath $rawDir -Force
+    $cleanupRawDir = $true
+} else {
+    # Unzipped forensics folder (present when collection ran without zip bundling)
+    $forensicsDir = Get-ChildItem -Path $HostFolder -Filter 'forensics-*' -Directory -ErrorAction SilentlyContinue |
+                    Sort-Object LastWriteTime -Descending | Select-Object -First 1
+    if ($forensicsDir) { $rawDir = $forensicsDir.FullName }
+}
+if ($rawDir) {
     $csvRoot = Get-ChildItem -Path $rawDir -Directory | Select-Object -First 1
     if (-not $csvRoot) { $csvRoot = Get-Item $rawDir }
     foreach ($csv in Get-ChildItem -Path $csvRoot.FullName -Filter '*.csv' -File) {
@@ -326,15 +335,32 @@ $results = foreach ($f in $findings) {
     $badSig   = ($file.SigStatus -and $file.SigStatus -notin @('Valid','UnknownError','NotSigned'))
     $trusted  = ($file.Trust -eq 'Trusted-Location')
     $writable = ($file.Trust -eq 'User-Writable')
-    $missing  = ($Live -and $file.Exists -eq $false -and $subjectPath)
+    $hasAbsPath = ($subjectPath -match '^[A-Za-z]:\\|^\\')
+    $missing  = ($Live -and $file.Exists -eq $false -and $subjectPath -and $hasAbsPath)
     $hasCo    = [bool]$file.Company
 
     $verdict='Indeterminate'; $conf='Low'
+    $yaraMemEarlyExit = $false
+    $isYaraMemType = ($f.Type -in @('YARA Match (Memory)', 'Injected Code (memory YARA)'))
+    if ($isYaraMemType) {
+        if ($f.Details -match 'file-backed') {
+            $verdict = 'Indeterminate'; $conf = 'Low'
+            $notes.Add('YARA hit on file-backed mapped DLL -- fires on any process loading this library; not injection evidence into anonymous/injected memory')
+            $yaraMemEarlyExit = $true
+        } elseif ($f.Details -match '\banon\b' -and $f.Details -notmatch '\banon\s+\S*[Xx]') {
+            $verdict = 'Indeterminate'; $conf = 'Low'
+            $notes.Add('YARA hit on non-executable anonymous memory (heap or data) -- strings matched in process heap/data; not executable code injection evidence')
+            $yaraMemEarlyExit = $true
+        }
+    }
+    if (-not $yaraMemEarlyExit) {
     if ($Live -and $file.Exists) {
-        # False Positive ONLY when validly signed AND in a system/vendor-installed trusted location.
-        # A valid signature in a user-writable path (Temp, AppData) is NOT a clearance -
-        # signed malware, stolen certs, and living-off-the-land tools all have valid sigs.
-        if ($valid -and $trusted)        { $verdict='False Positive';        $conf='High' }
+        # False Positive requires: valid signature AND trusted location AND no external network activity.
+        # A binary that is validly signed, in a trusted path, but making public internet connections
+        # cannot be cleared -- stolen/compromised certs (3CX, SolarWinds) pass the first two checks
+        # while actively beaconing C2.
+        if ($valid -and $trusted -and -not $publicNet) { $verdict='False Positive';        $conf='High' }
+        elseif ($valid -and $trusted)    { $verdict='Likely False Positive'; $conf='Medium'; $notes.Add('valid cert and trusted path but public network activity observed -- stolen or compromised cert cannot be ruled out (3CX/SolarWinds-style supply chain)') }
         elseif ($valid -and $writable)   { $verdict='Indeterminate';         $conf='Medium'; $notes.Add('signed but in user-writable path - valid cert does not clear staging in Temp/AppData') }
         elseif ($valid)                  { $verdict='Likely False Positive'; $conf='Medium' }
         elseif ($badSig -and ($writable -or $publicNet)) { $verdict='True Positive'; $conf='High' }
@@ -349,6 +375,7 @@ $results = foreach ($f in $findings) {
         elseif ($trusted)                { $verdict='Likely False Positive'; $conf='Low' }
         elseif ($writable -or $publicNet){ $verdict='Likely True Positive';  $conf='Medium' }
     }
+    } # end if (-not $yaraMemEarlyExit)
     if ($publicNet) { $notes.Add('external network egress observed') }
     if ($net.Count) { $notes.Add('net: ' + ($net -join '; ')) }
     if (-not $pivots.Count) { $notes.Add('no artifact resolved from this finding') }
@@ -365,6 +392,17 @@ $results = foreach ($f in $findings) {
         }
     }
 
+    # ----- MSIX/WindowsApps: per-file Authenticode is not meaningful -------
+    # OS validates MSIX package integrity at the package level during install.
+    # Individual DLLs inside WindowsApps/SystemApps return NotSigned per-file by design.
+    # unsigned-per-file is expected and not injection evidence in this path class.
+    if ($f.Type -eq 'Suspicious Injected DLL' -and $f.Details -match 'MSIX/Store package-signed path') {
+        if ($verdict -notin @('False Positive','Likely False Positive')) {
+            $verdict = 'Likely False Positive'; $conf = 'Medium'
+            $notes.Add('ADJUSTED: DLL in MSIX/Store package path -- OS validates package signature at install, not per-file Authenticode; unsigned-per-file is expected and not injection evidence in this path class. WindowsApps and SystemApps DLLs are package-signed.')
+        }
+    }
+
     # ----- override: a valid signature does NOT clear remote-access tooling or
     # LOLBins. These are the abuse vectors (T1219 / T1218) and are signed by design.
     $subjName = if ($subjectPath) { Split-Path -Leaf $subjectPath } else { '' }
@@ -374,7 +412,7 @@ $results = foreach ($f in $findings) {
     # executable regions and unbacked threads as a normal consequence of JIT compilation.
     # A Shellcode Thread or Injected Memory Region finding against one of these is a
     # strong FP candidate unless corroborated by other evidence (see cross-finding pass).
-    $JitHostPattern = '(?i)(acrobat|acrord32|acrocef|acrobatnotif|acrocef|msedge|chrome|chromium|firefox|brave|opera|vivaldi|msedgewebview2|webview2|java|javaw|javaws|node|electron|code|rider|idea|pycharm|clion|goland|webstorm|phpstorm|datagrip|rubymine|applesimulator)\.exe$'
+    $JitHostPattern = '(?i)\b(acrobatnotific|acrobatnotif|acrocef|acrord32|acrobat|msedgewebview2|msedge|chromium|chrome|firefox|brave|opera|vivaldi|webview2|smartscreen|java|javaw|javaws|node|electron|code|rider|idea|pycharm|clion|goland|webstorm|phpstorm|datagrip|rubymine|pwsh|dotnet)(\.exe)?(?=\W|$)'
     $isJitType  = ($f.Type -match '(?i)Shellcode Thread|Injected Memory Region')
     $isJitHost  = ($subjName -match $JitHostPattern) -or
                   (("$($f.Target) $($f.Details)") -match $JitHostPattern)
@@ -407,14 +445,15 @@ $results = foreach ($f in $findings) {
         }
     }
 
-    # ----- JIT-host cap: JIT runtimes produce private exec regions by design ------
-    # Chrome, Edge, Java, Electron, JetBrains IDEs, etc. JIT-compile into anonymous
-    # executable pages. A Shellcode Thread or Injected Memory Region finding against
-    # one of these hosts is almost always a false positive unless hard evidence
-    # corroborates it (the cross-finding pass below may escalate it back).
-    if ($isJitType -and $isJitHost -and $verdict -in 'Likely True Positive','True Positive') {
-        $verdict = 'Indeterminate'; $conf = 'Low'
-        $notes.Add('CAPPED: JIT-host process (browser/JVM/Electron/IDE) - private executable regions are expected from JIT compilation; verdict will be escalated if corroborating evidence exists for this PID')
+    # ----- JIT-host annotation (no verdict change) --------------------------------
+    # Chrome, Edge, Acrobat, JVM, Electron and similar runtimes produce legitimate
+    # anonymous executable pages from JIT compilation -- this is also the reason
+    # attackers inject into them (T1055): many tools exempt these processes. The
+    # toolkit never downgrades findings based on process identity. The annotation
+    # below surfaces the JIT context for the analyst without suppressing the signal;
+    # named-malware YARA corroboration (cross-finding pass) will escalate to TP.
+    if ($isJitType -and $isJitHost) {
+        $notes.Add('JIT-host process -- legitimate JIT code produces anonymous executable regions; attackers inject here specifically because tools exempt these binaries (T1055); verify thread/region address against JIT heap range and corroborate with YARA or hook evidence before dismissing')
     }
 
     # ----- clearance: IR Toolkit's own staged tools are known-good ---------------
@@ -500,17 +539,29 @@ $softTypes = @('Shellcode Thread (Memory)', 'Injected Memory Region')
 $hardTypes = @('Inline API Hook (Memory)', 'Manually-Mapped PE (Memory)', 'YARA Match', 'YARA Match (Memory)',
                'Injected Code (memory YARA)', 'Module Stomping Indicator (Memory)')
 
+# Cross-finding corroboration: only YARA hits against anonymous or injected memory count
+# as hard evidence. Hits on file-backed mapped DLLs (e.g., SHLWAPI.dll, CRYPT32.dll)
+# fire on any process that loads those libraries -- they cannot distinguish code injection
+# from normal Windows execution, regardless of which process is involved.
 foreach ($pidKey in $byPid.Keys) {
     $group = $byPid[$pidKey]
     $hasSoft = $group | Where-Object { $_.Type -in $softTypes }
     $hasHard = $group | Where-Object { $_.Type -in $hardTypes }
     if (-not $hasSoft -or -not $hasHard) { continue }
+
+    $yaraTypes = 'YARA Match','YARA Match (Memory)','Injected Code (memory YARA)'
+    $effectiveHard = @($hasHard | Where-Object {
+        if ($_.Type -notin $yaraTypes) { return $true }
+        $_.Details -notmatch 'file-backed'
+    })
+    if (-not $effectiveHard) { continue }
+
     foreach ($r in $hasSoft) {
         if ($r.Verdict -ne 'Indeterminate') { continue }
         $r.Verdict    = 'True Positive'
         $r.Confidence = 'High'
-        $hardEvidence = ($hasHard | Select-Object -ExpandProperty Type | Select-Object -Unique) -join ', '
-        $corrobNote   = "CORROBORATED: hard evidence ($hardEvidence) found for same PID - confidence escalated to High"
+        $hardEvidence = ($effectiveHard | Select-Object -ExpandProperty Type | Select-Object -Unique) -join ', '
+        $corrobNote   = "CORROBORATED: hard evidence ($hardEvidence) in anonymous/injected memory for same PID - confidence escalated to High"
         if ($r.Notes) { $r.Notes = "$($r.Notes); $corrobNote" } else { $r.Notes = $corrobNote }
     }
 }
@@ -634,7 +685,7 @@ foreach ($e in $tpResults | Sort-Object @{E={$order[$_.Verdict]}}, Type) {
     $md.Add("")
 }
 $md -join "`n" | Set-Content -LiteralPath $mdOut -Encoding UTF8
-if ($rawDir -and (Test-Path $rawDir)) { Remove-Item $rawDir -Recurse -Force -ErrorAction SilentlyContinue }
+if ($cleanupRawDir -and $rawDir -and (Test-Path $rawDir)) { Remove-Item $rawDir -Recurse -Force -ErrorAction SilentlyContinue }
 
 Write-Host "`n=== Adjudication summary ===" -ForegroundColor Green
 $results | Group-Object Verdict | Sort-Object { $order[$_.Name] } |

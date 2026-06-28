@@ -56,11 +56,36 @@ also support an **offline** mode against mounted hives / captured images.
 | Script | Purpose |
 | :--- | :--- |
 | **Analyze-Memory.ps1** | Orchestrator. Runs offline memory analysis on a captured `.raw` / `.mem` / `.aff4` image on the **analyst** machine and emits findings in the canonical schema. |
-| **memory_forensic.py** | Core engine (MemProcFS API). Detects LOLBin cmdlines, hidden/DKOM processes, injected executable VADs, shellcode threads, parent-child & path-spoof anomalies, external C2, credential tooling, suspicious binds, and BYOVD drivers. |
+| **memory_forensic.py** | Core engine (MemProcFS API). 19-module detection pipeline spanning live-host and sleep-masked TTPs. See **Memory detection modules** table below. |
 | **memory_yara.py / memory_yara_worker.py** | YARA scan of process memory. The worker runs as an isolated subprocess so a native scanner crash on a pathological process cannot kill the analysis; a DOS-stub canary rule verifies the engine actually inspected memory. |
 | **memory_enrich.py** | Per-true-positive footprint extractor for eradication scope: handles (dropped files, persistence, mutexes, pipes), modules, C2 endpoints, process lineage, and the carved injected region with recovered IOCs. |
 
-> Memory tooling requires staged binaries (`vol.exe` / MemProcFS / YARA) — see the
+#### Memory detection modules
+
+| # | Module | Detection | MITRE |
+|:--|:-------|:----------|:------|
+| 1 | LOLBin cmdlines | Encoded commands, IEX, WebClient downloads, `-WindowStyle Hidden` | T1059.001, T1027 |
+| 2 | Hidden processes | DKOM / PEB-unlink artifacts via vmmpyc state field | T1014, T1055 |
+| 3 | Injected memory | Private executable VAD (no backing image); PE hollowing (zeroed TimeDateStamp / CheckSum / SizeOfImage) | T1055, T1055.012 |
+| 4 | External network | Established / listening connections to non-RFC1918 IPs | T1071, T1021 |
+| 5 | Shellcode threads | User-mode threads with start address outside all loaded modules; JIT-host threads annotated for corroboration (attack surface overlaps with JMP-AMSI / reflective injection) | T1055.003 |
+| 5b | Manual-map / stomping | MZ magic in anonymous exec region; image-backed VAD with explicit RWX protection | T1055.004, T1055.001 |
+| 6 | Parent-child anomalies | High-risk children (cmd, powershell, mshta, rundll32...) from unexpected parents | T1059, T1204 |
+| 7 | Process path spoofing | System binary running from non-System32 path | T1036.005 |
+| 8 | Offensive tooling | Mimikatz, Cobalt Strike, Metasploit, BloodHound, PsExec patterns | T1588, T1059 |
+| 9 | Suspicious listeners | User processes listening on ports ≥ 1024 on non-loopback interfaces | T1071, T1571 |
+| 10 | Kernel drivers | BYOVD-class driver names (RTCore64, WinRing0, cpuz, GDRV...) | T1068, T1543.003 |
+| 11 | Registry Run persistence | LOLBin commands in live HKLM/HKCU Run keys | T1547.001 |
+| 12 | ntdll stub integrity | Syscall stubs where the `mov r10,rcx` preamble is replaced with a jump/hook (SysWhispers, HellsGate, EDR hook bypass) | T1106, T1562, T1055 |
+| 13 | Dormant beacon / W^X | High-entropy private RW regions — the hallmark of a sleep-masked beacon at rest. Reports byte-distribution CV%, adjacent exec presence, MZ remnant, and first-16-byte hex for triage | T1027, T1055, T1027.013 |
+| 14 | Thread-pool / Ekko | ntdll thread-pool workers in a process that also has a High-severity beacon region — the Ekko / Foliage sleep-obfuscation pattern | T1055.004, T1106 |
+| 15 | PEB cmdline pointer | `PEB.ProcessParameters→CommandLine.Buffer` falls outside all mapped VADs — Argue-style post-launch PEB tamper | T1055.012, T1036 |
+| 16 | CLR execute-assembly | ECMA-335 `BSJB` CLI metadata signature in private exec region of a non-managed host process (Donut / execute-assembly) | T1620, T1055 |
+| 17 | PPID orphan / spoof | Parent PID absent from process list, or parent timestamp later than child (forged via `PROC_THREAD_ATTRIBUTE_PARENT_PROCESS`) | T1134.004, T1134 |
+| 18 | COM VTable hijacking | Image-backed data section containing pointer(s) that resolve into anonymous executable region(s) | T1574, T1055 |
+| 19 | YARA memory scan | Staged rule sets scanned per-process in a crash-isolated subprocess; canary rule verifies scanner actually read process memory | T1055, T1027 |
+
+> Memory tooling requires staged binaries (MemProcFS / YARA) — see the
 > header of `Analyze-Memory.ps1` for `Build-OfflineToolkit.ps1` staging flags.
 
 ---

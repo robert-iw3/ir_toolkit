@@ -219,10 +219,11 @@ def defang(s):
 
 
 def region_is_injected(vad_type, protection):
-    """An injected/unbacked executable region: NOT an Image/File-backed VAD (its type is blank or
-    pagefile-backed 'Pf') AND executable. This is where reflective/injected code lives."""
+    """An injected/unbacked executable region: NOT an Image/File/Mapped-backed VAD AND executable.
+    'Mapped' sections are file-section views (CreateFileMapping); treating them as unbacked would
+    flag legitimate RX mapped files as injected. Consistent with the YARA worker's _addr_context."""
     t = str(vad_type or "").strip().lower()
-    backed = t.startswith("image") or t.startswith("file")
+    backed = t.startswith("image") or t.startswith("file") or t.startswith("mapped")
     return (not backed) and ("x" in str(protection or "").lower())
 
 
@@ -242,7 +243,7 @@ def classify_handle(htype, tag):
         return ("registry", name, bool(_PERSIST_KEY_RE.search(name)))
     if htype == "Mutant":
         return ("mutex", tag, is_suspicious_object_name(tag))
-    if htype in ("ALPC Port",) or "pipe" in tag.lower():
+    if htype == "ALPC Port" or (htype == "File" and "\\pipe\\" in tag.lower()):
         return ("pipe", tag, False)
     if htype == "Section":
         return ("section", tag, is_suspicious_object_name(tag))
@@ -845,9 +846,9 @@ def enrich_pid(vmm, p, pid_map, nets_by_pid, carve_dir, size_cap=16 * 1024 * 102
         if not region_is_injected(v.get("type"), v.get("protection")):
             continue
         start, end = int(v["start"]), int(v["end"])
-        size = min(end - start, size_cap)
+        size = min(end - start + 1, size_cap)   # vmmpyc 'end' is inclusive
         backed = any(b <= start < e for b, e, _ in mod_ranges)
-        rec = {"start": hex(start), "end": hex(end), "size": end - start,
+        rec = {"start": hex(start), "end": hex(end), "size": end - start + 1,
                "protection": str(v.get("protection", "")), "backed": backed, "carved_to": None}
         data = _safe(lambda: p.memory.read(start, size), b"")
         if data:
@@ -904,7 +905,7 @@ def enrich_pid(vmm, p, pid_map, nets_by_pid, carve_dir, size_cap=16 * 1024 * 102
         if backed or "r" not in prot.lower():           # private, readable (an empty read is skipped)
             continue
         start, end = int(v["start"]), int(v["end"])
-        data = _safe(lambda: p.memory.read(start, min(end - start, 32 * 1024 * 1024)), b"")
+        data = _safe(lambda: p.memory.read(start, min(end - start + 1, 32 * 1024 * 1024)), b"")
         if not data:
             continue
         total_read += len(data)
@@ -1278,7 +1279,7 @@ def merge_into_iocs(out_dir, bundle):
         if (host, 0) not in have:
             ioc["c2_endpoints"].append({"host": host, "port": 0, "sanctioned": False,
                                         "session_id": None, "instance_id": None, "source": "memory",
-                                        "country": (country_of_ip(host) or None)})   # offline geo, IPs
+                                        "country": (country_of_ip(host) if _ip_to_int(host) is not None else None)})
             have.add((host, 0))
     ioc["memory_eradication"] = erad
     with open(iocs_path, "w", encoding="utf-8") as fh:

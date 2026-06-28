@@ -815,6 +815,7 @@ if ($Adjudicate) {
         $prevCombined = Get-ChildItem -Path $OutputDir -Filter 'Combined_Findings_*.json' -File -ErrorAction SilentlyContinue |
                         Sort-Object LastWriteTime -Descending | Select-Object -First 1
         $existing = if ($prevCombined) { Import-MemoryFindings -Path $prevCombined.FullName } else { @() }
+        $existing = @($existing | Where-Object { $_.Type -notmatch '(?i)\(Memory\)|^Injected Memory Region$|memory YARA' })
         $merged = Merge-FindingSets $existing $memFindings
         $combinedOut = Join-Path $OutputDir "Combined_Findings_$RunStamp.json"
         ConvertTo-FindingsJson $merged | Out-File -FilePath $combinedOut -Encoding UTF8
@@ -829,6 +830,28 @@ if ($Adjudicate) {
             Write-Log "  Regenerating reports (Incident_Report, Attack_Graph, IOCs, Principals) ..." 'Cyan'
             & $reportScript -HostFolder $OutputDir
             Write-Log "  Reports updated with memory findings." 'Green'
+
+            # Stamp final TP count into _status.json so the collection summary reflects
+            # memory adjudication results (the collection phase writes tp_count=0 before
+            # memory analysis runs; this overwrites it with the actual post-analysis count).
+            $statusFile = Get-ChildItem -Path $OutputDir -Filter '_status.json' -File -ErrorAction SilentlyContinue |
+                          Select-Object -First 1
+            if ($statusFile) {
+                try {
+                    $adjJson = Get-ChildItem -Path $OutputDir -Filter 'Adjudication_*.json' -File -ErrorAction SilentlyContinue |
+                               Sort-Object LastWriteTime -Descending | Select-Object -First 1
+                    if ($adjJson) {
+                        $adjData = Get-Content -LiteralPath $adjJson.FullName -Raw | ConvertFrom-Json
+                        $tpCount = @($adjData | Where-Object { $_.Verdict -in @('True Positive','Likely True Positive') }).Count
+                        $status  = Get-Content -LiteralPath $statusFile.FullName -Raw | ConvertFrom-Json
+                        $status.tp_count = $tpCount
+                        $status | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $statusFile.FullName -Encoding UTF8
+                        Write-Log "  Updated _status.json: tp_count=$tpCount" 'Green'
+                    }
+                } catch {
+                    Write-Log "  Could not update _status.json: $($_.Exception.Message)" 'Yellow'
+                }
+            }
         } else {
             Write-Log "  Report generator not found at $reportScript - reports not regenerated." 'Yellow'
         }

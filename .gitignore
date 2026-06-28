@@ -38,3 +38,6 @@ PesterCoverage.xml
 *.swp
 .DS_Store
 Thumbs.db
+
+# -- Archive / pre-edit backups -----------------------------------------------
+archive/

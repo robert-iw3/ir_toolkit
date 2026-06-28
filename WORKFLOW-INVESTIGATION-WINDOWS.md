@@ -129,34 +129,100 @@ tell you its **behaviour** and give you the strongest hunt pivots:
 
 ---
 
-## Step 4 - read the YARA hits into verdicts
+## Step 4 - work the YARA Pivot Report from top to bottom
 
-The pivot ranks memory YARA hits; you confirm each from the **matched string + region** (full rule
-logic in [WORKFLOW-YARA.md](WORKFLOW-YARA.md)). On this image, **104 matches across 102 processes**
-collapsed to a handful of real implants once read in context:
+Open `YARA_Pivot_Report.md` before anything else. The report does the initial collapse for you: it
+ranked all YARA-hit processes by **true-positive confidence** and separated them into tiers. In the
+test case this image produced **104 processes with at least one YARA hit**. After confidence scoring,
+**10 were true-positive-class** — the other 94 were noise from one generic rule firing file-backed on
+signed system DLLs (see below).
 
-**The true positives - family-specific rules firing in ANONYMOUS (unbacked) memory:**
+### Confidence tiers (how the pivot report ranks them)
 
-| Hit (rule) | Process | The matched string the tool surfaced | Verdict |
-|---|---|---|---|
-| `REDLEAVES_CoreImplant_UniqueStrings` | shell host | `red_autumnal_leaves_dllmain.dll` + RTTI `CmdRedirector` / `MappingSlave` / `GHttp` / `SIComm` | **Confirmed** - APT10 RedLeaves core implant |
-| `WiltedTulip_Windows_UM_Task` | service host | `svchost64.swp",checkUpdate` (payload + export), `Msfpayloads_msf_5` adjacent | **Confirmed** - scheduled-task persistence, Metasploit-built |
-| `CoinMiner_Strings` | browser webview | `stratum+tcp://<pool>:7333 -u <wallet> -p x`, `Vidar.AM` adjacent | **Confirmed** - coinminer **+** Vidar stealer |
+| Tier | Label | What drives it |
+|:-----|:------|:---------------|
+| >= 6 | Likely True Positive | Named family rule AND co-occurring injection evidence (shellcode thread, injected exec region) |
+| 4-5 | Likely True Positive | Named family rule alone, OR 3+ distinct rules on one PID |
+| 3 | Likely True Positive | Generic rule that co-occurs with injection evidence from another module |
+| 0 | Investigate | Lone generic rule only, no supporting injection evidence |
 
-**The noise - the SAME rule, FILE-BACKED on signed DLLs:** ~100 `LOLBin_BITS_Drop` hits, nearly all
-file-backed on Microsoft/vendor-signed system DLLs (`shlwapi.dll`, `zlib1.dll`, `CRYPT32.dll`) - the
-rule's strings live inside libraries that load everywhere. Verify the signature and the cluster clears
-as false positive.
+Work the list from the top. Do not process investigate-tier PIDs until all Likely-TP PIDs are resolved.
 
-> **The lesson:** the matched **string + region** is the discriminator, not the rule name or a capa
-> result. A family rule in **unbacked** memory is a true positive; the same rule **file-backed on a
-> signed DLL** is a graze.
+### The true positives from this run
+
+Full rule logic is in [WORKFLOW-YARA.md](WORKFLOW-YARA.md). The discriminator each time is
+**matched string + region type**, not the rule name alone.
+
+**Highest confidence - named family rule AND injection evidence (Confidence 6):**
+
+| PID | Process | Rule | Co-occurring signal | Matched evidence |
+|:----|:--------|:-----|:--------------------|:-----------------|
+| 13816 | msedgewebview2 | `CoinMiner_Strings` | 16 shellcode threads, all starting at same address | `stratum+tcp://<pool>:7333 -u <wallet> -p x`, `Vidar.AM` adjacent in anon exec region |
+
+16 threads all starting at the same address means that address is the implant's thread entry point.
+The identical address across all threads is what eliminates JIT coincidence — legitimate JIT stubs do
+not produce 16 threads with the identical start address; an injected dispatch stub does.
+
+**Named APT/malware family rule (Confidence 4-5):**
+
+| PID | Process | Rule(s) | Matched evidence | Verdict |
+|:----|:--------|:--------|:-----------------|:--------|
+| 13680 | shell experience host | `REDLEAVES_CoreImplant_UniqueStrings`, `LOLBin_Mshta_Scriptlet`, `LOLBin_BITS_Drop` | `red_autumnal_leaves_dllmain.dll` + RTTI `CmdRedirector` / `MappingSlave` / `GHttp` / `SIComm` in anon region | **Confirmed** - APT10 RedLeaves core implant |
+| 3464 | svchost.exe | `WiltedTulip_Windows_UM_Task` | `svchost64.swp",checkUpdate` (payload + export), `Msfpayloads_msf_5` adjacent | **Confirmed** - scheduled-task persistence, Metasploit-built |
+
+Three distinct rules corroborating PID 13680 is near-certain even before reading the matched strings.
+`REDLEAVES_CoreImplant_UniqueStrings` was written on confirmed APT10 samples — it does not FP on
+legitimate Windows code.
+
+**Generic rule elevated by injection evidence (Confidence 3):**
+
+| PID | Process | Rule | Co-occurring injection evidence |
+|:----|:--------|:-----|:-------------------------------|
+| 2532 | sihost.exe | `LOLBin_BITS_Drop` | 2 x private anonymous exec VADs (Module 3) |
+| 2536 | OneDrive.Sync | `LOLBin_BITS_Drop` | 2 x private anonymous exec VADs + PPID spoof (Module 17) |
+| 3776 | StartMenuExperienceHost | `LOLBin_BITS_Drop` | 2 x private anonymous exec VADs |
+| 3932 | OneApp.IGCC.WinService | `LOLBin_BITS_Drop` | 4 x private anonymous exec VADs |
+| 3956 | IgoAudioService | `LOLBin_BITS_Drop` | 4 x private anonymous exec VADs |
+| 4012 | IntelAudioService | `LOLBin_BITS_Drop` | 5 x private anonymous exec VADs |
+| 5740 | SearchHost.exe | `LOLBin_BITS_Drop` | 2 x private anonymous exec VADs |
+
+`LOLBin_BITS_Drop` alone is noise (see below). These seven PIDs are actionable because each has
+private anonymous exec VADs from Module 3 — executable memory with no backing file. The YARA rule
+matching BITS strings inside that anonymous region means the injected shellcode called into BITS, not
+that the legitimate binary did.
+
+### The noise - same rule, file-backed on signed DLLs
+
+The remaining 94 investigate-tier entries are all `LOLBin_BITS_Drop` hitting processes with
+**no co-occurring injection evidence**. In every case the match is **file-backed** on a
+Microsoft-signed library (`shlwapi.dll`, `CRYPT32.dll`, `wintrust.dll`, `zlib1.dll`) — the rule's
+target strings are present in libraries that load into almost every Windows service process. Verify the
+signer with `Get-AuthenticodeSignature`; if it is Microsoft Windows, close as rule FP.
+
+> **The lesson:** the matched **string + region type** is the discriminator, not the rule name.
+> A family rule in **anonymous unbacked** memory is a true positive; the same rule **file-backed on a
+> signed DLL** is a graze. The YARA Pivot Report surfaces this distinction automatically in the
+> confidence tier — a lone generic rule stays at confidence 0 regardless of how many processes it hits.
 
 > **Why memory analysis is non-negotiable.** In this test case the responder had already taken
 > precautions *before* running the toolkit - the host was **isolated**, on-disk persistence was
 > **cleared** (scheduled tasks, autorun/Run keys, user AppData), and a **full offline AV scan came
 > back clean**. The implant was *still resident in RAM* and only the memory pass found it. Disk and AV
 > alone would have called this host clean.
+
+### Escalating confirmed PIDs to the enrichment pipeline
+
+Once a PID is confirmed true-positive-class from the pivot report:
+
+1. Run `memory_enrich.py` against the confirmed PID list (or use `Analyze-Memory.ps1 -Adjudicate`
+   which chains this automatically). This extracts per-PID footprint: dropped files, registry
+   persistence, mutexes, named pipes, loaded modules, C2 endpoints, and carves the injected region
+   for offline reverse-engineering.
+2. Output lands in `Memory_Enrichment_*.json` and is merged into `IOCs.json` with per-IP country
+   tags via the offline GeoIP database.
+3. Re-run `generate_reports.py` after enrichment to populate `Attack_Graph.md` with the confirmed
+   chain and produce an `Incident_Report.md` that separates TP findings from unadjudicated noise.
+4. The carved injected regions (`.bin` + sidecar) land in `tools\binja\data\` for deep RE if needed.
 
 ---
 
