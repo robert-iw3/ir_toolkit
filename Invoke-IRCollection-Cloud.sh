@@ -29,6 +29,8 @@ PROVIDER="aws"; TARGET=""; INCIDENT_ID=""; C2_IPS=""; C2_DOMAINS=""
 MGMT_IPS="10.0.0.0/8"; REGION="us-east-1"; CONTAIN=0; SKIP_REPORTS=0; SNAPSHOT_DISKS=0
 EVIDENCE_BUCKET=""; PROVISION_EVIDENCE=0; EVIDENCE_RETENTION_DAYS=365; EVIDENCE_CONTAINER="ir-evidence"
 LLM_REVIEW=0
+LOOKBACK_HOURS=168; WINDOW_START=""; WINDOW_END=""    # default look-back: 7 days
+ALL_REGIONS=0
 OUTPUT_ROOT="${SCRIPT_DIR}"
 
 while [[ $# -gt 0 ]]; do
@@ -40,6 +42,10 @@ while [[ $# -gt 0 ]]; do
         --c2-domains)   C2_DOMAINS="$2"; shift 2 ;;
         --mgmt-ips)     MGMT_IPS="$2"; shift 2 ;;
         --region)       REGION="$2"; shift 2 ;;
+        --lookback-hours) LOOKBACK_HOURS="$2"; shift 2 ;;             # incident window = now - N hours (default 168)
+        --window-start) WINDOW_START="$2"; shift 2 ;;                 # explicit ISO-8601 window start (overrides lookback)
+        --window-end)   WINDOW_END="$2"; shift 2 ;;                   # explicit ISO-8601 window end (default: now)
+        --all-regions)  ALL_REGIONS=1; shift ;;                       # AWS: sweep every enabled region, not just --region
         --contain)      CONTAIN=1; shift ;;
         --snapshot-disks) SNAPSHOT_DISKS=1; shift ;;               # acquire disk snapshots before eradication (billable)
         --evidence-bucket) EVIDENCE_BUCKET="$2"; shift 2 ;;        # upload collection to this S3/GCS bucket or Azure storage account
@@ -74,6 +80,8 @@ export IR_C2_IPS="$C2_IPS" IR_C2_DOMAINS="$C2_DOMAINS" IR_MGMT_IPS="$MGMT_IPS"
 export IR_AWS_REGION="$REGION" IR_AZURE_SUBSCRIPTION="${IR_AZURE_SUBSCRIPTION:-}"
 export IR_AZURE_RESOURCE_GROUP="${IR_AZURE_RESOURCE_GROUP:-}" IR_GCP_PROJECT="${IR_GCP_PROJECT:-}"
 export IR_SNAPSHOT_DISKS="$SNAPSHOT_DISKS"
+export IR_LOOKBACK_HOURS="$LOOKBACK_HOURS" IR_WINDOW_START="$WINDOW_START" IR_WINDOW_END="$WINDOW_END"
+export IR_ALL_REGIONS="$ALL_REGIONS"
 
 run_phase() {  # name, command...
     local name="$1"; shift
@@ -110,8 +118,10 @@ fi
 # --- Analysis: normalize provider telemetry + operator IOCs, adjudicate -------
 COMBINED="${OUT_DIR}/Combined_Findings_${RUN_STAMP}.json"
 ADJ_CLOUD="${CLOUD_DIR}/adjudicate_cloud.py"
+COVERAGE="${OUT_DIR}/Attack_Coverage_${RUN_STAMP}.md"
 run_phase "Adjudication" "$PY" "$ADJ_CLOUD" --forensics-dir "${OUT_DIR}/cloud_forensics" \
-    --out "$COMBINED" --provider "$PROVIDER" --c2-ips "$C2_IPS" --c2-domains "$C2_DOMAINS"
+    --out "$COMBINED" --provider "$PROVIDER" --c2-ips "$C2_IPS" --c2-domains "$C2_DOMAINS" \
+    --coverage-out "$COVERAGE"
 # Cloud findings already carry verdicts; expose them as the adjudication artifact too.
 cp -f "$COMBINED" "${OUT_DIR}/Adjudication_${RUN_STAMP}.json" 2>/dev/null || true
 log "  Findings -> $(basename "$COMBINED")"
@@ -121,6 +131,11 @@ BUILD_IOCS="${SCRIPT_DIR}/playbooks/reporting/build_iocs.py"
 EXTRACT_PRINC="${SCRIPT_DIR}/playbooks/reporting/extract_principals.py"
 [[ -f "$BUILD_IOCS" ]] && run_phase "IOCs" "$PY" "$BUILD_IOCS" --host-folder "$OUT_DIR" --incident-id "$INCIDENT_ID" --quiet
 [[ -f "$EXTRACT_PRINC" ]] && run_phase "Principals" "$PY" "$EXTRACT_PRINC" --host-folder "$OUT_DIR" --incident-id "$INCIDENT_ID" --quiet
+
+# --- Blast radius: what could each implicated principal reach? ----------------
+REACH_PY="${CLOUD_DIR}/principal_reachability.py"
+[[ -f "$REACH_PY" && -f "${OUT_DIR}/Principals.json" ]] && \
+    run_phase "BlastRadius" "$PY" "$REACH_PY" --host-folder "$OUT_DIR" --incident-id "$INCIDENT_ID" --quiet
 
 # --- Phase 5: automated reporting --------------------------------------------
 if [[ $SKIP_REPORTS -eq 0 && -f "$REPORT_PY" ]]; then

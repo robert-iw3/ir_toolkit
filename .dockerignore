@@ -30,6 +30,9 @@ Invoke-Eradication-Linux.sh
 
 # Tests, planning, and host-specific docs (not needed at runtime)
 test/
+# ...except the terraform-validate lab, whose Dockerfile COPYs its runner from here.
+!test/tf_validate
+!test/tf_validate/**
 planning/
 errors.txt
 WORK_TODO*.md

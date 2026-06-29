@@ -7,7 +7,7 @@ terraform {
   required_providers {
     azurerm = {
       source  = "hashicorp/azurerm"
-      version = ">= 3.70"
+      version = ">= 4.0"
     }
   }
 }
@@ -63,7 +63,7 @@ resource "azurerm_storage_container" "evidence" {
 
 # WORM: time-based immutability policy on the evidence container.
 resource "azurerm_storage_container_immutability_policy" "evidence" {
-  storage_container_resource_manager_id = azurerm_storage_container.evidence.resource_manager_id
+  storage_container_resource_manager_id = azurerm_storage_container.evidence.id
   immutability_period_in_days           = var.retention_days
   protected_append_writes_all_enabled   = true
 }

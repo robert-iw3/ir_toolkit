@@ -36,10 +36,28 @@ reverse_iam_revocations() {
                 if [[ "${DRY_RUN}" == "1" ]]; then log "[DRY-RUN] would detach ${b} from role ${a}"
                 else aws iam detach-role-policy --role-name "${a}" --policy-arn "${b}" 2>/dev/null \
                         && log "detached ${b} from role ${a}" || log "WARN: could not detach policy from ${a}"; fi ;;
+            iam_user_deny)        # a=user b=policy_arn -> detach
+                if [[ "${DRY_RUN}" == "1" ]]; then log "[DRY-RUN] would detach ${b} from user ${a}"
+                else aws iam detach-user-policy --user-name "${a}" --policy-arn "${b}" 2>/dev/null \
+                        && log "detached ${b} from user ${a}" || log "WARN: could not detach policy from ${a}"; fi ;;
+            iam_revoke_sessions)  # a=entity_type b=entity -> delete the IRRevokeOlderSessions inline policy
+                if [[ "${DRY_RUN}" == "1" ]]; then log "[DRY-RUN] would remove session-revoke policy from ${a} ${b}"
+                elif [[ "${a}" == "role" ]]; then aws iam delete-role-policy --role-name "${b}" --policy-name IRRevokeOlderSessions 2>/dev/null \
+                        && log "removed session-revoke policy from role ${b}" || log "WARN: could not remove session-revoke policy from ${b}"
+                else aws iam delete-user-policy --user-name "${b}" --policy-name IRRevokeOlderSessions 2>/dev/null \
+                        && log "removed session-revoke policy from user ${b}" || log "WARN: could not remove session-revoke policy from ${b}"; fi ;;
             azure_sp_disable)     # a=sp -> re-enable
                 if [[ "${DRY_RUN}" == "1" ]]; then log "[DRY-RUN] would re-enable Azure SP ${a}"
                 else az ad sp update --id "${a}" --set "accountEnabled=true" --output none 2>/dev/null \
                         && log "re-enabled Azure SP ${a}" || log "WARN: could not re-enable SP ${a}"; fi ;;
+            azure_user_disable)   # a=user -> re-enable
+                if [[ "${DRY_RUN}" == "1" ]]; then log "[DRY-RUN] would re-enable Azure user ${a}"
+                else az ad user update --id "${a}" --account-enabled true --output none 2>/dev/null \
+                        && log "re-enabled Azure user ${a}" || log "WARN: could not re-enable user ${a}"; fi ;;
+            gcp_sa_disable)       # a=sa -> re-enable
+                if [[ "${DRY_RUN}" == "1" ]]; then log "[DRY-RUN] would re-enable GCP service account ${a}"
+                else gcloud iam service-accounts enable "${a}" --project="${IR_GCP_PROJECT:-}" --quiet 2>/dev/null \
+                        && log "re-enabled service account ${a}" || log "WARN: could not re-enable SA ${a}"; fi ;;
             lambda_delete)        # a=function b=backup -> cannot auto-recreate; point at the backup
                 log "MANUAL: Lambda ${a} was deleted - recreate from backup ${b} (aws lambda create-function)" ;;
         esac
@@ -49,10 +67,14 @@ for ln in open('${ROLLBACK_JOURNAL}'):
     try: e=json.loads(ln)
     except Exception: continue
     a=e.get('action','')
-    if a=='iam_key_deactivate': print('\t'.join([a,e.get('user',''),e.get('key_id','')]))
-    elif a=='iam_role_deny':    print('\t'.join([a,e.get('role',''),e.get('policy_arn','')]))
-    elif a=='azure_sp_disable': print('\t'.join([a,e.get('sp',''),'']))
-    elif a=='lambda_delete':    print('\t'.join([a,e.get('function',''),e.get('backup','')]))
+    if a=='iam_key_deactivate':   print('\t'.join([a,e.get('user',''),e.get('key_id','')]))
+    elif a=='iam_role_deny':      print('\t'.join([a,e.get('role',''),e.get('policy_arn','')]))
+    elif a=='iam_user_deny':      print('\t'.join([a,e.get('user',''),e.get('policy_arn','')]))
+    elif a=='iam_revoke_sessions':print('\t'.join([a,e.get('entity_type',''),e.get('entity','')]))
+    elif a=='azure_sp_disable':   print('\t'.join([a,e.get('sp',''),'']))
+    elif a=='azure_user_disable': print('\t'.join([a,e.get('user',''),'']))
+    elif a=='gcp_sa_disable':     print('\t'.join([a,e.get('sa',''),'']))
+    elif a=='lambda_delete':      print('\t'.join([a,e.get('function',''),e.get('backup','')]))
 ")
 }
 

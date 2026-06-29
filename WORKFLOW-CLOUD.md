@@ -14,25 +14,30 @@ See [readme.md](readme.md) for the cross-platform overview and adjudication phil
 flowchart TD
     B0(["PROVIDER APIs - aws / az / gcloud (online)"]):::phase
     B0 --> B1["Invoke-IRCollection-Cloud.sh
-    --provider aws|azure|gcp --target T"]:::tool
+    --provider aws|azure|gcp --target T
+    [--lookback-hours N | --window-start/--window-end] [--all-regions]"]:::tool
     B1 --> B2{"--contain?"}:::decision
     B2 -->|yes| B3["① Containment: isolate instance / SG"]:::step
     B2 -->|no| B4
-    B3 --> B4["② Forensics: provider telemetry
-    AWS GuardDuty/CloudTrail · GCP Audit/SCC
-    Azure Activity/NSG + Entra/M365 identity"]:::step
+    B3 --> B4["② Forensics: pre-flight logging check, then
+    provider telemetry over the incident window
+    AWS GuardDuty + full CloudTrail · GCP Audit/SCC
+    Azure Activity/NSG/sign-in + Entra/M365 identity"]:::step
     B4 --> B5["③ adjudicate_cloud.py: normalize → verdict ladder
-    GuardDuty/SCC · risky users · OAuth grants
-    inbox rules · directory audit · operator C2"]:::step
+    detectors (GuardDuty/SCC) + control-plane behaviour
+    (IAM privesc · defense evasion · exposure) ·
+    OAuth/inbox/directory · logging gaps · operator C2"]:::step
     B5 --> B6[/"Combined_Findings · IOCs.json
     Incident_Report · Attack_Graph"/]:::artifact
 
     B6 --> D0(["PROVIDER APIs"]):::phase
     D0 --> D1["Invoke-Eradication-Cloud.sh --apply --restore
     dry-run by default"]:::tool
-    D1 --> D2["Revoke IAM/keys · kill process · block C2 egress
+    D1 --> D2["Contain identity first (disable principal + revoke
+    sessions) · kill process · block C2 egress
     eradicate persistence"]:::step
-    D2 --> D3[/"Restore - known-good minus known-bad C2"/]:::artifact
+    D2 --> D3[/"Restore - known-good minus known-bad C2;
+    journaled revocations reversible"/]:::artifact
 
     classDef phase fill:#1e3a5f,stroke:#60a5fa,color:#e2e8f0,rx:20
     classDef tool  fill:#1e293b,stroke:#64748b,color:#cbd5e1
@@ -45,16 +50,54 @@ flowchart TD
 assigns a verdict on the same ladder the Windows/Linux adjudicators use.
 
 **Trust model:** provider-native detections (GuardDuty/SCC) at HIGH/CRITICAL severity are
-true-positive class; operator-supplied C2 is true-positive class; informational/low provider
-findings are Indeterminate.
+true-positive class; cloud-log/detector tampering and operator-supplied C2 are true-positive class;
+identity privesc and public-exposure changes are likely-true-positive when unambiguous, otherwise
+Indeterminate for analyst follow-up; informational/low provider findings are Indeterminate.
+
+### Incident window (`--lookback-hours` / `--window-start` / `--window-end`)
+
+Cloud intrusions surface days or weeks after the fact, so the collection window is configurable
+rather than a fixed couple of hours. Default look-back is **7 days** (`168h`); pass
+`--lookback-hours N` to widen/narrow it, or pin an exact window with
+`--window-start/--window-end` (ISO-8601). The window bounds every time-scoped pull (CloudTrail,
+Activity log, Cloud Audit logs, flow logs, GuardDuty/SCC).
+
+**Multi-region (AWS):** attackers pivot to regions nobody watches. `--all-regions` sweeps every
+enabled region for GuardDuty + CloudTrail (merged into single artifacts); the default is the single
+`--region`.
+
+### Pre-flight: is the logging even on?
+
+Before pulling telemetry, the forensics phase records whether each control-plane log source is
+enabled (`logging_status.json`): AWS CloudTrail / GuardDuty / VPC Flow Logs, Azure diagnostic
+settings + Activity log, GCP Cloud Logging sinks. A disabled source becomes a **`Cloud Logging
+Disabled`** finding (T1562.008, Indeterminate) - it both bounds what the rest of the investigation
+can possibly see and flags a source an adversary may have switched off to evade detection.
 
 ### Telemetry collected (`playbooks/cloud/00_collect_forensics.sh`)
 
 | Provider | Collected |
 |---|---|
-| **AWS** | GuardDuty findings, CloudTrail events (incident window), EC2 instance + security groups, **VPC Flow Logs** |
-| **Azure** | Activity log, NSG rules + **NSG flow-log config**, Entra risky users, **OAuth consent grants**, **Entra directory audit**, **mailbox inbox forwarding rules** |
-| **GCP** | Cloud Audit logs, Security Command Center findings, firewall rules, **VPC Flow Logs** |
+| **AWS** | GuardDuty findings, **full CloudTrail management events** (paginated over the window, no event-name filter, optionally all regions), **IAM credential report + Access Analyzer**, EC2 instance + security groups, **VPC Flow Logs**, logging-enablement status |
+| **Azure** | Activity log, **Entra sign-in logs**, NSG rules + **NSG flow-log config**, Entra risky users, **OAuth consent grants**, **Entra directory audit**, **mailbox inbox forwarding rules**, logging-enablement status |
+| **GCP** | Cloud Audit logs (admin + data-access + system-event), Security Command Center findings, **project IAM policy + user-managed SA-key inventory**, firewall rules, **VPC Flow Logs**, logging-enablement status |
+
+### Control-plane behavioral analysis
+
+Provider-native detectors (GuardDuty/SCC/Entra) catch *known* patterns, but the attacker's actual
+API-level TTPs live in the **raw control-plane logs**. The adjudicator analyzes those logs directly
+and emits findings on the shared ladder:
+
+| Source | Detections | ATT&CK |
+|---|---|---|
+| **AWS CloudTrail** (`normalize_cloudtrail`) | IAM privesc (`CreateAccessKey`, `AttachUserPolicy` w/ admin, `UpdateAssumeRolePolicy`…), root-account use, console login **without MFA**, cloud-log/detector tampering (`StopLogging`/`DeleteTrail`/`DeleteFlowLogs`/`DeleteDetector`), snapshot/AMI shared externally, public S3 bucket, security group opened to `0.0.0.0/0` | T1098/T1098.001/.003, T1136.003, T1078.004, T1562.008/.007, T1537, T1530 |
+| **GCP Cloud Audit** (`normalize_gcp_audit`) | user-managed SA-key creation, `SetIamPolicy` to `allUsers`/`allAuthenticatedUsers`, log-sink/bucket deletion, world-open firewall, startup-script/metadata change | T1098.001, T1530, T1562.008/.007, T1136.003, T1059 |
+| **Azure Activity** (`normalize_azure_activity`) | diagnostic-settings deletion, NSG rule opened to the internet, role-assignment write, VM Run Command / Custom Script Extension | T1562.008/.007, T1098.003, T1059 |
+| **Entra sign-in logs** (`normalize_signins`) | successful legacy/basic-auth (bypasses MFA), sign-ins from multiple countries (atypical travel), failed-then-successful from one IP (spray/brute then access) | T1078.004, T1078, T1110 |
+
+Every adjudication run also emits **`Attack_Coverage_<stamp>.md`** - the ATT&CK Cloud matrix
+auto-filled from the findings, so the analyst sees which tactics the evidence touched and which are
+blank (gaps to go back and check).
 
 **Flow-log C2 confirmation:** when `--c2-ips` are supplied, `normalize_flow_logs` searches the
 collected flow logs for each C2 IP. A match upgrades the indicator from *asserted* to
@@ -101,6 +144,11 @@ an analyst follow-up. These normalizers are pure functions covered by pytest
 ./Invoke-IRCollection-Cloud.sh --provider aws --target 10.0.0.5 \
     --c2-ips 45.66.77.88 --c2-domains evil.test [--contain]
 
+# widen the window for a late-discovered intrusion (default look-back is 7 days)
+./Invoke-IRCollection-Cloud.sh --provider aws --target 10.0.0.5 --lookback-hours 720
+./Invoke-IRCollection-Cloud.sh --provider aws --target 10.0.0.5 \
+    --window-start 2026-06-01T00:00:00Z --window-end 2026-06-08T00:00:00Z
+
 ./Invoke-IRCollection-Cloud.sh --provider azure --target vm-name      # Entra/M365 identity path
 
 # 4/5. Eradication + restoration (dry-run by default)
@@ -108,10 +156,52 @@ an analyst follow-up. These normalizers are pure functions covered by pytest
     --host-folder ./aws-10_0_0_5 --apply --restore
 ```
 
-- Playbooks: `playbooks/cloud/` (forensics, contain, eradicate process/persistence, block C2, restore).
+- Playbooks: `playbooks/cloud/` (forensics, host + identity containment, eradicate
+  process/persistence, block C2, restore).
 - Known-bad C2 supplied via `--c2-ips/--c2-domains` (or read from `IOCs.json`) stays blocked by
   `04_block_c2.sh` across restoration.
-- Adjudicator + normalizers: `playbooks/cloud/adjudicate_cloud.py`.
+- Adjudicator: `playbooks/cloud/adjudicate_cloud.py` (CLI) over the analyzer modules
+  `cloud_findings/detectors/controlplane/identity/coverage.py`; collection is the
+  `00_collect_forensics.sh` dispatcher over `collect/{lib,aws,azure,gcp}.sh`.
+
+### Identity-first containment + session revocation
+
+The eradication orchestrator runs `01_contain_identity.sh` **first** - in the cloud the stolen
+credential is what re-creates everything else, and deactivating a key does not kill already-issued
+sessions. Implicated principals (from `Principals.json` / `IR_CONTAIN_PRINCIPALS`) are neutralised and
+their live sessions revoked, dry-run-first and journaled so `05_restore_host.sh` can reverse it on an
+overturned verdict:
+
+| Provider | Action |
+|---|---|
+| **AWS** | attach `AWSDenyAll` + put an `IRRevokeOlderSessions` inline policy (denies any token issued before now) on the user/role |
+| **Azure** | disable the user / service principal + Graph `revokeSignInSessions` |
+| **GCP** | disable the service account (invalidates its tokens) |
+
+### Identity posture + blast radius
+
+Beyond events, the workflow reads the identity **state** the investigation lands in and maps what a
+compromised principal could reach:
+
+| Source | Detections | ATT&CK |
+|---|---|---|
+| **AWS credential report** (`normalize_iam_credential_report`) | root account with an active key / MFA off, console users without MFA, stale (>90d) active access keys | T1078.004 |
+| **AWS Access Analyzer** (`normalize_access_analyzer`) | resources reachable by an external/public principal | T1530 |
+| **GCP IAM policy** (`normalize_gcp_iam_policy`) | bindings granting `allUsers`/`allAuthenticatedUsers` | T1530 |
+| **GCP SA keys** (`normalize_gcp_sa_keys`) | user-managed service-account keys (long-lived credential / persistence risk) | T1098.001 |
+
+`principal_reachability.py` then builds the **blast radius** (`Blast_Radius_<stamp>.{json,md}`): per
+implicated principal (from `Principals.json`), the GCP roles it holds (privileged flagged), the
+CloudTrail actions it was observed making, and the adjudicated findings attributable to it - answering
+"what could they touch" and prioritising which principal to contain first.
+
+### Findings feed the same reports as the host workflows
+
+Cloud adjudications flow through the shared reporting layer exactly like Linux/Windows:
+`Combined_Findings_*.json` → `Incident_Report.md` (verdict table), `Attack_Graph.md` (ATT&CK kill
+chain), `IOCs.json`, `Retrospective.md`, plus the cloud-specific `Attack_Coverage_*.md`. A
+control-plane behavioral finding and its verdict land in the report body and on the attack graph, not
+just in the raw findings file.
 
 ## Locked-down evidence storage
 
@@ -166,9 +256,11 @@ redaction-first, never overrides the verdict ladder). Cross-cutting `_clock.json
 ```bash
 cd test/
 pytest -v -k "cloud or flow or snapshot or terraform or docker or llm or custody or clock"   # cloud collection,
-# adjudication, SaaS/identity, flow-log C2 confirmation, disk snapshots, evidence storage,
-# and the ephemeral-container entrypoint
+# adjudication, control-plane behaviour, SaaS/identity, flow-log C2 confirmation, disk snapshots,
+# evidence storage, logging pre-flight, and the ephemeral-container entrypoint
 ```
 
 Cloud CLIs are exercised against recording mocks in `test/mocks/` (assert exact calls +
-idempotency); the SaaS/identity normalizers are unit-tested directly against synthetic Graph JSON.
+idempotency); the SaaS/identity and control-plane normalizers are unit-tested directly against
+synthetic provider JSON. The control-plane analyzers + window/preflight collection changes are
+covered by `test/test_27_cloud_controlplane.py`; SaaS/identity by `test/test_09_cloud_analysis.py`.

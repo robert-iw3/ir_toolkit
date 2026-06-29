@@ -81,6 +81,11 @@ run_pb() {  # phase, script
     echo "[run] $2"; IR_DRY_RUN=0 bash "$script" || echo "[warn] $2 returned non-zero"
 }
 
+# -- Contain identity first (the credential is what re-creates everything else) --
+# Implicated principals come from IR_MALICIOUS_PROCESSES (sourced from Principals.json);
+# 01_contain_identity disables them + revokes live sessions, journaled for rollback.
+run_pb "identity_containment" "01_contain_identity.sh"
+
 # -- Eradicate -----------------------------------------------------------------
 run_pb "process_eradication" "02_eradicate_process.sh"
 run_pb "persistence_removal" "03_eradicate_persistence.sh"

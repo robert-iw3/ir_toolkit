@@ -61,9 +61,11 @@ All three platforms follow this shape. Each platform's workflow doc has its own 
 diagram and specifics: [Windows](WORKFLOW-WINDOWS.md) · [Linux](WORKFLOW-LINUX.md) · [Cloud](WORKFLOW-CLOUD.md).
 Cross-cutting: [WORKFLOW-YARA.md](WORKFLOW-YARA.md) - how memory YARA hits are enriched (region /
 perms / backing file / matched strings) and the logic, with examples, for calling a finding benign vs
-a true positive without a doubt. And [WORKFLOW-INVESTIGATION.md](WORKFLOW-INVESTIGATION.md) - the
-**hand-off to the analyst**: how to read the enriched output (validated IOCs, offline IP→country,
-implant config DNA) and reconstruct the chain of events safely with OSINT.
+a true positive without a doubt. And the per-platform **hand-off to the analyst** guides -
+[Windows](WORKFLOW-INVESTIGATION-WINDOWS.md) · [Linux](WORKFLOW-INVESTIGATION-LINUX.md) ·
+[Cloud](WORKFLOW-INVESTIGATION-CLOUD.md) - how to read the adjudicated output (validated IOCs,
+offline IP→country, implant config DNA on hosts; identity + control-plane chain in cloud) and
+reconstruct the chain of events safely with OSINT.
 
 > ### ⚠️ Capture and analyze memory - it is imperative, not optional
 >
