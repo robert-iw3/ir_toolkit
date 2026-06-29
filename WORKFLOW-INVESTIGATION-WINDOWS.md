@@ -63,10 +63,10 @@ one row:
 So the tool **gathers and labels**; the analyst **interprets and sequences**. The rest of this guide
 walks those steps in order.
 
-> **Optional tools (staged with `Build-OfflineToolkit.ps1`):**  
-> `-IncludeCapa`  → capability fingerprint + ATT&CK on carved regions  
-> `-IncludeFloss` → deobfuscated strings (stack/decoded/tight) from carved regions  
-> `-IncludeMWCP`  → DC3-MWCP malware config parser + generic mutex/C2 extractors (all families)  
+> **Optional tools (staged with `Build-OfflineToolkit.ps1`):**
+> `-IncludeCapa`  → capability fingerprint + ATT&CK on carved regions
+> `-IncludeFloss` → deobfuscated strings (stack/decoded/tight) from carved regions
+> `-IncludeMWCP`  → DC3-MWCP malware config parser + generic mutex/C2 extractors (all families)
 > `-IncludeGeoIP` → offline IP-to-country (no network calls)
 
 ---
@@ -235,7 +235,7 @@ signer with `Get-AuthenticodeSignature`; if it is Microsoft Windows, close as ru
 Mutex names are some of the strongest implant fingerprints because malware creates them to prevent
 duplicate execution. The toolkit surfaces them through three independent layers:
 
-**Layer 1 — Runtime handle enumeration (highest coverage)**  
+**Layer 1 — Runtime handle enumeration (highest coverage)**
 `memory_enrich.py` reads every open handle in the confirmed-TP PIDs from the memory image.
 Handle-based detection finds mutexes the binary creates **at runtime** — not visible to static
 string scanning because the name may be constructed on the stack, XOR-decoded, or allocated
@@ -254,7 +254,7 @@ Classification logic for suspicious vs. benign handles:
 Mutexes flowing into `IOCs.json` → `memory_eradication.mutexes[]` are the eradication scope.
 Every mutex in that list was classified suspicious by at least Layer 1 or confirmed by Layer 3.
 
-**Layer 2 — Binary parsing: GenericMutex + GenericC2 + PowerShellDecoder + LNKParser (all families)**  
+**Layer 2 — Binary parsing: GenericMutex + GenericC2 + PowerShellDecoder + LNKParser (all families)**
 When `Build-OfflineToolkit.ps1 -IncludeMWCP` has staged DC3-MWCP, `memory_enrich.py` runs it
 against every carved shellcode/PE region. Four generic parsers run against **any** carved binary
 regardless of malware family:
@@ -272,7 +272,7 @@ Validated on live captured memory (271 VAD regions across 3 target PIDs):
 - No C2 addresses recovered from encrypted beacon regions — expected when payload uses sleep-time XOR obfuscation (Ekko-class); C2 IPs are encrypted at snapshot time. Layer 1 (IOC sweep) is the capture path for this case, not Layer 2.
 - High FP rate for GenericMutex on file-backed DLL pages — API function names near CreateMutex calls are structural artifacts, not malware-created mutex names. Heuristic gate filters these before output.
 
-**Layer 3 — Family-specific parser (highest precision)**  
+**Layer 3 — Family-specific parser (highest precision)**
 If a DC3-MWCP family-specific parser matches the carved binary (CobaltStrike, Emotet, QakBot, etc.),
 it extracts the full malware configuration: mutex names, C2 addresses, beacon intervals, user-agents,
 and encryption keys. Results are tagged `[mwcp-confirmed]` in `Memory_Enrichment.md` and promoted
@@ -293,15 +293,61 @@ the same indicator, which eliminates the risk that the sweep was picking up beni
 
 ---
 
-**Future Feature** (testing phase):
+**Egress Monitor — active beacon capture and config extraction**
 
-***Investigating this connection will increase attacker dwell time and the risk of data exfiltration. Only enable connection tracing if the value of the intelligence outweighs the risk of data exposure.***
+> **Risk notice:** leaving outbound open during the observation window tolerates continued exfil.
+> Only enable when the intelligence value outweighs the data exposure risk. For data-sensitive hosts,
+> isolate the network stack first and skip egress observation (`-NoEgressMonitor`).
 
-**Egress monitor sees TCP out** → **identifies suspect PID** → **immediate VAD carve** → **mwcp (CobaltStrikeConfig)** → ***if config found: SpawnTo/PipeName/C2 pivot*** → ***persistence hunt***. If not found: store regions, wait for next beacon cycle.
+The advanced egress monitor (`playbooks/threat_hunting/egress_monitor/`) is deployed automatically
+when `Invoke-IRCollection.ps1` runs without `-NoEgressMonitor`. Stage it first:
+```powershell
+Build-OfflineToolkit.ps1 -IncludeMemProcFS -IncludeMWCP -IncludeEgressMonitor
+```
 
-- The egress monitor gets the suspect PID list from existing enrichment flags rather than polling
-- The carve uses proc.memory.read() (correct API, proven above)
-- The persistence hunt uses SpawnTo and PipeName as search terms rather than generic sweep — targeted rather than brute-force
+**Full chain:**
+
+1. **Enrich first.** Run `memory_enrich.py` (via `-CaptureMemory` or `Analyze-Memory.ps1`) to
+   identify suspicious PIDs (anonymous exec VAD, ETW-TI absence). The flagged PIDs are passed to
+   the egress monitor as `--flagged-pid` so any external connection triggers immediate action
+   (Layer 0 — no pattern analysis needed).
+
+2. **Deploy monitor.** `Invoke-IRCollection.ps1` starts `Start-EgressMonitor.ps1 -Start`, which
+   deploys the self-contained daemon to `%ProgramData%\IRToolkit\egress-<id>\` and registers a
+   scheduled task running `egress_monitor.py`. Duration is `-EgressWindowHours` (default 24h,
+   max 72h).
+
+3. **Beacon fires.** The daemon polls `proc.maps.net()` (MemProcFS) or `Get-NetTCPConnection`
+   (fallback) every 5 seconds. On beacon wake, the connection is classified by `beacon_classifier.py`
+   using four independent layers: process-context flag, non-browser process heuristic, periodicity
+   analysis (CV + IQR-based, covers 0–99% jitter and sleeps up to 3 days), and family hints.
+
+4. **Immediate VAD carve.** On `CONFIRMED_BEACON` or flagged-PID connection: all private executable
+   anonymous VAD regions are carved via `proc.memory.read()` and written to `tools/binja/data/`.
+
+5. **mwcp config extraction.** `mwcp_scan.py` runs `CobaltStrikeConfig`, `GenericC2`, and
+   `PowerShellDecoder` against carved regions. On successful extraction: C2 host/URI, UserAgent,
+   HostHeader (domain fronting), SpawnTo process, PipeName (SMB), KillDate.
+
+6. **Persistence hunt.** SpawnTo and PipeName drive a targeted search of registry Run keys,
+   scheduled tasks, and named pipes — not a generic sweep.
+
+7. **Blackhole C2 IP.** Once config is extracted and beacon confirmed, outbound to the C2 IP is
+   blocked via `netsh advfirewall`. All families supported: CobaltStrike, Sliver, Havoc, BruteRatel,
+   AsyncRAT, Meterpreter, generic periodic beacons, and long-dwell APT implants.
+
+8. **Evidence log.** Every event — CONNECTION, BEACON_DETECTED, CARVE_COMPLETE, BLACKHOLE_APPLIED,
+   MONITOR_STOPPED — is appended to `egress_evidence.jsonl`. Call `-Collect` to review.
+
+**Retrieve results after window:**
+```powershell
+Start-EgressMonitor.ps1 -Collect -IncidentId <id>
+Start-EgressMonitor.ps1 -Status  -IncidentId <id>
+```
+Carved regions and mwcp output are in `%ProgramData%\IRToolkit\egress-<id>\carved_<proc>_<pid>\`.
+**If the beacon config was not extracted** (beacon was sleeping with Ekko XOR at all capture moments):
+carved regions are preserved for offline RE. See `planning/cs-config-capture-strategies.md`
+for approaches including on-disk stager scan, YARA-triggered carve, and ETW-triggered capture.
 
 ---
 

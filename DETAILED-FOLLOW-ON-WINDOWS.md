@@ -686,7 +686,7 @@ which file was scanned and whether anything was found:
 - A process handles file shows a suspicious open file handle — scan that file
 - Lateral movement evidence points to a file on a share — pull and scan before touching the host
 
-**What it produces:**  
+**What it produces:**
 Findings roll into the standard EDR report (`EDR_Report_*.json`) as `YARA Match` and
 `mwcp Config Extraction` entries. Combine with `Add-ManualFinding.ps1` (Section 19b) to feed
 confirmed mwcp-extracted mutexes and C2 into `IOCs.json` for the eradication pipeline.

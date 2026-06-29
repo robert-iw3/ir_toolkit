@@ -57,29 +57,17 @@ def _select_parsers(file_type, available):
     """Return ordered list of parsers to try for this file type.
     Generic parsers always run; type-specific parsers run first."""
     available_set = set(available)
-    # All C2 framework and RAT parsers run against PE/UNKNOWN.
-    # Each uses identify() to quickly reject non-matching files.
-    _PE_C2 = [
-        # C2 frameworks -- each uses identify() keyed on STRUCTURAL protocol
-        # indicators, not framework name strings that operators will strip.
-        # NightHawk is intentionally absent: MDSec explicitly engineered it to
-        # defeat memory/file scanning. Detect via thread context (DR0-DR7),
-        # YARA sleeping-beacon rules, and egress monitor network modeling.
-        'CobaltStrikeConfig', 'SliverConfig', 'HavocConfig',
-        'BruteRatelConfig', 'MythicConfig', 'MerlinConfig',
-        'NjRATConfig', 'AsyncRATConfig', 'SMTPExfilConfig',
-    ]
     type_specific = {
-        'PE':      _PE_C2 + ['Executable', 'GenericDropper'],
-        'UNKNOWN': _PE_C2,   # carved regions may lack MZ header
+        'PE':      ['CobaltStrikeConfig', 'Executable', 'GenericDropper'],
+        'UNKNOWN': ['CobaltStrikeConfig'],  # carved memory regions (no MZ header)
         'PDF':     ['PDF'],
         'ZIP':     ['Archive'],
         'GZIP':    ['Archive'],
         'ISO':     ['ISO'],
-        'PS1':     ['PowerShell', 'PowerShellDecoder', 'PoshC2Config', 'TelegramC2Config'],
-        'VBS':     ['VisualBasic', 'PowerShellDecoder', 'TelegramC2Config'],
-        'HTA':     ['PowerShellDecoder', 'TelegramC2Config'],
-        'BAT':     ['PowerShellDecoder', 'TelegramC2Config'],
+        'PS1':     ['PowerShell', 'PowerShellDecoder'],
+        'VBS':     ['VisualBasic', 'PowerShellDecoder'],
+        'HTA':     ['PowerShellDecoder'],
+        'BAT':     ['PowerShellDecoder'],
         'WSF':     ['PowerShellDecoder'],
         'LNK':     ['LNKParser', 'PowerShellDecoder'],
         'PY':      ['Python'],
@@ -105,18 +93,10 @@ def _select_parsers(file_type, available):
     if file_type == 'LNK':
         if 'LNKParser' in available and 'LNKParser' not in selected:
             selected.append('LNKParser')
-    known_generic = {
-        # DC3 built-ins
-        'Executable','GenericDropper','PDF','Archive','ISO',
-        'PowerShell','VisualBasic','Python','MachO','RSA','Decoy','Quarantined',
-        # IR Toolkit generic
-        'GenericMutex','GenericC2','PowerShellDecoder','LNKParser','TelegramC2Config',
-        # IR Toolkit C2 frameworks
-        'CobaltStrikeConfig','SliverConfig','HavocConfig','BruteRatelConfig',
-        'MythicConfig','MerlinConfig','PoshC2Config',
-        # IR Toolkit RATs / stealers
-        'NjRATConfig','AsyncRATConfig','SMTPExfilConfig',
-    }
+    known_generic = {'CobaltStrikeConfig','Executable','GenericDropper','PDF','Archive','ISO',
+                     'PowerShell','VisualBasic','Python','MachO','RSA',
+                     'GenericMutex','GenericC2','Decoy','Quarantined',
+                     'PowerShellDecoder','LNKParser'}
     for p in available:
         if p not in known_generic and p not in selected:
             selected.append(p)

@@ -79,6 +79,10 @@ param(
     [switch]$IncludeFloss,
     [switch]$IncludeGeoIP,
     [switch]$IncludeMWCP,
+    # Stage egress_monitor/tools/ for the advanced beacon detection daemon.
+    # Copies memprocfs/, mwcp/, and yara/ into the egress_monitor bundle so the
+    # daemon is fully self-contained when deployed to a target host.
+    [switch]$IncludeEgressMonitor,
     [switch]$StageSymbols,
     [string]$VolExeUrl   = '',   # leave blank to auto-resolve from GitHub API; override if needed
     [string]$WinPmemUrl  = 'https://github.com/Velocidex/WinPmem/releases/download/v4.0.rc1/winpmem_mini_x64_rc2.exe',
@@ -429,24 +433,37 @@ if ($IncludeMWCP) {
             Write-Host "    -> DC3-MWCP $ver staged to tools\mwcp\lib\" -ForegroundColor Green
             Save-Hash 'mwcp' 'pypi:mwcp' (Join-Path $mwcpLib 'mwcp') 'ok'
 
-            # Stage generic parsers from playbooks into mwcp parsers directory.
-            # GenericMutex + GenericC2 cover ALL malware families and run automatically
-            # against every carved binary region in memory_enrich.py.
-            $parsersDir  = Join-Path $mwcpLib 'mwcp\parsers'
-            $parsersRepo = Join-Path $PSScriptRoot 'playbooks\windows\threat_hunting\mwcp_parsers'
-            if (Test-Path $parsersDir) {
-                foreach ($pf in @('GenericMutex.py', 'GenericC2.py', 'PowerShellDecoder.py', 'LNKParser.py', 'CobaltStrikeConfig.py')) {
-                    $src = Join-Path $parsersRepo $pf
-                    $dst = Join-Path $parsersDir $pf
-                    if (Test-Path $src) {
-                        Copy-Item -LiteralPath $src -Destination $dst -Force
-                        Write-Host "    -> Staged parser: $pf" -ForegroundColor Green
-                    } else {
-                        Write-Host "    WARN: parser source not found: $src" -ForegroundColor Yellow
-                    }
-                }
+            # Stage all IR Toolkit parsers from mwcp_parsers/ into the installed lib.
+            # SOURCE OF TRUTH: playbooks/windows/threat_hunting/mwcp_parsers/
+            #   - parser_config.yml  <- authoritative config (NOT the pip-installed version)
+            #   - *.py               <- all custom parsers
+            #
+            # The pip-installed parser_config.yml is overwritten by ours so our custom
+            # parsers are registered. Never edit tools/mwcp/lib/mwcp/parser_config.yml
+            # directly -- edit mwcp_parsers/parser_config.yml instead.
+            $parsersDir    = Join-Path $mwcpLib 'mwcp\parsers'
+            $parsersRepo   = Join-Path $PSScriptRoot 'playbooks\windows\threat_hunting\mwcp_parsers'
+            $configSrc     = Join-Path $parsersRepo 'parser_config.yml'
+            $configDst     = Join-Path $mwcpLib 'mwcp\parser_config.yml'
+
+            # 1. Copy authoritative parser_config.yml (overwrite pip-installed version)
+            if (Test-Path $configSrc) {
+                Copy-Item -LiteralPath $configSrc -Destination $configDst -Force
+                Write-Host "    -> parser_config.yml deployed from mwcp_parsers/ (source of truth)" -ForegroundColor Green
             } else {
-                Write-Host "    WARN: mwcp parsers directory not found; generic parsers not staged" -ForegroundColor Yellow
+                Write-Host "    WARN: mwcp_parsers/parser_config.yml not found -- pip version not overridden" -ForegroundColor Yellow
+            }
+
+            # 2. Stage all *.py parser files from mwcp_parsers/
+            if (Test-Path $parsersDir) {
+                $pyFiles = Get-ChildItem -Path $parsersRepo -Filter '*.py' -ErrorAction SilentlyContinue
+                foreach ($pf in $pyFiles) {
+                    $dst = Join-Path $parsersDir $pf.Name
+                    Copy-Item -LiteralPath $pf.FullName -Destination $dst -Force
+                }
+                Write-Host "    -> Staged $($pyFiles.Count) parsers from mwcp_parsers/" -ForegroundColor Green
+            } else {
+                Write-Host "    WARN: mwcp parsers directory not found" -ForegroundColor Yellow
             }
         } else {
             Write-Host "    FAILED: $result" -ForegroundColor Yellow
@@ -456,6 +473,70 @@ if ($IncludeMWCP) {
         Write-Host "    FAILED (python not in PATH?): $($_.Exception.Message)" -ForegroundColor Yellow
         Save-Hash 'mwcp' 'pypi:mwcp' $null "failed: $($_.Exception.Message)"
     }
+}
+
+# --- Egress monitor self-contained bundle (-IncludeEgressMonitor) -------------
+# Copies all tools the advanced egress daemon needs into egress_monitor/tools/
+# so the daemon is fully self-contained when deployed onto a target host.
+# Requires -IncludeMemProcFS and -IncludeMWCP to have already staged those tools.
+if ($IncludeEgressMonitor) {
+    Write-Host "[*] Egress monitor tool bundle ..." -ForegroundColor Cyan
+    $egressDir  = Join-Path $PSScriptRoot 'playbooks\windows\threat_hunting\egress_monitor'
+    $egressTools = Join-Path $egressDir 'tools'
+    New-Item -ItemType Directory -Path $egressTools -Force | Out-Null
+
+    # Stage memprocfs (Python runtime + DLLs + vmmpyc wheel)
+    $mpcSrc = Join-Path $ToolsDir 'memprocfs'
+    if (Test-Path $mpcSrc) {
+        $mpcDst = Join-Path $egressTools 'memprocfs'
+        if (-not (Test-Path $mpcDst)) {
+            Copy-Item -Path $mpcSrc -Destination $mpcDst -Recurse -Force
+            Write-Host "    -> memprocfs/ staged" -ForegroundColor Green
+        } else {
+            Write-Host "    -> memprocfs/ already staged" -ForegroundColor Gray
+        }
+    } else {
+        Write-Warning "    memprocfs not found in tools/ -- run -IncludeMemProcFS first"
+    }
+
+    # Stage mwcp (lib + custom parsers + parser_config.yml)
+    $mwcpSrc = Join-Path $ToolsDir 'mwcp'
+    if (Test-Path $mwcpSrc) {
+        $mwcpDst = Join-Path $egressTools 'mwcp'
+        if (-not (Test-Path $mwcpDst)) {
+            Copy-Item -Path $mwcpSrc -Destination $mwcpDst -Recurse -Force
+            Write-Host "    -> mwcp/ staged" -ForegroundColor Green
+        } else {
+            Write-Host "    -> mwcp/ already staged" -ForegroundColor Gray
+        }
+    } else {
+        Write-Warning "    mwcp not found in tools/ -- run -IncludeMWCP first"
+    }
+
+    # Stage yara (binary + windows rules)
+    foreach ($yaraTool in @('yara64.exe', 'yarac64.exe')) {
+        $yaraSrc = Join-Path $ToolsDir $yaraTool
+        if (Test-Path $yaraSrc) {
+            Copy-Item $yaraSrc $egressTools -Force
+        }
+    }
+    $yaraRulesSrc = Join-Path $ToolsDir 'yara_rules'
+    if (Test-Path $yaraRulesSrc) {
+        $yaraRulesDst = Join-Path $egressTools 'yara_rules'
+        if (-not (Test-Path $yaraRulesDst)) {
+            Copy-Item -Path $yaraRulesSrc -Destination $yaraRulesDst -Recurse -Force
+            Write-Host "    -> yara_rules/ staged" -ForegroundColor Green
+        }
+    }
+
+    # Stage mwcp_scan.py (sibling of egress_monitor/)
+    $mwcpScanSrc = Join-Path $PSScriptRoot 'playbooks\windows\threat_hunting\mwcp_scan.py'
+    if (Test-Path $mwcpScanSrc) {
+        Copy-Item $mwcpScanSrc $egressDir -Force
+        Write-Host "    -> mwcp_scan.py staged to egress_monitor/" -ForegroundColor Green
+    }
+
+    Write-Host "    -> Egress monitor bundle ready: $egressTools" -ForegroundColor Green
 }
 
 # --- MemProcFS (AFF4-native memory analysis, no mount driver required) -------

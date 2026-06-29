@@ -1,0 +1,201 @@
+# mwcp parser_config.yml -- SOURCE OF TRUTH
+#
+# This file lives in mwcp_parsers/ alongside the parser .py files.
+# Build-OfflineToolkit.ps1 -IncludeMWCP copies it over
+# tools/mwcp/lib/mwcp/parser_config.yml AFTER pip install, so it is never
+# overwritten by a fresh install.
+#
+# To add a new parser:
+#   1. Write MyParser.py in mwcp_parsers/
+#   2. Add the entry here (IR_Toolkit section)
+#   3. Run Build-OfflineToolkit.ps1 -IncludeMWCP to stage everything
+#
+# Format: parsers reference the Python class with a leading dot (.ClassName).
+# The class must be in a .py file of the same name as the YAML key.
+
+# ---- DC3 built-in parsers (installed by pip, listed here for completeness) ---
+
+Archive:
+  description: Archive file types
+  author: DC3
+  parsers:
+    - .Zip
+    - .Gzip
+
+Decoy:
+  description: Generic file types described as a decoy file
+  author: DC3
+  parsers:
+    - .DOC
+    - .PDF
+    - .RTF
+    - .JPG
+    - .DOCX
+    - .XLSX
+    - .PPTX
+
+Executable:
+  description: Generic parser using disassembly emulation
+  author: DC3
+  config:
+    disassembler: ida
+    depth: 0
+    call_depth: 1
+    exhaustive: false
+    follow_loops: false
+    max_instructions: 100_000
+    min_length: 5
+  parsers:
+    - .PE
+    - .ELF
+
+foo:
+  description: example parser that works on any file
+  author: DC3
+  parsers:
+    - .Foo
+
+GenericDropper:
+  description: Generic Dropper
+  author: DC3
+  parsers:
+    - .Overlay
+    - .RSRC
+
+ISO: .ImageFile
+MachO: .FATBinary
+PDF: .Document
+PowerShell: .Script
+
+Python:
+  description: Python artifacts
+  author: DC3
+  parsers:
+    - .PyInstaller
+
+Quarantined:
+  description: Anti-Virus Quarantined File
+  author: DC3
+  parsers:
+    - .McAfee
+    - .Defender
+    - .SymantecQB
+    - .SymantecSubSDK
+    - .AhnLab
+    - .Avast_AVG
+
+RSA:
+  description: RSA artifacts
+  author: DC3
+  parsers:
+    - .DigitalCertificate
+    - .PrivateKey
+    - .PublicKey
+
+VisualBasic:
+  description: VisualBasic Script
+  author: DC3
+  parsers:
+    - .EncodedASP
+    - .VBE
+    - .VBScript
+
+# ---- IR Toolkit parsers -------------------------------------------------------
+# Generic (run against every file type)
+
+GenericMutex:
+  description: Generic Mutex Extractor (all families)
+  author: IR_Toolkit
+  parsers:
+    - .GenericMutex
+
+GenericC2:
+  description: Generic C2 / Infrastructure Extractor (all families)
+  author: IR_Toolkit
+  parsers:
+    - .GenericC2
+
+PowerShellDecoder:
+  description: PowerShell EncodedCommand Decoder (all families)
+  author: IR_Toolkit
+  parsers:
+    - .PowerShellDecoder
+
+LNKParser:
+  description: Windows LNK Shortcut Parser
+  author: IR_Toolkit
+  parsers:
+    - .LNKParser
+
+TelegramC2Config:
+  description: Telegram Bot Token C2/Exfil Extractor (all families)
+  author: IR_Toolkit
+  parsers:
+    - .TelegramC2Config
+
+# C2 Frameworks
+
+CobaltStrikeConfig:
+  description: CobaltStrike Beacon Config Extractor
+  author: IR_Toolkit
+  parsers:
+    - .CobaltStrikeConfig
+
+SliverConfig:
+  description: Sliver C2 Framework Config Extractor
+  author: IR_Toolkit
+  parsers:
+    - .SliverConfig
+
+HavocConfig:
+  description: Havoc C2 Framework Config Extractor
+  author: IR_Toolkit
+  parsers:
+    - .HavocConfig
+
+BruteRatelConfig:
+  description: Brute Ratel C4 Config Extractor
+  author: IR_Toolkit
+  parsers:
+    - .BruteRatelConfig
+
+MythicConfig:
+  description: Mythic C2 Agent Config Extractor
+  author: IR_Toolkit
+  parsers:
+    - .MythicConfig
+
+MerlinConfig:
+  description: Merlin C2 Agent Config Extractor
+  author: IR_Toolkit
+  parsers:
+    - .MerlinConfig
+
+PoshC2Config:
+  description: PoshC2 Stager Config Extractor
+  author: IR_Toolkit
+  parsers:
+    - .PoshC2Config
+
+
+# RATs
+
+NjRATConfig:
+  description: NjRAT/Bladabindi Config Extractor
+  author: IR_Toolkit
+  parsers:
+    - .NjRATConfig
+
+AsyncRATConfig:
+  description: AsyncRAT/DcRAT Config Extractor
+  author: IR_Toolkit
+  parsers:
+    - .AsyncRATConfig
+
+# Exfil / credential stealers
+
+SMTPExfilConfig:
+  description: SMTP Exfiltration Credential Extractor
+  author: IR_Toolkit
+  parsers:
+    - .SMTPExfilConfig

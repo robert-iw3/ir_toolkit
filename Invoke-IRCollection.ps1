@@ -146,7 +146,12 @@ try {
     $ForensicsScript   = Join-Path $PSScriptRoot 'playbooks\windows\00_Collect-Forensics.ps1'
     $ClockScript       = Join-Path $PSScriptRoot 'playbooks\windows\Get-ClockContext.ps1'
     $FirewallScript    = Join-Path $PSScriptRoot 'playbooks\windows\Enforce-StrictFirewall.ps1'
-    $EgressScript      = Join-Path $PSScriptRoot 'playbooks\windows\Watch-Egress.ps1'
+    # Advanced egress monitor (beacon detection + memory carve + mwcp + blackhole).
+    # Falls back to Watch-Egress.ps1 (lightweight netstat sensor) if the advanced
+    # monitor has not been staged by Build-OfflineToolkit.ps1 -IncludeEgressMonitor.
+    $EgressScriptAdvanced = Join-Path $PSScriptRoot 'playbooks\windows\threat_hunting\egress_monitor\Start-EgressMonitor.ps1'
+    $EgressScriptLegacy   = Join-Path $PSScriptRoot 'playbooks\windows\Watch-Egress.ps1'
+    $EgressScript = if (Test-Path $EgressScriptAdvanced) { $EgressScriptAdvanced } else { $EgressScriptLegacy }
     $HuntDir           = Join-Path $PSScriptRoot 'playbooks\windows\threat_hunting'
     $EDRScript         = Join-Path $HuntDir 'EDR_Toolkit.ps1'
     $AnalyzeScript     = Join-Path $HuntDir 'Analyze-EDRReport.ps1'
@@ -994,18 +999,41 @@ try {
     # RETURNS later to collect the egress evidence log. Runs after collection so it does not
     # compete with the live triage. Off with -NoEgressMonitor.
     if (-not $NoEgressMonitor) {
-        Write-Log "==== PHASE: Egress Observation (start sensor; auto-blackhole at +$EgressWindowHours h) ====" 'Cyan'
+        $isAdvanced = $EgressScript -eq $EgressScriptAdvanced
+        Write-Log "==== PHASE: Egress Observation ($( if ($isAdvanced) {'advanced beacon monitor'} else {'lightweight netstat sensor'} ); auto-blackhole at +$EgressWindowHours h) ====" 'Cyan'
         if (Test-Path -LiteralPath $EgressScript) {
             $egArgs = @('-ExecutionPolicy','Bypass','-NoProfile','-File', $EgressScript,
                         '-Start','-IncidentId', $IncidentId, '-WindowHours', "$EgressWindowHours")
             $egMgmt = if (@($EgressMgmtIP).Count -gt 0) { $EgressMgmtIP } else { $AllowInboundRemoteAddress }
-            if (@($egMgmt).Count -gt 0) { $egArgs += @('-MgmtIP') + ($egMgmt -join ',') }
+            if (@($egMgmt).Count -gt 0) { $egArgs += @('-MgmtIP', ($egMgmt -join ',')) }
+
+            # Pass PIDs pre-flagged by memory enrichment to the advanced monitor.
+            # These trigger immediate Layer 0 carve on first external connection.
+            if ($isAdvanced) {
+                $enrichFindings = Get-ChildItem $OutDir -Filter 'Memory_Findings_*.json' -File |
+                    Sort-Object LastWriteTime -Descending | Select-Object -First 1
+                if ($enrichFindings) {
+                    try {
+                        $flaggedPids = (Get-Content $enrichFindings.FullName | ConvertFrom-Json) |
+                            Where-Object { $_.findings | Where-Object { $_.type -match 'AnonExec|InjectSus|ETW' } } |
+                            Select-Object -ExpandProperty pid -ErrorAction SilentlyContinue |
+                            Where-Object { $_ } | Sort-Object -Unique
+                        if (@($flaggedPids).Count -gt 0) {
+                            $egArgs += @('-FlaggedPid', ($flaggedPids -join ','))
+                            Write-Log "  Pre-flagged PIDs passed to egress monitor: $($flaggedPids -join ',')" 'Cyan'
+                        }
+                    } catch { }
+                }
+                $egArgs += '-BlackholeOnConfirm'
+            }
+
             try {
                 & $PSExe @egArgs *>&1 | Tee-Object -FilePath (Join-Path $OutDir "_Egress_$RunStamp.log") -Append
-                Write-Log "  Egress sensor started. Return after the window to collect the evidence log + confirm blackhole." 'Green'
+                Write-Log "  Egress monitor started ($EgressScript)." 'Green'
+                Write-Log "  Return after the window to run -Collect and confirm blackhole." 'Yellow'
             } catch { Write-Log "  Egress monitor start error: $($_.Exception.Message)" 'Yellow' }
         } else {
-            Write-Log "  SKIP - Watch-Egress.ps1 not found: $EgressScript" 'Yellow'
+            Write-Log "  SKIP - egress script not found: $EgressScript" 'Yellow'
         }
     } else {
         Write-Log "Egress observation skipped (-NoEgressMonitor)." 'Yellow'

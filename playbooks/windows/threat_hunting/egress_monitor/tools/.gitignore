@@ -1,0 +1,11 @@
+# tools/ is downloaded / built by Build-OfflineToolkit.ps1 and Build-OfflineToolkit-Linux.sh
+# (Volatility wheels, YARA rules, AVML, Sysinternals, MemProcFS, symbols, …) and is NOT
+# committed. The ONE exception is binja/ — the Binary Ninja reverse-engineering tooling
+# (Dockerfile, plugins, docs) is part of the repo and IS tracked.
+#
+# Carved memory regions written to binja/data/ are runtime evidence and stay ignored
+# (see binja/data/.gitignore).
+*
+!.gitignore
+!*/
+!binja/**
