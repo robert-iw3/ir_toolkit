@@ -34,8 +34,9 @@ After the memory/enrichment stage, the per-host folder (`reports\<HOST>\`) conta
 
 | Artifact | What it gives the analyst |
 |---|---|
-| `Memory_Enrichment.md` / `_*.json` | Per-PID footprint: confirmed/recovered/unverified hosts, IPs **with offline country**, implant config DNA (beacon templates, User-Agent, bot params, worm markers, mutex, miner config), handles (dropped files, persistence, mutexes), carved regions |
-| `IOCs.json` | Machine-readable indicator set (C2 endpoints carry a per-IP `country`) for blocking + eradication |
+| `Memory_Enrichment.md` / `_*.json` | Per-PID footprint: confirmed/recovered/unverified hosts, IPs **with offline country**, implant config DNA (beacon templates, User-Agent, bot params, worm markers, mutex, miner config), handles (dropped files, persistence, mutexes), carved regions, DC3-MWCP binary parsing results |
+| `IOCs.json` | Machine-readable indicator set (C2 endpoints carry a per-IP `country`) for blocking + eradication; `memory_eradication.mutexes[]` carries both heuristic-classified and mwcp-confirmed mutex names |
+| `Timeline_Correlation.md` | **Confirmed-TP attack timeline** — all true-positive artifacts ordered by earliest known timestamp, grouped by ATT&CK phase, with Mermaid attack chain diagram. USB device correlation for entry vector assessment. |
 | `YARA_Pivot_Report.md` / `_TP.json` | Memory YARA hits ranked by true-positive confidence - the open leads to verify first |
 | `Attack_Graph.md` | The memory-derived chain (lineage, regions, C2) |
 | `tools\binja\data\<id>\` | Carved injected regions (`.bin` + sidecar) for deep RE in Binary Ninja |
@@ -56,10 +57,17 @@ one row:
 | **IOC sweep + structural validation** (`memory_enrich.py`) | web addresses sorted into confirmed / recovered / unverified, + URLs | **Step 3** - triage real leads, OSINT the rest |
 | **Offline geo** (`memory_enrich.py` + `tools/geoip`) | each IP tagged with its country (no network) | **Step 4** - first-pass infrastructure attribution |
 | **Region carve** (`-Carve` -> `tools/binja/data/`) | injected code as raw `.bin` + sidecar | hand to a reverse-engineer if needed |
+| **DC3-MWCP binary parsing** (`memory_enrich.py` + `tools/mwcp/`) | mutex names, C2 addresses, passwords, filenames extracted from carved binary regions by family-specific and generic parsers | compare against handle-enumerated mutexes to **verify or add** indicators; overlapping IOCs are tagged `mwcp-verified` |
 | *(nothing - this is the human part)* | - | **Step 5** - order it all into the chain of events |
 
 So the tool **gathers and labels**; the analyst **interprets and sequences**. The rest of this guide
 walks those steps in order.
+
+> **Optional tools (staged with `Build-OfflineToolkit.ps1`):**  
+> `-IncludeCapa`  → capability fingerprint + ATT&CK on carved regions  
+> `-IncludeFloss` → deobfuscated strings (stack/decoded/tight) from carved regions  
+> `-IncludeMWCP`  → DC3-MWCP malware config parser + generic mutex/C2 extractors (all families)  
+> `-IncludeGeoIP` → offline IP-to-country (no network calls)
 
 ---
 
@@ -74,6 +82,18 @@ walks those steps in order.
 > - **Shodan.io** - what an IP is actually hosting (ports, banners, certs)
 >
 > Pivot on the data those services return, never on the live host.
+
+> **Named-pipe enumeration can wedge the network stack.** The toolkit's named-pipe scanner
+> (`Get-NamedPipeName`) lists pipe names via `FindFirstFile`/`FindNextFile` **without opening or
+> connecting to any pipe** — this is safe. Do NOT use `Get-ChildItem \\.\pipe\` (the PowerShell
+> provider path), which opens each pipe for metadata and can wedge core networking service RPC
+> endpoints, taking DNS, TCP sockets, and WinHTTP offline mid-collection.
+>
+> If network connectivity drops after a collection run, run `playbooks\Repair-NetworkStack-Win11.ps1`
+> (elevated) — it snapshots current adapter/route state, restarts core networking services in
+> least-destructive order, resets Winsock and TCP/IP, and prompts for reboot. The repair is fully
+> auditable and reversible. Pass `-EnforceOutboundOnly` to lock to outbound-only while the
+> investigation continues, or `-IncludeIPv6Reset` if IPv6 is also affected.
 
 ---
 
@@ -210,6 +230,121 @@ signer with `Get-AuthenticodeSignature`; if it is Microsoft Windows, close as ru
 > back clean**. The implant was *still resident in RAM* and only the memory pass found it. Disk and AV
 > alone would have called this host clean.
 
+### Mutex corroboration — three-layer analysis
+
+Mutex names are some of the strongest implant fingerprints because malware creates them to prevent
+duplicate execution. The toolkit surfaces them through three independent layers:
+
+**Layer 1 — Runtime handle enumeration (highest coverage)**  
+`memory_enrich.py` reads every open handle in the confirmed-TP PIDs from the memory image.
+Handle-based detection finds mutexes the binary creates **at runtime** — not visible to static
+string scanning because the name may be constructed on the stack, XOR-decoded, or allocated
+dynamically.
+
+Classification logic for suspicious vs. benign handles:
+
+| Mutex pattern | Verdict | Signal strength |
+|:------------|:--------|:----------------|
+| Bare hex token (`1BA6BD98D9`, 6-20 hex chars) | **Suspicious — high confidence** | Classic malware instance lock; legitimate software uses readable names |
+| `SM0:PID:session:WilStaging_*` | **Suspicious** | APT camouflage: threat actors specifically use WilStaging-format names to blend with Windows internals; NOT a benign WIL mutex when found in implicated processes |
+| `SM0:PID:session:WilError_*` | **Benign** | Documented WIL error-tracking mutex; common in any WIL-using host process |
+| `SmartScreen*`, `Global\MSCTF.*`, `DBWin*` | **Benign** | Windows security component and UI sync objects |
+| Long undelimited string (`x9pv45dxghk`) | **Heuristic — needs attribution** | Some Windows DLLs legitimately produce these; flag for analyst verification against the owning process |
+
+Mutexes flowing into `IOCs.json` → `memory_eradication.mutexes[]` are the eradication scope.
+Every mutex in that list was classified suspicious by at least Layer 1 or confirmed by Layer 3.
+
+**Layer 2 — Binary parsing: GenericMutex + GenericC2 + PowerShellDecoder + LNKParser (all families)**  
+When `Build-OfflineToolkit.ps1 -IncludeMWCP` has staged DC3-MWCP, `memory_enrich.py` runs it
+against every carved shellcode/PE region. Four generic parsers run against **any** carved binary
+regardless of malware family:
+- `GenericMutex` — scans for `CreateMutex`/`OpenMutex` API proximity + bare hex tokens in all strings
+- `GenericC2` — extracts IP:port combos, URLs, domains, registry persistence paths
+- `PowerShellDecoder` — decodes `-EncodedCommand` base64 payloads embedded in scripts, HTA, LNK, PE
+- `LNKParser` — extracts command-line arguments from LNK shortcut files (payload lives in Arguments field)
+
+These produce results for commodity malware with hardcoded plaintext strings. For sophisticated
+implants using runtime-generated mutex names or **encrypted-at-rest** payloads (e.g. Ekko XOR sleep
+obfuscation in CobaltStrike), Layer 1 (handle enumeration) remains the primary capture path.
+
+Validated on live captured memory (271 VAD regions across 3 target PIDs):
+- 81/271 regions returned findings from GenericMutex + GenericC2
+- No C2 addresses recovered from encrypted beacon regions — expected when payload uses sleep-time XOR obfuscation (Ekko-class); C2 IPs are encrypted at snapshot time. Layer 1 (IOC sweep) is the capture path for this case, not Layer 2.
+- High FP rate for GenericMutex on file-backed DLL pages — API function names near CreateMutex calls are structural artifacts, not malware-created mutex names. Heuristic gate filters these before output.
+
+**Layer 3 — Family-specific parser (highest precision)**  
+If a DC3-MWCP family-specific parser matches the carved binary (CobaltStrike, Emotet, QakBot, etc.),
+it extracts the full malware configuration: mutex names, C2 addresses, beacon intervals, user-agents,
+and encryption keys. Results are tagged `[mwcp-confirmed]` in `Memory_Enrichment.md` and promoted
+to the eradication mutex list bypassing the heuristic gate.
+
+`CobaltStrikeConfig` parser (`mwcp_parsers/CobaltStrikeConfig.py`) extracts C2 host/port, HTTPS/HTTP/SMB beacon type, sleep + jitter, Malleable C2 User-Agent, Host header (domain fronting), spawn-to process, named pipe, and RSA public key.
+
+**Ekko sleep obfuscation caveat:** beacons using Ekko-class sleep XOR encrypt the *entire injected region* (including the CS config block) with a separate key while sleeping. A snapshot taken during sleep produces 0 CS config hits — the CS XOR magic is obscured by a second encryption layer. This is not a parser failure; it is expected. CS config is recoverable from:
+- Snapshots taken during active beacon execution (between Ekko sleep cycles)
+- On-disk stager DLLs/EXEs before memory injection
+- Post-capture memory pages where the beacon woke up before the snapshot completed
+
+C2 infrastructure is still recoverable via Layer 1 (IOC sweep) during active network communication regardless of Ekko state.
+
+**IOC verification:** when mwcp also finds an IP or domain already in the IOC sweep, that IOC is
+tagged `mwcp-verified` — the binary config and the in-memory string sweep independently recovered
+the same indicator, which eliminates the risk that the sweep was picking up benign cached data.
+
+---
+
+**Future Feature** (testing phase):
+
+***Investigating this connection will increase attacker dwell time and the risk of data exfiltration. Only enable connection tracing if the value of the intelligence outweighs the risk of data exposure.***
+
+**Egress monitor sees TCP out** → **identifies suspect PID** → **immediate VAD carve** → **mwcp (CobaltStrikeConfig)** → ***if config found: SpawnTo/PipeName/C2 pivot*** → ***persistence hunt***. If not found: store regions, wait for next beacon cycle.
+
+- The egress monitor gets the suspect PID list from existing enrichment flags rather than polling
+- The carve uses proc.memory.read() (correct API, proven above)
+- The persistence hunt uses SpawnTo and PipeName as search terms rather than generic sweep — targeted rather than brute-force
+
+---
+
+### New memory module findings (Modules 20–22)
+
+These modules were added alongside the core 19-module engine. They run after YARA and appear in the
+same `Memory_Findings_*.json` output file.
+
+**Module 20 — Direct Syscall Execution (T1055.004)**
+
+`High` finding: thread in a private anonymous executable VAD outside ntdll contains 3+ `syscall`
+opcode bytes (`0x0F 0x05`). This is the Hell's Gate / Halo's Gate / SysWhispers pattern — shellcode
+issues system calls directly to bypass user-mode API hooks installed by EDR sensors.
+
+*Corroboration required:* JIT-compiled processes (pwsh.exe, dotnet, CrossDeviceService) legitimately
+emit syscall opcodes in CLR-compiled code. The module already excludes `JIT_HEAVY_PROCS`. For any
+remaining hit outside a JIT host, corroborate with Module 3 (anonymous exec VAD in the same PID)
+and Module 12 (ntdll stub integrity). Three signals converging = confirmed hook evasion.
+
+**Module 21 — Process Ghosting / Deleted Image (T1055.015)**
+
+`High` finding: a file-backed executable VAD whose backing file no longer exists on disk at snapshot
+time. The attacker used `NtCreateUserProcess` with `FILE_DELETE_ON_CLOSE` — the PE was mapped into
+memory then the on-disk file was deleted before any AV scanner could see it. The process runs from
+memory only.
+
+*Action:* carve the VAD immediately (Section 10 of the follow-on guide). The carved `.bin` is the
+**only copy of that binary** — once the process exits, it is gone. Tag as a priority RE artifact.
+
+**Module 22 — ETW-TI Provider Health (T1562.006)**
+
+`Critical` finding when the `Microsoft-Windows-Threat-Intelligence` ETW provider (GUID
+`F4E1897C-BB5D-5668-F1D8-040F4D8DD344`) is absent or disabled. This provider is the kernel
+telemetry channel that feeds most EDR sensors with process-create, memory-write, and thread-create
+events. An attacker who removes it **blinds all EDR sensors simultaneously** — a high-sophistication
+defensive evasion technique requiring kernel-level access.
+
+*Immediate response:* isolate and escalate. A host where this provider was deliberately disabled is
+likely under active kernel-level control. Standard user-mode memory analysis is insufficient — treat
+as a potential rootkit scenario and consider re-imaging.
+
+---
+
 ### Escalating confirmed PIDs to the enrichment pipeline
 
 Once a PID is confirmed true-positive-class from the pivot report:
@@ -276,13 +411,43 @@ obvious on disk - it was reconstructed entirely from RAM, then tied to real infr
 
 ## Step 6 - corroborate, then act, then report
 
-1. **Corroborate** each indicator in the OSINT services (the spoofed User-Agent and beacon URIs are
-   especially searchable in urlscan / VirusTotal / OTX). Promote an `unverified` host only once OSINT
-   backs it.
-2. **Act** - feed the confirmed set into `IOCs.json` (it carries the per-IP country) for egress
-   blocking and `Invoke-Eradication.ps1` (analyst-gated). For deep RE, open the carved regions from
-   `tools\binja\data\` in the isolated Binary Ninja container.
-3. **Report** - Preserve the memory image, the IOC list, and the generated reports as evidence.
+1. **Corroborate** each indicator in OSINT services (spoofed User-Agent, beacon URIs, and mutex
+   names are all searchable in urlscan / VirusTotal / OTX / Shodan). Promote an `unverified` host
+   only once OSINT backs it. For mutex names, submit the bare hex token and any family strings from
+   the enrichment output to identify the implant family.
+
+2. **Verify IOCs against the binary** — if `Build-OfflineToolkit.ps1 -IncludeMWCP` was run, check
+   `Memory_Enrichment.md` for:
+   - **`mwcp CONFIRMED mutexes`** — the binary parser independently extracted these names from the
+     compiled binary, not just from runtime handles. Include in incident report with `[mwcp-confirmed]`.
+   - **`mwcp VERIFIED IOCs`** — IPs/domains found by both the memory sweep and the binary parser.
+     Two independent extraction methods agreeing = highest confidence; these go to the block list first.
+   - **`mwcp NEW C2`** — indicators found only in the binary config, not in the memory sweep.
+     Promote immediately to the IOC blocking list — these may be backup C2 channels not yet contacted.
+
+3. **File scan + mwcp** — if the EDR file hunt (`-ScanFileless`) flagged suspicious executables
+   on disk, run mwcp against those files. A flagged on-disk file whose mwcp output matches the
+   enrichment's mutex or C2 footprint closes the chain: memory implant → dropper on disk → binary
+   config extraction. This is the strongest possible corroboration — all three detection layers
+   (memory handles, binary parsing, on-disk scanning) converge on the same indicators.
+
+4. **Behavior-based corroboration** — cross-reference the EDR cmdline scan output with what the
+   enrichment found:
+   - `VSS Deletion` or `Recovery Disable` during the same session as a confirmed memory implant = the
+     attacker is in the impact phase; escalate and contain immediately
+   - `Archive Staging` to a path where enrichment found file-drop handles = exfil in progress
+   - `DoH Beacon` on a non-browser process = C2 hiding from DNS logs; only the memory IOC sweep
+     recovered the real destination
+   - `AppCertDLLs Injection` or `Accessibility Feature Hijack` alongside a confirmed memory implant =
+     the attacker has installed boot-persistent foothold; document for the eradication plan
+
+5. **Act** - feed the confirmed set into `IOCs.json` for egress blocking and `Invoke-Eradication.ps1`
+   (analyst-gated, dry-run first). For deep RE, open carved regions from `tools\binja\data\` in the
+   isolated Binary Ninja container.
+
+6. **Report** - Preserve the memory image, the IOC list, and all generated reports as evidence.
+   `Timeline_Correlation.md` and its Mermaid attack chain diagram are ready to embed directly in any
+   incident report as the attack chronology visualization.
 
 ---
 

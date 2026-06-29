@@ -49,10 +49,21 @@ _PERSIST_KEY_RE = re.compile(
 
 # A normal Windows mutant/event name has recognisable structure (a known prefix or a
 # colon-delimited form). An implant lock is typically a bare high-entropy token.
+# SM0:PID:session:NAME -- not blanket-suppressed; NAME component evaluated separately.
+# WilStaging is intentionally NOT in this list: state-sponsored APT groups use
+# WilStaging-named mutexes as a Windows camouflage technique. Evaluate by NAME.
+# WilError IS in this list (documented WIL error-tracking mutex, not an APT signal).
+# SmartScreen* mutexes are Windows security component synchronization objects.
 _KNOWN_OBJ_PREFIX = re.compile(
-    r"(?i)^(SM0:|Local\\|Global\\|Session\\|__|Microsoft|Windows|WilError|WilStaging|"
+    r"(?i)^(Local\\|Global\\|Session\\|__|Microsoft|Windows|WilError|SmartScreen|"
     r"DBWin|MSCTF|RotHint|UrlZones|\{|OLE|\[)")
 _HEX_TOKEN = re.compile(r"^[0-9A-Fa-f]{6,}$")
+
+# SM0:PID:session:NAME mutexes -- evaluate the NAME component, not the full string.
+# Known-good SM0 name components: WilError_N (WIL error tracking, always legitimate).
+# WilStaging is NOT known-good -- used as APT camouflage.
+_SM0_RE = re.compile(r"^SM0:\d+:\d+:(.+)$", re.IGNORECASE)
+_SM0_KNOWN_NAMES = re.compile(r"(?i)^WilError_\d+$")
 
 _TEMP_FILE_RE = re.compile(
     r"(?i)\\(Temp|Tmp|AppData\\Local\\Temp|ProgramData|Users\\Public|Windows\\Temp)\\")
@@ -253,12 +264,38 @@ def classify_handle(htype, tag):
 
 
 def is_suspicious_object_name(name):
-    """A bare high-entropy token (no known prefix / colon structure) - a likely implant lock."""
+    """Classify a mutex/event name as suspicious (likely implant-created) or benign.
+
+    Classification layers (research-validated):
+    1. SM0:PID:session:NAME format -- evaluate the NAME component via known-good list.
+       WilError_* = known WIL error tracking (benign). WilStaging_* = NOT known-good:
+       state-sponsored APT groups use WilStaging-named mutexes as a Windows camouflage technique.
+    2. Known-good prefix match -- Windows system objects have recognisable prefixes (Global\\,
+       Local\\, Microsoft*, SmartScreen*, etc.). Hexacorn 'clean list' corroborates these.
+    3. Bare hex token (e.g. '1BA6BD98D9') -- highest-confidence malware signal per SANS/Unit42.
+    4. Undelimited long string (e.g. 'x9pv45dxghk') -- heuristic; requires process attribution
+       to confirm. Some legitimate Windows DLLs (winipcsecproc.dll) produce these names (Hexacorn).
+       Flagged suspicious here because enrichment runs over confirmed-TP PIDs; analyst verifies.
+
+    DC3-MWCP adds a DEFINITIVE layer on top: mwcp_mutexes in the dossier are confirmed
+    malware-created via family-specific binary parsing and bypass this heuristic entirely."""
     name = str(name or "").strip()
-    if not name or _KNOWN_OBJ_PREFIX.search(name):
+    if not name:
         return False
-    return bool(_HEX_TOKEN.match(name)) or (len(name) >= 8 and ":" not in name and "\\" not in name
-                                            and "-" not in name and " " not in name)
+    # Layer 1: SM0:PID:session:NAME -- evaluate the name component, not the full string
+    sm0_m = _SM0_RE.match(name)
+    if sm0_m:
+        name_component = sm0_m.group(1)
+        return not bool(_SM0_KNOWN_NAMES.match(name_component))
+    # Layer 2: known-good Windows prefix → not suspicious
+    if _KNOWN_OBJ_PREFIX.search(name):
+        return False
+    # Layer 3: bare hex token → high-confidence malware lock
+    if _HEX_TOKEN.match(name):
+        return True
+    # Layer 4: undelimited long string → heuristic, needs process attribution to confirm
+    return (len(name) >= 8 and ":" not in name and "\\" not in name
+            and "-" not in name and " " not in name)
 
 
 # Higher-order threat IOCs an implant leaves in memory beyond plain C2 - each pattern is specific
@@ -493,6 +530,10 @@ def rollup_iocs(dossiers):
                 keys.add(h["name"])
             elif h["category"] == "mutex" and h["suspicious"]:
                 mutexes.add(h["name"])
+        # DC3-MWCP confirmed malware-created mutex names -- definitive, bypass heuristic gate
+        for mx in d.get("mwcp_mutexes", []):
+            if mx:
+                mutexes.add(f"[mwcp-confirmed] {mx}")
         for rel in d.get("lineage", {}).get("children", []) + \
                 ([d["lineage"]["parent"]] if d.get("lineage", {}).get("parent") else []):
             if rel.get("pid"):
@@ -600,6 +641,80 @@ def run_floss(floss_exe, region_path, fmt="sc64"):
     except Exception:
         pass
     return {"decoded": [], "stack": [], "tight": [], "static_count": 0}
+
+
+# ---------------------------------------------------------------------- DC3-MWCP
+def find_mwcp():
+    """DC3-MWCP staged by Build-OfflineToolkit -IncludeMWCP (tools/mwcp/lib/) or installed globally.
+    Returns (python_exe, mwcp_lib_path) or (None, None) if not available."""
+    import shutil
+    lib_path = str(Path(__file__).resolve().parent.parent.parent.parent / "tools" / "mwcp" / "lib")
+    if os.path.isdir(lib_path):
+        py = shutil.which("python") or shutil.which("python3") or shutil.which("py")
+        return (py, lib_path) if py else (None, None)
+    # Fall back: check if mwcp is installed globally
+    py = shutil.which("python") or shutil.which("python3")
+    if py:
+        import subprocess
+        r = subprocess.run([py, "-c", "import mwcp; print(mwcp.__version__)"],
+                           capture_output=True, text=True, timeout=10)
+        if r.returncode == 0:
+            return (py, None)
+    return (None, None)
+
+
+def run_mwcp(python_exe, lib_path, region_path, existing_iocs=None, out_dir=None):
+    """Run DC3-MWCP against a carved region binary using mwcp_scan.py.
+
+    mwcp_scan.py API requirements (mwcp 3.16.1):
+      - Parsers MUST be registered in parser_config.yml (else mwcp silently rejects them)
+      - file_object.data (NOT .file_data) for binary content in parser run()
+      - Extraction via report.as_dict()['metadata'] -- report.get(meta.Class) is unreliable
+      - Returns JSON array; single-region call → use result_list[0]
+      - File-type detection selects parsers: GenericMutex, GenericC2, PowerShellDecoder, LNKParser
+      - Tailing log appended to <out_dir>/mwcp_scan_log.txt for audit trail
+
+    Results tagged: mwcp-verified (overlap with sweep = confidence upgrade),
+    mwcp_new_iocs (new IOCs from binary not in sweep)."""
+    import subprocess
+    if existing_iocs is None:
+        existing_iocs = {}
+
+    # mwcp_scan.py lives alongside this file in the threat_hunting directory
+    scanner = os.path.join(os.path.dirname(os.path.abspath(__file__)), "mwcp_scan.py")
+    if not os.path.isfile(scanner):
+        return {}
+
+    # Signature: mwcp_scan.py <lib_path> <out_dir|-> <file_path>
+    # Returns JSON array ([{...}]) -- take first element for this single-file call.
+    cmd = [python_exe, scanner, lib_path, out_dir or '-', region_path]
+
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        if r.returncode == 0 and r.stdout.strip():
+            result_list = json.loads(r.stdout.strip())
+            # mwcp_scan.py always returns a list; single-region call → take first entry
+            merged = result_list[0] if isinstance(result_list, list) and result_list else {}
+            # Tag results: mwcp is a VERIFICATION layer on top of the IOC sweep.
+            # When mwcp finds the same IOC the sweep already found -> mark as mwcp-verified
+            # (confidence upgrade). When mwcp finds NEW IOCs -> add them.
+            # Both cases appear in the report -- overlap is corroboration, not duplication.
+            existing_all = set(existing_iocs.get("ips", [])) | \
+                           set(existing_iocs.get("domains", [])) | \
+                           set(existing_iocs.get("urls", []))
+            verified, new_finds = [], []
+            for a in merged.get("address", []):
+                if a in existing_all:
+                    verified.append(a)
+                else:
+                    new_finds.append(a)
+            merged["mwcp_verified_iocs"] = verified    # already in sweep, now also confirmed by binary
+            merged["mwcp_new_iocs"]      = new_finds   # not in sweep, newly found by mwcp
+            merged["address"]            = new_finds   # only promote truly new ones to IOC set
+            return {k: list(dict.fromkeys(v)) for k, v in merged.items()}
+    except Exception:
+        pass
+    return {}
 
 
 # --------------------------------------------------------- time / correlation
@@ -733,10 +848,11 @@ def has_injection_evidence(dossier):
                 or dossier.get("shellcode_threads"))
 
 
-def correlate_first_seen(dossiers, usb_devices):
-    """Join RAM implant first-seen with USB device connect times on one UTC timeline. Returns a dict:
-    {ram_first_seen, ram_pid, ram_name, ram_basis, per_pid:[...], devices:[{...delta_hours, verdict}],
-    summary}. The per-PID anchor is the injected-thread create time when available, else process-create."""
+def correlate_first_seen(dossiers, usb_devices, tp_events=None):
+    """Join RAM implant first-seen with USB device connect times and all confirmed TP artifact events.
+    Returns a dict: {ram_first_seen, ram_pid, ram_name, ram_basis, per_pid:[...],
+    devices:[{...delta_hours, verdict}], tp_events:[...], summary}.
+    tp_events is an ordered list of confirmed TP artifacts across all scan outputs."""
     per_pid = []
     for d in dossiers:
         dt, basis = implant_anchor(d)
@@ -798,7 +914,8 @@ def correlate_first_seen(dossiers, usb_devices):
     return {"ram_first_seen": ram["first_seen"] if ram else None,
             "ram_pid": ram["pid"] if ram else None, "ram_name": ram["name"] if ram else None,
             "ram_basis": ram["basis"] if ram else None,
-            "per_pid": per_pid, "devices": devices, "summary": summary}
+            "per_pid": per_pid, "devices": devices, "summary": summary,
+            "tp_events": tp_events or []}
 
 
 # ------------------------------------------------------------- live extraction
@@ -810,7 +927,7 @@ def _safe(fn, default):
 
 
 def enrich_pid(vmm, p, pid_map, nets_by_pid, carve_dir, size_cap=16 * 1024 * 1024,
-               capa_exe=None, floss_exe=None):
+               capa_exe=None, floss_exe=None, mwcp_py=None, mwcp_lib=None, out_dir=None):
     """Build one PID's full memory footprint and carve its injected exec regions."""
     pid, name = p.pid, p.name
     mods = _safe(lambda: p.module_list(), [])
@@ -831,6 +948,9 @@ def enrich_pid(vmm, p, pid_map, nets_by_pid, carve_dir, size_cap=16 * 1024 * 102
     # threat IOCs accumulate across every region we read (exec + data)
     threat = {k: [] for k in _THREAT_CATS}
     threat["private_keys"] = 0
+    # mwcp-confirmed mutexes: DEFINITIVE malware-created names extracted from carved binaries
+    # by DC3-MWCP family-specific parsers. Separate from handle-based mutex classification.
+    mwcp_mutexes: list = []
 
     def _accumulate(data, bare):
         found = extract_threat_iocs(data, bare_domains=bare)
@@ -876,6 +996,21 @@ def enrich_pid(vmm, p, pid_map, nets_by_pid, carve_dir, size_cap=16 * 1024 * 102
                     deob = "\n".join(rec["floss"]["decoded"] + rec["floss"]["stack"] + rec["floss"]["tight"])
                     if deob:
                         _accumulate(deob.encode("utf-8", "ignore"), bare=True)
+                if mwcp_py and tmpf:
+                    # Pass the existing IOC sweep results so mwcp can tag overlaps as verified
+                    current_iocs = {"ips": list(threat["ips"]), "domains": list(threat["domains"]),
+                                    "urls": list(threat["urls"])}
+                    mwcp_result = run_mwcp(mwcp_py, mwcp_lib, tmpf,
+                                            existing_iocs=current_iocs, out_dir=out_dir)
+                    rec["mwcp"] = mwcp_result
+                    # mwcp-confirmed mutexes: DEFINITIVE malware-created names from binary parsing.
+                    for mx in mwcp_result.get("mutex", []):
+                        if mx and mx not in mwcp_mutexes:
+                            mwcp_mutexes.append(mx)
+                    # mwcp-confirmed C2 addresses → merge into IOC sweep
+                    for addr in mwcp_result.get("address", []):
+                        if addr:
+                            _accumulate(addr.encode("utf-8", "ignore"), bare=True)
             finally:
                 if tmpf:
                     try:
@@ -953,6 +1088,7 @@ def enrich_pid(vmm, p, pid_map, nets_by_pid, carve_dir, size_cap=16 * 1024 * 102
         "lineage": lineage, "network": network,
         "c2": {"ips": threat["ips"], "domains": threat["domains"], "urls": threat["urls"]},
         "threat_iocs": threat,
+        "mwcp_mutexes": mwcp_mutexes,   # DC3-MWCP confirmed malware-created mutex names
     }
 
 
@@ -1064,54 +1200,120 @@ _CORR_END = "<!-- TIMELINE-CORR-END -->"
 
 
 def build_correlation_mermaid(corr):
-    """Left-to-right first-seen timeline: each USB device -> implant, edge = time delta + short verdict."""
-    L = ["```mermaid", "flowchart LR",
+    """Attack chain timeline: confirmed TP artifacts clustered by ATT&CK phase, ordered chronologically.
+    Each phase is a subgraph node cluster; arrows show phase progression with time deltas."""
+    tp_events = corr.get("tp_events", [])
+    devices   = corr.get("devices", [])
+
+    # Group events by ATT&CK phase, preserving chronological order within each phase
+    _PHASE_ORDER = ["Execution", "Defense Evasion", "Persistence",
+                    "Command & Control", "Credential Access", "Collection", "Exfiltration", "Impact"]
+    by_phase = {}
+    for e in tp_events:
+        ph = e.get("phase", "Other")
+        by_phase.setdefault(ph, []).append(e)
+
+    L = ["```mermaid", "flowchart TD",
+         "    classDef phase fill:#1e3a5f,stroke:#3b82f6,color:#e2e8f0,rx:8;",
+         "    classDef artifact fill:#1e293b,stroke:#64748b,color:#cbd5e1;",
          "    classDef usb fill:#155e75,stroke:#67e8f9,color:#fff;",
-         "    classDef implant fill:#7f1d1d,stroke:#fca5a5,color:#fff,stroke-width:3px;"]
-    ref = (f'first seen {corr["ram_first_seen"]}<br/>PID {corr["ram_pid"]} {corr["ram_name"]}'
-           if corr.get("ram_first_seen") else "implant first-seen UNKNOWN")
-    L.append(f'    R["Implant first ran<br/>{_mm(ref)}"]')
-    L.append("    class R implant;")
-    for i, dev in enumerate(corr.get("devices", [])):
-        nid = f"U{i}"
-        susp = f'<br/>{_mm(dev["suspicion"])}' if dev.get("suspicion") else ""
-        fc = dev.get("first_connect") or "no connect time"
-        L.append(f'    {nid}["USB: {_mm(dev["vendor"])} {_mm(dev["product"])}<br/>connected {_mm(fc)}{susp}"]')
-        L.append(f"    class {nid} usb;")
-        dh = dev.get("delta_hours")
-        if dh is None:
-            lbl = "time unknown"
-        elif dh > 24:
-            lbl = f'{dh}h before / weak'
-        elif dh >= 0:
-            lbl = f'{dh}h before / candidate'
-        else:
-            lbl = f'{abs(dh)}h after / not source'
-        L.append(f'    {nid} -->|"{_mm(lbl)}"| R')
+         "    classDef c2 fill:#7f1d1d,stroke:#fca5a5,color:#fff;"]
+
+    prev_node = None
+    node_idx  = 0
+
+    # USB entry vector (if any candidate)
+    usb_candidates = [d for d in devices if d.get("delta_hours") is not None and d["delta_hours"] >= 0]
+    if usb_candidates:
+        best = min(usb_candidates, key=lambda d: d["delta_hours"])
+        unode = f"USB0"
+        fc = best.get("first_connect") or "unknown"
+        L.append(f'    {unode}["Entry vector candidate<br/>USB: {_mm(best["vendor"])} {_mm(best["product"])}'
+                 f'<br/>connected {_mm(fc)}"]')
+        L.append(f"    class {unode} usb;")
+        prev_node = unode
+
+    # Phase clusters
+    for phase in _PHASE_ORDER:
+        events_in_phase = by_phase.get(phase, [])
+        if not events_in_phase:
+            continue
+        # Earliest event in phase as the phase anchor
+        earliest = events_in_phase[0]
+        ph_node  = f"P{node_idx}"
+        node_idx += 1
+        ts_short = (earliest.get("timestamp") or "")[:16]  # YYYY-MM-DD HH:MM
+        # Summarise up to 3 artifact types in this phase
+        types = list(dict.fromkeys(e.get("type", "") for e in events_in_phase))[:3]
+        type_summary = "<br/>".join(_mm(t[:40]) for t in types)
+        label = f"{_mm(phase)}<br/>{_mm(ts_short)}<br/>{type_summary}"
+        L.append(f'    {ph_node}["{label}"]')
+        L.append(f"    class {ph_node} phase;")
+        if prev_node:
+            L.append(f"    {prev_node} --> {ph_node}")
+        prev_node = ph_node
+
+    # C2 endpoints recovered
+    iocs = (corr.get("ram_first_seen") or "")
+    c2_events = [e for e in tp_events if e.get("phase") == "Command & Control"]
+    if c2_events and corr.get("ram_first_seen"):
+        c2node = f"P{node_idx}"
+        node_idx += 1
+        c2_ts = c2_events[0].get("timestamp", corr["ram_first_seen"])[:16]
+        L.append(f'    {c2node}["C2 confirmed<br/>{_mm(c2_ts)}<br/>IOCs recovered from RAM"]')
+        L.append(f"    class {c2node} c2;")
+        if prev_node and prev_node != c2node:
+            pass  # already included in phase flow
+
+    # If no TP events, fall back to simple USB→RAM flow
+    if not tp_events and corr.get("ram_first_seen"):
+        ref = (f'Implant first ran {_mm(corr["ram_first_seen"])}<br/>PID {corr["ram_pid"]} '
+               f'{_mm(corr["ram_name"])}')
+        L.append(f'    RAM["{ref}"]')
+        L.append("    class RAM phase;")
+        if prev_node:
+            L.append(f"    {prev_node} --> RAM")
+
     L.append("```")
     return "\n".join(L)
 
 
 def build_correlation_section(corr):
-    """The full first-seen correlation block (verdict + table + timeline) for Attack_Graph.md."""
+    """The full confirmed-TP attack timeline (artifact chain + USB correlation + Mermaid diagram)."""
     L = [_CORR_START, "",
-         "## First-seen correlation (RAM implant <-> USB device)", "",
-         "Ties when the implant first ran (process create time recovered from memory) to when each "
-         "removable device first connected (Get-USBDeviceHistory). A device present BEFORE the implant "
-         "first ran is an entry-vector candidate; one that connected only AFTER was introduced "
-         "post-infection.", "",
+         "## Confirmed TP Attack Timeline", "",
+         "All confirmed true-positive artifacts ordered by earliest known timestamp. "
+         "Only findings with positive injection/execution evidence are included. "
+         "YARA-only name/string matches without corroborating memory evidence are excluded.", "",
          f"**Assessment:** {corr.get('summary', '')}", ""]
+
+    # TP artifact timeline (all sources, chronological)
+    tp_events = corr.get("tp_events", [])
+    if tp_events:
+        L += ["### Confirmed TP Artifact Chain (chronological)", "",
+              "| Timestamp (UTC) | Phase | Type | PID | Description |",
+              "|---|---|---|---|---|"]
+        for e in tp_events:
+            pid_s = str(e.get("pid") or "")
+            L.append(f"| {e.get('timestamp', '')} | {e.get('phase', '')} | {e.get('type', '')} "
+                     f"| {pid_s} | {e.get('description', '')[:120]} |")
+        L.append("")
+
+    # Per-PID RAM first-seen (enrichment anchor)
     if corr.get("per_pid"):
-        L += ["**Per-implant first-seen (RAM):**", "",
-              "| PID | Process | First ran | Basis | Injection evidence |", "|---|---|---|---|---|"]
+        L += ["### RAM First-Seen by Confirmed TP PID", "",
+              "| PID | Process | First ran (UTC) | Basis | Injection evidence |", "|---|---|---|---|---|"]
         for p in corr["per_pid"]:
             note = "injected-thread create (implant start)" if p["basis"] == "injected-thread" \
-                   else "process create (host/session start - upper bound)"
-            ev = "yes (region/thread)" if p.get("evidence") else "NO - name/string match only (boot time)"
+                   else "process create (host/session start — upper bound)"
+            ev = "yes (region/thread)" if p.get("evidence") else "NO — name/string match only (boot time)"
             L.append(f"| {p['pid']} | {p['name']} | {p['first_seen']} | {note} | {ev} |")
         L.append("")
+
+    # USB correlation
     if corr.get("devices"):
-        L += ["| USB device | Serial | First connect | vs implant first-seen | Verdict |",
+        L += ["### Entry Vector Correlation (USB <-> Implant First-Seen)", "",
+              "| USB device | Serial | First connect | vs implant | Verdict |",
               "|---|---|---|---|---|"]
         for d in corr["devices"]:
             delta = ("" if d["delta_hours"] is None
@@ -1120,6 +1322,7 @@ def build_correlation_section(corr):
             L.append(f"| {d['vendor']} {d['product']} | `{d['serial']}` | {d['first_connect'] or 'unknown'} "
                      f"| {delta} | {d['verdict']} |")
         L.append("")
+
     L += [build_correlation_mermaid(corr), "", _CORR_END, ""]
     return "\n".join(L)
 
@@ -1155,6 +1358,131 @@ def _load_json(path):
         return None
 
 
+# ATT&CK phase classification for confirmed TP finding types.
+_TP_PHASE = {
+    "Shellcode Thread (Memory)":                    "Execution",
+    "Injected Memory Region":                       "Defense Evasion",
+    "Dormant Beacon Candidate (Memory)":            "Command & Control",
+    "Thread-Pool Injection / Ekko Pattern (Memory)":"Defense Evasion",
+    "Process Hollowing Indicator (Memory)":         "Defense Evasion",
+    "Process Ghosting (Deleted Image)":             "Defense Evasion",
+    "Manual-map PE Injection (Memory)":             "Defense Evasion",
+    "Module Stomping (Memory)":                     "Defense Evasion",
+    "Direct Syscall Execution":                     "Defense Evasion",
+    "ETW-TI Provider Disabled":                     "Defense Evasion",
+    "YARA Match (Memory)":                          "Execution",
+    "Known Offensive Tool (Memory)":                "Execution",
+    "Suspicious Scheduled Task":                    "Persistence",
+    "WMI Persistence":                              "Persistence",
+    "AppCertDLLs Injection":                        "Persistence",
+    "Accessibility Feature Hijack":                 "Persistence",
+    "IFEO Debugger Hijack":                         "Persistence",
+    "BootExecute Persistence":                      "Persistence",
+    "Active Setup Persistence":                     "Persistence",
+    "Suspicious Print Monitor DLL":                 "Persistence",
+    "Suspicious Service":                           "Persistence",
+    "VSS Deletion":                                 "Impact",
+    "Recovery Disable":                             "Impact",
+    "Archive Staging":                              "Collection",
+    "SMTP Exfiltration":                            "Exfiltration",
+    "Raw File Transfer":                            "Exfiltration",
+    "DoH Beacon":                                   "Command & Control",
+    "Suspicious Outbound Connection":               "Command & Control",
+    "Suspicious BITS Job":                          "Command & Control",
+    "Credential Hive Dump":                         "Credential Access",
+    "Browser Credential Access":                    "Credential Access",
+    "LSASS Memory Dump":                            "Credential Access",
+    "Credential Vault Access":                      "Credential Access",
+    "LOLBin Execution":                             "Execution",
+    "WSL Suspicious Execution":                     "Defense Evasion",
+    "WSL Parent Spawn":                             "Defense Evasion",
+}
+
+# Finding types that are confirmed TP only when severity is High or Critical.
+# Medium/Low instances need corroboration and are NOT confirmed TPs for the timeline.
+_TP_SEVERITY_GATE = {
+    "YARA Match (Memory)",               # Medium = data region hit, not exec evidence
+    "Dormant Beacon Candidate (Memory)", # Medium = entropy alone, needs AdjAnonExec corroboration
+    "Shellcode Thread (Memory)",         # Medium = vad=image (needs corroboration); only High = anon_exec
+}
+
+
+def _collect_tp_events(out_dir, dossiers, tp_pids=None):
+    """Aggregate confirmed true-positive artifact events from all scan outputs in `out_dir`.
+    Returns a list of dicts: {timestamp (str), phase (str), type (str), pid, name, description}.
+    Only confirmed TPs are included -- no YARA-only Medium matches, no FP-cleared findings.
+
+    Sources (in priority order for timestamp accuracy):
+    1. Enrichment dossiers  -- injected-thread first-seen (most accurate attack time)
+    2. Memory_Findings JSON -- detection timestamps for confirmed TP finding types
+    3. IOCs.json            -- C2 IP/domain recovery = at least one confirmed C2 contact
+    """
+    tp_pids = set(tp_pids or [])
+    events  = []
+
+    # 1. Enrichment dossiers -- inject time is the best attack anchor.
+    for d in dossiers:
+        pid  = d.get("pid")
+        name = d.get("name", "?")
+        t, basis = implant_anchor(d)
+        if t and has_injection_evidence(d):
+            phase = "Execution (injection)"
+            desc  = f"PID {pid} ({name}) first carried injected code -- {basis} create time"
+            events.append({"timestamp": _fmt(t), "phase": "Execution", "type": "Implant First Seen",
+                           "pid": pid, "name": name, "description": desc, "_dt": t})
+        # C2 contact first-seen: recovered IPs/domains = the implant called home at least once
+        if d.get("recovered_iocs", {}).get("ips") or d.get("recovered_iocs", {}).get("domains"):
+            ioc_t = t  # best we can do: anchor on the same PID's first-seen time
+            if ioc_t:
+                c2 = (d["recovered_iocs"].get("ips", []) + d["recovered_iocs"].get("domains", []))[:3]
+                events.append({"timestamp": _fmt(ioc_t), "phase": "Command & Control",
+                               "type": "C2 Infrastructure Recovery",
+                               "pid": pid, "name": name,
+                               "description": f"C2 IOCs recovered from PID {pid} ({name}): {', '.join(c2)}",
+                               "_dt": ioc_t})
+
+    # 2. Memory_Findings -- filter to confirmed TP types at High/Critical severity.
+    mf_path = _newest(out_dir, "Memory_Findings_*.json")
+    if mf_path:
+        mf = _load_json(mf_path) or []
+        for f in mf:
+            sev  = f.get("Severity", "")
+            ftyp = f.get("Type", "")
+            tgt  = f.get("Target", "")
+            det  = f.get("Details", "")
+            ts   = f.get("Timestamp", "")
+            if ftyp in _TP_SEVERITY_GATE and sev not in ("High", "Critical"):
+                continue  # skip Medium/Low for these uncertain types
+            if ftyp not in _TP_PHASE:
+                continue  # not a confirmed-TP finding type
+            # Only include if from a TP PID (enriched) or if finding itself is from a high-conf type
+            pid_in_target = None
+            import re as _re
+            m = _re.search(r"PID\s+(\d+)", tgt)
+            if m:
+                pid_in_target = int(m.group(1))
+            if tp_pids and pid_in_target and pid_in_target not in tp_pids:
+                continue  # finding is from a non-TP PID
+            phase = _TP_PHASE.get(ftyp, "Other")
+            dt_v  = coerce_dt(ts)
+            events.append({"timestamp": ts, "phase": phase, "type": ftyp,
+                           "pid": pid_in_target, "name": tgt[:60],
+                           "description": det[:120], "_dt": dt_v or coerce_dt("2000-01-01")})
+
+    # Deduplicate: one entry per (type, pid) keeping earliest timestamp.
+    seen_keys: dict = {}
+    deduped = []
+    for e in sorted(events, key=lambda x: x["_dt"] or coerce_dt("2000-01-01")):
+        key = (e.get("type", ""), e.get("pid"))
+        if key not in seen_keys:
+            seen_keys[key] = True
+            deduped.append(e)
+    # Strip internal sort key
+    for e in deduped:
+        e.pop("_dt", None)
+    return deduped
+
+
 def correlate_from_dir(out_dir):
     """Standalone join (no memory image needed): read the newest Memory_Enrichment_*.json and
     USB_Forensics_*.json already in `out_dir`, correlate first-seen times, write Timeline_Correlation.md
@@ -1163,11 +1491,14 @@ def correlate_from_dir(out_dir):
     if not enr:
         print("[!] no Memory_Enrichment_*.json in", out_dir, "- run the enrichment first")
         return None
-    usb = _load_json(_newest(out_dir, "USB_Forensics_*.json"))
-    devices = load_usb_devices(usb) if usb else []
-    corr = correlate_first_seen(enr.get("dossiers", []), devices)
+    dossiers = enr.get("dossiers", [])
+    tp_pids  = {d["pid"] for d in dossiers}
+    usb      = _load_json(_newest(out_dir, "USB_Forensics_*.json"))
+    devices  = load_usb_devices(usb) if usb else []
+    tp_events = _collect_tp_events(out_dir, dossiers, tp_pids)
+    corr = correlate_first_seen(dossiers, devices, tp_events=tp_events)
     with open(os.path.join(out_dir, "Timeline_Correlation.md"), "w", encoding="utf-8") as fh:
-        fh.write("# First-seen Timeline Correlation\n\n" + build_correlation_section(corr))
+        fh.write("# Confirmed TP Attack Timeline\n\n" + build_correlation_section(corr))
     append_correlation(out_dir, corr)
     if not usb:
         print("[i] no USB_Forensics_*.json yet - correlation shows RAM first-seen only.")
@@ -1197,6 +1528,13 @@ def build_enrichment_md(bundle):
         if d.get("create_time"):
             a(f"_Process create time (host start{' - injected, so this is the host process boot, not the implant' if d.get('injected_thread_first_seen') else ''}): {d['create_time']}_")
         a("")
+        # DC3-MWCP confirmed mutexes get their own section -- these are definitively malware-created
+        mwcp_mx = d.get("mwcp_mutexes", [])
+        if mwcp_mx:
+            a("**DC3-MWCP CONFIRMED malware-created mutex names (from binary parsing):**")
+            for mx in mwcp_mx:
+                a(f"- `{mx}` _(mwcp-confirmed: this mutex was created by the malware binary)_")
+            a("")
         susp = [h for h in d.get("handles", []) if h.get("suspicious")]
         if susp:
             a("**Suspicious handles (eradication artifacts):**")
@@ -1243,6 +1581,32 @@ def build_enrichment_md(bundle):
                       + ", ".join(f"`{s}`" for s in deob[:25]))
                 else:
                     a(f"- FLOSS: no obfuscated strings recovered ({fl.get('static_count', 0)} static)")
+            mw = r.get("mwcp")
+            if mw is None:
+                a("- mwcp: not staged (stage with `Build-OfflineToolkit.ps1 -IncludeMWCP` "
+                  "to extract malware family config — mutex names, C2, credentials)")
+            elif (mw.get("mutex") or mw.get("address") or mw.get("filename") or mw.get("password")
+                  or mw.get("mwcp_verified_iocs") or mw.get("mwcp_new_iocs")):
+                if mw.get("mutex"):
+                    a(f"- **mwcp CONFIRMED mutexes (extracted from binary):** "
+                      + ", ".join(f"`{m}`" for m in mw["mutex"]))
+                if mw.get("mwcp_verified_iocs"):
+                    a(f"- **mwcp VERIFIED (binary config confirms sweep IOCs):** "
+                      + ", ".join(f"`{defang(x)}`" for x in mw["mwcp_verified_iocs"][:10]))
+                if mw.get("mwcp_new_iocs"):
+                    a(f"- **mwcp NEW C2 (not in region sweep, from binary config):** "
+                      + ", ".join(f"`{defang(x)}`" for x in mw["mwcp_new_iocs"][:10]))
+                if mw.get("address"):
+                    a(f"- **mwcp additional C2:** "
+                      + ", ".join(f"`{defang(x)}`" for x in mw["address"][:10]))
+                if mw.get("filename"):
+                    a(f"- **mwcp dropped filenames:** "
+                      + ", ".join(f"`{x}`" for x in mw["filename"][:10]))
+                if mw.get("password"):
+                    a(f"- **mwcp passwords/keys:** "
+                      + ", ".join(f"`{x}`" for x in mw["password"][:5]))
+            else:
+                a("- mwcp: ran, no family parser matched (unknown family or packed)")
             a("")
         cands = d.get("decode_candidates", [])
         if cands:
@@ -1256,6 +1620,69 @@ def build_enrichment_md(bundle):
       "for keyed ciphers supply the key recovered from the region strings above.")
     a("")
     return "\n".join(L)
+
+
+# ---------------------------------------------------------------------------
+# Phase 1C retrospective fix: benign-infrastructure allowlist.
+# memory_enrich.py's IOC sweep recovers ALL domains present in scanned process
+# memory, including cert-authority OCSP/CRL endpoints, vendor CDN domains, and
+# XML namespace URIs. Without filtering, merge_into_iocs() promotes them into
+# c2_endpoints[], causing Invoke-Eradication to sinkhole legitimate infra.
+# ---------------------------------------------------------------------------
+
+_BENIGN_DOMAIN_SUFFIXES = (
+    # Microsoft / Windows
+    ".microsoft.com", ".windows.com", ".windowsupdate.com", ".microsoftonline.com",
+    ".msocsp.com",  # Microsoft OCSP responder
+    ".azure.com", ".azureedge.net", ".live.com", ".live.net", ".office.com", ".sharepoint.com",
+    # Google / YouTube
+    ".google.com", ".googleapis.com", ".gstatic.com", ".youtube.com", ".googlevideo.com",
+    # Adobe (confirmed FP pattern from MAIN-SYS investigation)
+    ".adobe.com", ".acrobat.com", ".adobelogin.com", ".adobe.io", ".adobedtm.com",
+    # Certificate authorities — OCSP / CRL infrastructure
+    ".digicert.com", ".verisign.com", ".entrust.net", ".globalsign.com",
+    ".identrust.com", ".sectigo.com", ".comodo.com", ".letsencrypt.org",
+    # Government / military CA endpoints (DISA)
+    "disa.mil", ".disa.mil",
+    # Taiwanese ISP CA (common in enterprise cert chains)
+    ".hinet.net",
+    # Content / standards namespaces that appear in Office/PDF metadata
+    ".openxmlformats.org", ".w3.org", ".iptc.org", ".purl.org",
+    # Developer tools commonly in working memory
+    ".github.com", ".githubusercontent.com", ".gitforwindows.org",
+    # Apple
+    ".apple.com", ".icloud.com",
+    # CDNs
+    ".cloudfront.net", ".akamaiedge.net", ".akamaitechnologies.com",
+    ".fastly.net", ".cloudflare.com",
+    # Mozilla
+    ".mozilla.org", ".firefox.com",
+)
+
+_BENIGN_DOMAIN_EXACT = frozenset({
+    "ocsp.us", "gitforwindows.org", "iptc.org", "purl.org",
+})
+
+
+def _is_benign_domain(host: str) -> bool:
+    """Return True if *host* is known-good infrastructure that must never be
+    promoted to c2_endpoints[].  Used by merge_into_iocs to prevent FP PIDs
+    from contaminating the eradication IOC set."""
+    h = host.lower().rstrip(".")
+    if h in _BENIGN_DOMAIN_EXACT:
+        return True
+    return any(h == s.lstrip(".") or h.endswith(s) for s in _BENIGN_DOMAIN_SUFFIXES)
+
+
+def _is_valid_ioc_host(host: str) -> bool:
+    """Return True if host is a structurally valid IP or domain that can be acted on.
+    Filters out extraction artifacts like '***', empty strings, or truncated fragments
+    that the IOC sweep occasionally emits from malformed netscan records."""
+    if not host or len(host) < 3:
+        return False
+    if _ip_to_int(host) is not None:
+        return True   # valid IPv4
+    return _valid_host(host)  # valid-looking domain (TLD check)
 
 
 def merge_into_iocs(out_dir, bundle):
@@ -1276,6 +1703,10 @@ def merge_into_iocs(out_dir, bundle):
     ioc["c2_endpoints"] = [c for c in ioc.get("c2_endpoints", []) if c.get("source") != "memory"]
     have = {(c.get("host"), c.get("port")) for c in ioc["c2_endpoints"]}
     for host in erad.get("c2_ips", []) + erad.get("c2_domains", []):
+        if not _is_valid_ioc_host(host):
+            continue  # drop extraction artifacts (***,  truncated fragments, etc.)
+        if _is_benign_domain(host):
+            continue  # Phase 1C: skip allowlisted infrastructure (cert CAs, vendor CDNs, etc.)
         if (host, 0) not in have:
             ioc["c2_endpoints"].append({"host": host, "port": 0, "sanctioned": False,
                                         "session_id": None, "instance_id": None, "source": "memory",
@@ -1308,8 +1739,10 @@ def run(image, out_dir, pids):
     carve_dir = out_dir
     os.makedirs(carve_dir, exist_ok=True)
     capa_exe, floss_exe = find_capa(), find_floss()
+    mwcp_py, mwcp_lib   = find_mwcp()
     print(f"[*] capa:  {capa_exe or 'not staged'}")
     print(f"[*] floss: {floss_exe or 'not staged'}")
+    print(f"[*] mwcp:  {'python -m mwcp (lib: ' + str(mwcp_lib) + ')' if mwcp_py else 'not staged -- run: .\\Build-OfflineToolkit.ps1 -IncludeMWCP'}")
     dossiers = []
     for pid in pids:
         p = pid_map.get(pid)
@@ -1318,7 +1751,9 @@ def run(image, out_dir, pids):
             continue
         print(f"[*] enriching PID {pid} ({p.name}) ...")
         dossiers.append(enrich_pid(vmm, p, pid_map, nets_by_pid, carve_dir,
-                                   capa_exe=capa_exe, floss_exe=floss_exe))
+                                   capa_exe=capa_exe, floss_exe=floss_exe,
+                                   mwcp_py=mwcp_py, mwcp_lib=mwcp_lib,
+                                   out_dir=out_dir))
 
     # attach the YARA rules the pivot matched per PID (so the attack-chain implant node names them)
     tp_path = os.path.join(out_dir, "YARA_Pivot_TP.json")
@@ -1349,10 +1784,12 @@ def run(image, out_dir, pids):
         print(f"[+] memory-derived attack chain added to Attack_Graph.md")
     # First-seen correlation: tie the RAM implant create time(s) to any USB history already collected.
     # If USB history is gathered later (live on the host), re-run with --correlate to refresh this.
-    usb = _load_json(_newest(out_dir, "USB_Forensics_*.json"))
-    corr = correlate_first_seen(dossiers, load_usb_devices(usb) if usb else [])
+    usb       = _load_json(_newest(out_dir, "USB_Forensics_*.json"))
+    tp_pids   = {d["pid"] for d in dossiers}
+    tp_events = _collect_tp_events(out_dir, dossiers, tp_pids)
+    corr = correlate_first_seen(dossiers, load_usb_devices(usb) if usb else [], tp_events=tp_events)
     with open(os.path.join(out_dir, "Timeline_Correlation.md"), "w", encoding="utf-8") as fh:
-        fh.write("# First-seen Timeline Correlation\n\n" + build_correlation_section(corr))
+        fh.write("# Confirmed TP Attack Timeline\n\n" + build_correlation_section(corr))
     append_correlation(out_dir, corr)
     print(f"[+] first-seen correlation: {corr['summary']}")
     return out

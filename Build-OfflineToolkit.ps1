@@ -78,6 +78,7 @@ param(
     [switch]$IncludeCapa,
     [switch]$IncludeFloss,
     [switch]$IncludeGeoIP,
+    [switch]$IncludeMWCP,
     [switch]$StageSymbols,
     [string]$VolExeUrl   = '',   # leave blank to auto-resolve from GitHub API; override if needed
     [string]$WinPmemUrl  = 'https://github.com/Velocidex/WinPmem/releases/download/v4.0.rc1/winpmem_mini_x64_rc2.exe',
@@ -404,6 +405,56 @@ if ($IncludeFloss) {
     } catch {
         Write-Host "    FAILED: $($_.Exception.Message)" -ForegroundColor Yellow
         Save-Hash 'floss' $FlossUrl $null "failed: $($_.Exception.Message)"
+    }
+}
+
+# --- DC3-MWCP malware configuration parser (optional, -IncludeMWCP) ----------
+# DoD Cyber Crime Center Malware Configuration Parser -- extracts mutex names, C2 addresses,
+# passwords, and filenames from carved shellcode/PE regions. Runs alongside capa and FLOSS
+# in memory_enrich.py: capa gives capabilities, FLOSS gives strings, MWCP gives malware
+# family-specific configuration data.
+# Install: pip downloads mwcp + dependencies into tools\mwcp\lib; the mwcp CLI is invoked
+# via 'python -m mwcp' pointing at that lib directory.
+if ($IncludeMWCP) {
+    Write-Host "[*] DC3-MWCP (malware configuration parser) ..." -ForegroundColor Cyan
+    $mwcpDir = Join-Path $ToolsDir 'mwcp'
+    $mwcpLib = Join-Path $mwcpDir 'lib'
+    New-Item -ItemType Directory -Path $mwcpLib -Force | Out-Null
+    try {
+        # Download mwcp + all dependencies into a portable lib directory.
+        # memory_enrich.py will call: python -m mwcp --target <lib> parse --format json <binary>
+        $result = python -m pip install mwcp --target $mwcpLib --no-user --quiet 2>&1
+        if ($LASTEXITCODE -eq 0) {
+            $ver = python -c "import sys; sys.path.insert(0,'$mwcpLib'); import mwcp; print(mwcp.__version__)" 2>&1
+            Write-Host "    -> DC3-MWCP $ver staged to tools\mwcp\lib\" -ForegroundColor Green
+            Save-Hash 'mwcp' 'pypi:mwcp' (Join-Path $mwcpLib 'mwcp') 'ok'
+
+            # Stage generic parsers from playbooks into mwcp parsers directory.
+            # GenericMutex + GenericC2 cover ALL malware families and run automatically
+            # against every carved binary region in memory_enrich.py.
+            $parsersDir  = Join-Path $mwcpLib 'mwcp\parsers'
+            $parsersRepo = Join-Path $PSScriptRoot 'playbooks\windows\threat_hunting\mwcp_parsers'
+            if (Test-Path $parsersDir) {
+                foreach ($pf in @('GenericMutex.py', 'GenericC2.py', 'PowerShellDecoder.py', 'LNKParser.py', 'CobaltStrikeConfig.py')) {
+                    $src = Join-Path $parsersRepo $pf
+                    $dst = Join-Path $parsersDir $pf
+                    if (Test-Path $src) {
+                        Copy-Item -LiteralPath $src -Destination $dst -Force
+                        Write-Host "    -> Staged parser: $pf" -ForegroundColor Green
+                    } else {
+                        Write-Host "    WARN: parser source not found: $src" -ForegroundColor Yellow
+                    }
+                }
+            } else {
+                Write-Host "    WARN: mwcp parsers directory not found; generic parsers not staged" -ForegroundColor Yellow
+            }
+        } else {
+            Write-Host "    FAILED: $result" -ForegroundColor Yellow
+            Save-Hash 'mwcp' 'pypi:mwcp' $null "pip install failed"
+        }
+    } catch {
+        Write-Host "    FAILED (python not in PATH?): $($_.Exception.Message)" -ForegroundColor Yellow
+        Save-Hash 'mwcp' 'pypi:mwcp' $null "failed: $($_.Exception.Message)"
     }
 }
 

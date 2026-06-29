@@ -1,5 +1,15 @@
 # IR Toolkit - Offline Incident Response Workflow
 
+> **Development disclaimer.** This toolkit is under active parallel development as an investigatory
+> follow-on platform. The current focus is on refining and validating the manual investigation
+> workflows that a human analyst executes after anomalous activity has been confirmed beyond a
+> reasonable doubt. Every workflow documented here is a candidate for future automation — once a
+> step is proven reliable across real investigations it becomes a target for encoding into an
+> **autonomous agentic DCO (Defensive Cyber Operations) platform**. This project is a standalone
+> incident response toolkit and **does not represent the same workflow, architecture, or scope** as
+> that agentic platform. The toolkit serves as the human-in-the-loop validation layer; the
+> autonomous platform is a separate initiative.
+
 Single-command incident response for **Windows**, **Linux**, and **Cloud** (AWS / Azure / GCP).
 
 This file is the summary. The detailed, per-platform operating instructions live in:
@@ -125,12 +135,23 @@ Run on an internet-connected machine before deploying to an isolated host. Both 
 a sha256 `tools/STAGED_MANIFEST.json`. The core workflow runs offline without any of these;
 they only enable optional depth (memory capture, YARA, extended persistence).
 
-- **Windows** - `Build-OfflineToolkit.ps1 [-IncludeMemory] [-IncludeYaraRules] [-IncludeMemProcFS] [-IncludeVolatility] [-IncludeCapa] [-IncludeFloss] [-IncludeGeoIP] [-StageSymbols]`
-  Memory capture: `go-winpmem` (AFF4) → analyst-side analysis via **MemProcFS + Python 3.12 embeddable** (AFF4 native, no driver install) or **Volatility 3** (raw/dmp). `Build-OfflineToolkit.ps1 -IncludeMemProcFS` stages MemProcFS, Python 3.12, sqlite3, and Dokany MSI into `tools/`. `-IncludeCapa`/`-IncludeFloss` add capability + deobfuscated-string analysis of carved regions; `-IncludeGeoIP` stages the **offline IP→country** DB (db-ip Lite) used to tag recovered IOCs with no network calls.
+- **Windows** - `Build-OfflineToolkit.ps1` with optional flags:
+
+  | Flag | What it stages | Used by |
+  |------|---------------|---------|
+  | `-IncludeMemory` | go-winpmem (AFF4 capture) + ProcDump | `Invoke-IRCollection.ps1 -CaptureMemory` |
+  | `-IncludeYaraRules` | YARA rule set (memory + file, Windows-filtered) | `memory_forensic.py`, `Invoke-YaraFileScan` |
+  | `-IncludeMemProcFS` | MemProcFS + Python 3.12 embeddable (AFF4 native) | `Analyze-Memory.ps1`, `memory_forensic.py`, `memory_enrich.py` |
+  | `-IncludeVolatility` | Volatility 3 standalone (raw/dmp images) | `Analyze-Memory.ps1` on raw images |
+  | `-IncludeCapa` | capa capability fingerprinter | `memory_enrich.py` — ATT&CK on carved regions |
+  | `-IncludeFloss` | FLARE FLOSS deobfuscator | `memory_enrich.py` — decoded strings from carved regions |
+  | `-IncludeGeoIP` | db-ip Country Lite CSV (offline) | `memory_enrich.py` — IP→country with no network calls |
+  | `-IncludeMWCP` | DC3-MWCP + GenericMutex/GenericC2 parsers | `memory_enrich.py` — binary config extraction from carved regions; `EDR_Toolkit.ps1 -ScanMWCP` — file-scan config extraction |
 
   Full recommended staging for a Windows deployment:
   ```powershell
-  .\Build-OfflineToolkit.ps1 -IncludeMemory -IncludeYaraRules -IncludeMemProcFS -IncludeVolatility -IncludeCapa -IncludeFloss -IncludeGeoIP
+  .\Build-OfflineToolkit.ps1 -IncludeMemory -IncludeYaraRules -IncludeMemProcFS `
+      -IncludeVolatility -IncludeCapa -IncludeFloss -IncludeGeoIP -IncludeMWCP
   ```
 - **Linux** - `Build-OfflineToolkit-Linux.sh [--include-memory] [--include-cloud] [--stage-symbols] [--check-only]`
   (memory analysis: **Volatility 3** wheels + `dwarf2json` + kernel ISF, vendored for offline use)

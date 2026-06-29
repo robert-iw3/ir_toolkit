@@ -643,7 +643,57 @@ Load the `.bin` in Binary Ninja at `base_address` as `x86_64 raw` to disassemble
 
 ---
 
-## 12 — Staged Tools Quick Reference
+## 12 — Direct YARA and mwcp Scan (Follow-On Investigation)
+
+When investigation leads point to a specific file that was NOT flagged during the automated hunt
+— for example, a suspicious binary retrieved from a network share, a file in an unusual directory,
+or an artifact recovered from a carved memory region — run YARA and DC3-MWCP against it directly
+without re-running the full collection.
+
+```powershell
+# Scan a SINGLE SPECIFIC FILE with YARA + mwcp (most common follow-on case)
+# Requires: -IncludeYaraRules, -IncludeMWCP staging
+powershell.exe -ExecutionPolicy Bypass -File ".\playbooks\windows\threat_hunting\dev\Release\EDR_Toolkit_Deploy.ps1" `
+    -FilePath "C:\path\to\suspect.exe" `
+    -ScanYara -ScanMWCP `
+    -ReportPath ".\reports\<host>" -Quiet
+
+# Scan a DIRECTORY (non-recursive, file-by-file log stamps)
+powershell.exe -ExecutionPolicy Bypass -File ".\playbooks\windows\threat_hunting\dev\Release\EDR_Toolkit_Deploy.ps1" `
+    -FilePath "C:\path\to\staging_folder" `
+    -ScanYara -ScanMWCP `
+    -ReportPath ".\reports\<host>" -Quiet
+
+# Scan a DIRECTORY RECURSIVELY (full subdirectory crawl)
+powershell.exe -ExecutionPolicy Bypass -File ".\playbooks\windows\threat_hunting\dev\Release\EDR_Toolkit_Deploy.ps1" `
+    -FilePath "C:\path\to\folder" -Recursive `
+    -ScanYara -ScanMWCP `
+    -ReportPath ".\reports\<host>" -Quiet
+```
+
+Both `-ScanYara` and `-ScanMWCP` use `-FilePath` as the target. Per-file log stamps confirm
+which file was scanned and whether anything was found:
+- `[*] YARA [1/3] scanning: [file] suspect.exe`
+- `    [!] MATCH: CobaltStrike_Beacon on suspect.exe` — YARA hit with rule name
+- `    [+] RESULT: clean -- no YARA matches` — confirmed clean
+- `[*] mwcp [1/3] scanning: suspect.exe`
+- `    [!] RESULT: config extracted -- Mutexes: 1BA6BD98D9 | C2: 1.2.3.4:4444` — mwcp config found
+- `    [+] RESULT: clean -- no family parser matched` — no known family config
+
+**When to use this:**
+- A memory enrichment finding includes a dropped file path — scan that path directly
+- An OSINT pivot returns a hash that matches something in the environment — locate and scan the file
+- A process handles file shows a suspicious open file handle — scan that file
+- Lateral movement evidence points to a file on a share — pull and scan before touching the host
+
+**What it produces:**  
+Findings roll into the standard EDR report (`EDR_Report_*.json`) as `YARA Match` and
+`mwcp Config Extraction` entries. Combine with `Add-ManualFinding.ps1` (Section 19b) to feed
+confirmed mwcp-extracted mutexes and C2 into `IOCs.json` for the eradication pipeline.
+
+---
+
+## 13 — Staged Tools Quick Reference
 
 All tools are in `tools\`. Run from the toolkit root or copy to the target host.
 
@@ -693,14 +743,6 @@ $py = ".\tools\memprocfs\python\python.exe"
 & "$T\procdump64.exe" -accepteula -ma <PID> <output.dmp>
 # Full system memory dump (needs admin, produces large file):
 & "$T\go-winpmem.exe" -o C:\captures\memory_<hostname>.aff4
-
-# --- Volatility 3 (offline, against AFF4 image) ---
-& "$T\vol.exe" -f C:\captures\memory_<hostname>.aff4 windows.pslist
-& "$T\vol.exe" -f C:\captures\memory_<hostname>.aff4 windows.pstree
-& "$T\vol.exe" -f C:\captures\memory_<hostname>.aff4 windows.dlllist --pid <PID>
-& "$T\vol.exe" -f C:\captures\memory_<hostname>.aff4 windows.handles --pid <PID>
-& "$T\vol.exe" -f C:\captures\memory_<hostname>.aff4 windows.malfind   # injected regions
-& "$T\vol.exe" -f C:\captures\memory_<hostname>.aff4 windows.netscan
 
 # --- Logged-on users ---
 & "$T\PsLoggedon64.exe" -accepteula
@@ -1304,12 +1346,306 @@ Once triage is complete and findings are documented, use the numbered playbooks 
 | `Win32_DeviceGuard` WMI errors (0x80041032) | SecurityHealthService polling HVCI on non-VBS system | FP — close |
 | WSL HyperV firewall rule errors | wslservice managing WSL networking rules | FP — close |
 | JIT regions in pwsh/node/Code.exe | .NET CLR or V8 JIT compiled code — normal | FP if no named-family YARA in same region |
-| `-EncodedCommand` or `-ExecutionPolicy Bypass` in pwsh cmdline | IR toolkit, VS Code, PowerShell Editor Services, and many admin scripts use these flags | Verify parent process — if parent is Code.exe, claude.exe, or VS Code terminal: FP |
+| `-EncodedCommand` or `-ExecutionPolicy Bypass` in pwsh cmdline | IR toolkit, VS Code, PowerShell Editor Services, and many admin scripts use these flags | Verify parent process — if parent is a known development tool or VS Code terminal: FP |
 | MSIX/WindowsApps DLL unsigned per-file | OS validates MSIX at package level; per-file Authenticode returns NotSigned by design | FP — close |
-| Multiple threat intel rules (CobaltStrike, REDLEAVES, WiltedTulip, etc.) in `anon rw-` for an AI assistant process (claude.exe, Copilot, etc.) | AI models contain malware signatures, IOCs, and threat intel strings as training/knowledge data in their working memory pages | FP — close; the `anon rw-` region is data (non-executable) and the match count reflects the breadth of threat intel content in the model's context |
-| `Cobaltbaltstrike_Payload_Encoded` in AI process memory | Same as above; encoded payload examples appear in threat intel content | FP — close if process is a known AI assistant and region is `anon rw-` (data, not executable) |
+| Multiple threat intel rules (CobaltStrike, REDLEAVES, WiltedTulip, etc.) in `anon rw-` for a security tool or threat intel data store process | Security products, threat intel platforms, and SIEM agents load known-malicious signatures and IOC databases into their working memory — these strings appear as YARA hits | FP — close; the `anon rw-` region is data (non-executable); check that the owning process is a known security tool and the region has no execute flag |
+| Named-family YARA hit in a data-only region (`anon rw-` or `anon r--`) of a known security tool | Security products may cache decoded threat intelligence, detonated sample artifacts, or encoded IOC lists in non-executable memory | FP — close if region is non-executable; confirm owning process is a known security product |
 | Memory capture tool (go-winpmem, winpmem, etc.) matching LOLBin rules | The capture tool reads all memory including memory that contains malware samples | FP — always exclude the capture process PID from analysis |
 | Netsh Helper DLL "(unresolved: xxx.dll)" for standard Windows helpers | The persistence snapshot adjudicator flags netsh helpers without full path; all standard Windows helpers (ifmon, rasmontr, dhcpcmonitor, nshhttp, nshipsec, etc.) are listed without path | FP — close if the DLL name matches a known Windows netsh component |
 | PEB CommandLine Buffer Pointer Anomaly for a PID no longer running | The PEB pointer was read after the process exited or was recycled; the buffer at that address is unmapped because the process is gone | FP — confirm PID is no longer running; note for baseline |
 | Dormant Beacon Candidate in LsaIso.exe / NgcIso.exe / security processes | VTL1 / VSM isolation processes contain high-entropy key material by design | FP unless `AdjAnonExec=True` or confirmed cross-process write targeting the region |
 | AdobeCollabSync "Network scanner/listener" signal | Adobe's collaboration feature performs local network discovery (mDNS/listener sockets) to find other Acrobat instances | Confirm via HKCU Run key and process signature; if signed and in HKCU Run = FP |
+| Named pipe with GUID format | COM activation pipes, RPC endpoints, and Windows internal IPC channels regularly use GUID format | Run `handle64.exe -a \Device\NamedPipe\<guid>` to identify owner; if owner is a system or signed process = FP |
+| Service binary "outside standard directories" at Medium | EDR Toolkit v2+ flags service paths outside Windows/Program Files as Medium; many vendor services install to custom paths | Verify binary is signed (`sigcheck64.exe -e -u <path>`) and path hasn't changed since install; if signed vendor binary = confirm benign |
+| BITS job downloading to AppData/Temp at High | Microsoft Edge, Windows Update, and NVIDIA update managers use BITS with Temp staging; destination path IS the staging mechanism | Check source URL domain against Microsoft/vendor CDN; if source is known-good vendor CDN + job state = Transferred → confirm benign Edge/WU update |
+
+---
+
+## 21 — Impact and Pre-Ransomware Indicators
+
+**Triggered by:** EDR Toolkit findings of type `VSS Deletion`, `Recovery Disable`, `Archive Staging`, `WSL Suspicious Execution`, `WSL Parent Spawn`
+
+These detections fire on active processes — check immediately, as these indicate an attack is actively executing or has recently executed.
+
+```powershell
+# Confirm VSS shadow copies still exist (if deletion was attempted)
+vssadmin list shadows
+
+# Check bcdedit recovery status
+bcdedit /enum {default} | Select-String -Pattern "recovery|bootstatuspolicy"
+
+# Find any recently-created archives in staging locations (last 24h)
+Get-ChildItem -Path $env:TEMP,$env:APPDATA,"C:\Users\Public" -Recurse -ErrorAction SilentlyContinue |
+    Where-Object { $_.Extension -match '\.(zip|7z|rar|tar|gz)' -and $_.LastWriteTime -gt (Get-Date).AddHours(-24) } |
+    Select-Object FullName, Length, LastWriteTime
+
+# Check for any FTP/SCP processes currently running
+Get-Process | Where-Object { $_.Name -match '^(ftp|scp|sftp|pscp)$' } | Select-Object Id, Name, Path
+```
+
+**Logic breakdown:**
+
+| Finding | Severity | What it means | Immediate action |
+|---------|----------|--------------|-----------------|
+| `VSS Deletion` — vssadmin delete shadows | Critical | Pre-ransomware: attacker removing recovery path before encryption | **Contain immediately.** Kill process if still running; isolate host; check all VSS copies gone |
+| `VSS Deletion` — wmic shadowcopy delete | Critical | Same mechanism via WMI | Same as above |
+| `Recovery Disable` — bcdedit recoveryenabled no | High | Ransomware payload ensuring no OS recovery after reboot | Check if also paired with VSS deletion (double-whammy pattern); escalate to incident |
+| `Archive Staging` — 7z/rar/Compress-Archive to Temp/AppData/Public | High | Data collection before exfil; attacker staging compressed data | Check archive destination, size, and timestamp; correlate with network connections from same PID |
+| `WSL Suspicious Execution` — wsl.exe curl/wget/bash -c | High | Attacker using Linux subsystem to evade Windows hooks | Check `wsl.exe` cmdline for download URL; inspect `%USERPROFILE%\AppData\Local\Packages\CanonicalGroup*\LocalState` for dropped files |
+| `WSL Parent Spawn` — cmd.exe/powershell.exe parent=wsl.exe | High | Windows code executing via Linux-side invocation (hook evasion) | Inspect the spawned process cmdline; correlate with Section 14 parent-chain analysis |
+
+> **Future automation hook:** If `VSS Deletion` fires, automatically trigger containment phase (`01_Contain-Host.ps1 -ImmediateIsolate`) without analyst confirmation — no legitimate admin workload deletes all shadows silently.
+
+---
+
+## 22 — Credential Access Detection
+
+**Triggered by:** EDR Toolkit findings of type `Credential Hive Dump`, `Credential Vault Access`, `Browser Credential Access`, `LSASS Memory Dump`
+
+```powershell
+# Verify credential hive was not successfully saved (check for .hiv / .save files)
+Get-ChildItem -Path C:\,$env:TEMP,$env:USERPROFILE -Recurse -ErrorAction SilentlyContinue |
+    Where-Object { $_.Extension -match '\.(hiv|save|reg)' -and $_.Length -gt 1MB } |
+    Select-Object FullName, Length, LastWriteTime | Sort-Object LastWriteTime -Descending
+
+# Check if cmdkey stored anything unusual
+cmdkey /list
+
+# Look for browser credential DB copies outside profile (mechanism: non-browser access)
+@(
+    "$env:TEMP\Login Data",
+    "$env:USERPROFILE\AppData\Local\Temp\Login Data",
+    "C:\Users\Public\Login Data",
+    "$env:TEMP\logins.json"
+) | Where-Object { Test-Path $_ } | ForEach-Object { Write-Host "FOUND: $_" }
+
+# Check recent LSASS dump artifacts (>10MB in user-writable paths)
+Get-ChildItem -Path $env:TEMP,"C:\Users\Public",$env:APPDATA -Filter "*.dmp" -ErrorAction SilentlyContinue |
+    Where-Object { $_.Length -gt 10MB } | Select-Object FullName, Length
+```
+
+**Logic breakdown:**
+
+| Finding | Severity | What it means | Where to go next |
+|---------|----------|--------------|-----------------|
+| `Credential Hive Dump` — reg save HKLM\SAM | Critical | SAM hive contains local account NTLM hashes — offline cracking risk | Check for .hiv output file; if found, quarantine; change all local account passwords |
+| `Credential Hive Dump` — reg save HKLM\SECURITY | Critical | SECURITY hive contains LSA secrets, cached domain credentials | Same; also audit domain accounts if domain-joined |
+| `Credential Vault Access` — cmdkey /list | High | Attacker enumerating all stored Windows Credential Manager entries | Check what's stored: `cmdkey /list`; rotate any RDP, network share, or VPN credentials stored there |
+| `Credential Vault Access` — cmdkey /add | Medium | Attacker storing their own credential for lateral movement | Identify the target (`/add:...`) — this is the next lateral movement destination |
+| `Browser Credential Access` — non-browser accessing Chrome profile | High | Attacker copying `Login Data` SQLite or reading it in-place | Check if `Login Data` file was recently copied; all saved browser passwords should be rotated |
+
+> **Future automation hook:** When `Credential Hive Dump` fires, automatically trigger password reset notification workflow and disable affected accounts pending investigation.
+
+---
+
+## 23 — Behavior-Based Persistence Registry Triage
+
+**Triggered by:** EDR Toolkit findings of type `AppCertDLLs Injection`, `Accessibility Feature Hijack`, `IFEO GlobalFlag Hijack`, `IFEO Debugger Hijack`, `Active Setup Persistence`, `Suspicious Print Monitor DLL`, `Unquoted Service Path`
+
+```powershell
+# AppCertDLLs — any value here is immediately suspicious
+Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\AppCertDLLs" -ErrorAction SilentlyContinue
+
+# IFEO — check all entries for Debugger values
+Get-ChildItem "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options" |
+    ForEach-Object {
+        $dbg = (Get-ItemProperty $_.PSPath -Name Debugger -ErrorAction SilentlyContinue).Debugger
+        $gf  = (Get-ItemProperty $_.PSPath -Name GlobalFlag -ErrorAction SilentlyContinue).GlobalFlag
+        if ($dbg -or $gf) {
+            [PSCustomObject]@{ Binary=$_.PSChildName; Debugger=$dbg; GlobalFlag="0x$($gf.ToString('X'))" }
+        }
+    } | Format-Table -AutoSize
+
+# Active Setup — all entries with non-system32 StubPath
+Get-ChildItem "HKLM:\SOFTWARE\Microsoft\Active Setup\Installed Components" |
+    ForEach-Object {
+        $stub = (Get-ItemProperty $_.PSPath -Name StubPath -ErrorAction SilentlyContinue).StubPath
+        if ($stub -and $stub -notmatch '(?i)^("?[a-z]:\\windows\\(system32|syswow64)\\)?(rundll32|regsvr32)') {
+            [PSCustomObject]@{ GUID=$_.PSChildName; StubPath=$stub }
+        }
+    }
+
+# Port monitors — all non-system32 DLL registrations
+Get-ChildItem "HKLM:\SYSTEM\CurrentControlSet\Control\Print\Monitors" -ErrorAction SilentlyContinue |
+    ForEach-Object {
+        $drv = (Get-ItemProperty $_.PSPath -Name Driver -ErrorAction SilentlyContinue).Driver
+        if ($drv -and $drv -notmatch '(?i)^[a-z]:\\windows\\system32\\') {
+            [PSCustomObject]@{ Monitor=$_.PSChildName; Driver=$drv }
+        }
+    }
+```
+
+**Logic breakdown:**
+
+| Finding | Severity | What it means | Remediation |
+|---------|----------|--------------|------------|
+| `AppCertDLLs Injection` | Critical | DLL injected into every CreateProcess call — persistence with maximum reach | Remove the registry value; quarantine the DLL; re-image likely required |
+| `Accessibility Feature Hijack` (sethc/utilman) | Critical | Pressing accessibility key at Windows login yields SYSTEM shell | Remove IFEO Debugger value; check if attacker already used it (event log 4688 sethc.exe spawning cmd.exe) |
+| `IFEO Debugger Hijack` | High/Medium | Every launch of the target binary runs attacker binary first | Remove Debugger value; verify what the Debugger binary does; quarantine if malicious |
+| `IFEO GlobalFlag Hijack` | High | Silent process replacement via FLG_APPLICATION_VERIFIER + SilentProcessExit | Remove GlobalFlag value; check `HKLM:\...\SilentProcessExit\<binary>` for monitoring key |
+| `Active Setup Persistence` (High) | High | LOLBin or staging-path stub runs on every user's first logon | Remove the GUID entry; trace what the StubPath does; check if it already executed (event 4688) |
+| `Active Setup Persistence` (Medium) | Medium | Non-standard StubPath — could be legitimate vendor or attacker | Verify vendor identity; check binary signature (`sigcheck64.exe`); confirm against known good baseline |
+| `Suspicious Print Monitor DLL` (High) | High | Non-system32 DLL loaded by SYSTEM spoolsv.exe at boot | Remove the Driver registry value; quarantine the DLL; check if attacker already has SYSTEM foothold |
+| `Unquoted Service Path` | High | Service path with spaces and no quotes — attacker can plant binary in parent directory | Quote the path in the registry; check if exploitable parent directory is user-writable |
+
+> **Future automation hook:** `AppCertDLLs Injection` → auto-remove registry value and quarantine DLL without analyst review (no benign use exists). `Accessibility Feature Hijack` → same.
+
+---
+
+## 24 — C2 Channel Detection (Network)
+
+**Triggered by:** EDR Toolkit findings of type `DoH Beacon`, `SMTP Exfiltration`, `Raw File Transfer`, `Suspicious BITS Job` (StagingDestination), `Suspicious Named Pipe` (GUID)
+
+```powershell
+# Identify the process owning a suspicious named pipe
+$pipeName = '<guid-from-finding>'
+& ".\tools\handle64.exe" -accepteula -nobanner -a "\Device\NamedPipe\$pipeName" 2>$null
+
+# Check active connections from process flagged for DoH/SMTP
+$pid = <pid-from-finding>
+Get-NetTCPConnection | Where-Object { $_.OwningProcess -eq $pid } |
+    Select-Object LocalPort, RemoteAddress, RemotePort, State
+
+# Inspect BITS jobs for staging destinations
+Get-BitsTransfer -AllUsers | ForEach-Object {
+    $fl = $_.FileList | Select-Object -First 1
+    [PSCustomObject]@{ Name=$_.DisplayName; URL=$fl.RemoteName; Dest=$fl.LocalName; State=$_.JobState }
+} | Format-Table -AutoSize -Wrap
+
+# Resolve a DoH resolver IP to confirm it's a known DoH provider
+@('1.1.1.1','8.8.8.8','9.9.9.9','208.67.222.222','185.228.168.9') |
+    ForEach-Object { Write-Host "  $_ = $([System.Net.Dns]::GetHostEntry($_).HostName 2>$null)" }
+```
+
+**Logic breakdown:**
+
+| Finding | Severity | What it means | Investigation path |
+|---------|----------|--------------|-------------------|
+| `DoH Beacon` — non-browser HTTPS to 1.1.1.1/8.8.8.8/9.9.9.9 | High | C2 beacon using DNS-over-HTTPS to bypass DNS logging | Identify owning PID; check full connection list; capture traffic if possible; DNS-over-HTTPS C2 has no DNS cache — look for payload in process memory enrichment |
+| `SMTP Exfiltration` — non-mail process on port 25/587 | High | Credential relay (spam) or data exfiltration via email | Identify process; check what data is accessible to it; check if it's a new/unknown process |
+| `Raw File Transfer` — ftp.exe/scp.exe active | High | Explicit file transfer tool active — exfil or payload delivery | Check process cmdline for destination IP/host; check filesystem for transferred files |
+| `Suspicious BITS Job` — StagingDestination flag | High | Executable or script being downloaded to staging area | Check URL source domain; check destination path for what was downloaded; verify job state |
+| `Suspicious Named Pipe` — GUID format | Medium | Structural C2 indicator (framework randomized its pipe name) | Use `handle64.exe` to find owning process; corroborate with Section 5 shellcode thread or Section 11 memory enrichment |
+
+> **Future automation hook:** `DoH Beacon` → auto-block outbound HTTPS to known DoH resolver IPs from non-browser processes via Windows Firewall (`netsh advfirewall firewall add rule`).
+
+---
+
+## 25 — Memory Evasion Module Triage (Modules 20-22)
+
+**Triggered by:** Memory forensic findings of type `Direct Syscall Execution`, `Process Ghosting (Deleted Image)`, `ETW-TI Provider Disabled`
+
+These findings indicate sophisticated evasion techniques. They require memory image analysis — run against the AFF4 capture.
+
+```powershell
+# Check ETW-TI status on live host (before memory analysis)
+$provider = Get-WinEvent -ListProvider "Microsoft-Windows-Threat-Intelligence" -ErrorAction SilentlyContinue
+if ($provider) { Write-Host "ETW-TI: REGISTERED ($($provider.LogLinks.Count) log links)" }
+else           { Write-Host "ETW-TI: NOT FOUND -- provider may have been unregistered" }
+
+# For Direct Syscall finding: look at the PID and correlate with injection findings
+# The 0x0F 0x05 (syscall) opcode in anonymous private exec memory outside ntdll
+# indicates Hell's Gate / Halo's Gate / SysWhispers shellcode
+# Follow up with memory enrichment (Section 11) for that PID
+
+# For Process Ghosting: the backing file is gone -- no disk artifact
+# Use memory carve (Section 10) to dump the in-memory PE before it exits
+$py = ".\tools\memprocfs\python\python.exe"
+& $py .\playbooks\windows\threat_hunting\vad_query.py "C:\Captures\<host>.aff4" <pid> <vad_addr_hex>
+```
+
+**Logic breakdown:**
+
+| Finding | Severity | What it means | Investigation path |
+|---------|----------|--------------|-------------------|
+| `Direct Syscall Execution` — 3+ syscall opcodes in anonymous exec VAD outside ntdll | High | Hell's Gate / SysWhispers pattern: shellcode issuing system calls directly to bypass user-mode API hooks | Enrichment won't find ntdll-rooted strings; look at capa output for the carved region; C2 config may be in adjacent VAD |
+| `Process Ghosting (Deleted Image)` | High | Process image file was deleted — no on-disk artifact for AV to scan; payload lives in memory only | **Carve immediately** (Section 10) before process exits; carved binary is your only artifact for reverse engineering |
+| `ETW-TI Provider Disabled` | Critical | The kernel telemetry channel feeding most EDRs is blind; attacker patched kernel callbacks | Check ntdll hooks (Module 12 output) and kernel callback arrays; escalate to SOC immediately — this machine's EDR is deaf |
+
+**Module 20 — Direct Syscall — FP pattern:**
+`_SYSCALL_BYTES` (`0x0F 0x05`) can appear at low density in JIT-compiled code (CLR, V8) as the JIT happens to emit those bytes in other contexts. The threshold of 3+ occurrences filters most of these. If Module 20 fires on a JIT host (pwsh, dotnet, chrome) with a count near the threshold (3-5), corroborate with Module 3 (anonymous exec VAD) for the same PID.
+
+**Module 22 — ETW-TI — API availability note:**
+The ETW-TI state is only queryable in vmmpyc builds with `vmm.kernel.etw_ti_state` support. If the module logs "API unavailable — skipped," the check did not run. Use the live-host PowerShell command above to verify directly.
+
+> **Future automation hook:** `ETW-TI Provider Disabled` → immediately isolate host and page on-call SOC analyst. This is a Critical indicator of a sophisticated attacker with kernel-level control.
+
+---
+
+## 26 — Module 5 VAD Triage Workflow (vad_query.py)
+
+**Triggered by:** `Shellcode Thread (Memory)` findings from memory_forensic.py — the first triage step before any other investigation.
+
+> This is the Phase 1 workflow fix. Previously, Module 5 findings were always `High` severity and required manual follow-up. Now, severity is set automatically by the VAD type. This section documents the logic for cases where `vad_type` is unknown or needs manual verification.
+
+```powershell
+# Quick VAD lookup: given a thread start address, classify the backing memory
+$py  = ".\tools\memprocfs\python\python.exe"
+$aff = "C:\Captures\memory_<host>.aff4"
+& $py .\playbooks\windows\threat_hunting\vad_query.py $aff <pid> <thread_start_hex>
+
+# Output interpretation:
+#   type=anon_exec  prot=*RWX*  -> High: genuine shellcode in anonymous executable memory
+#   type=image                  -> Medium: DLL loaded but not in PEB list (corroborate with Module 3)
+#   "no VAD covers this address"-> Low: DLL unloaded after thread created (FP — explorer shell ext pattern)
+#   type=anon_noexec            -> Medium: perms dropped after injection (W^X sleep-mask)
+```
+
+**Automatic severity mapping (as of Phase 1 refactor):**
+
+| `vad=` in finding | Severity | Meaning | Action |
+|-------------------|----------|---------|--------|
+| `anon_exec` | **High** | Thread starts in anonymous executable memory — classic shellcode injection | Proceed to enrichment (Section 11); check Module 3 for adjacent regions |
+| `image` | **Medium** | Thread starts in file-backed DLL not in PEB list | Corroborate with Module 3; if no anonymous exec VAD in same PID → downgrade to Low |
+| `unmapped` | **Low** | DLL was unloaded after thread was created | FP — close. Common in explorer.exe shell extensions |
+| `anon_noexec` | **Medium** | Anonymous region, no exec permission at snapshot (W^X sleep masking) | Check Module 13 dormant beacon in same PID; if beacon found → escalate |
+
+---
+
+## 27 — IOCs.json Review and Enrichment Gate
+
+**Triggered by:** After any memory enrichment run (`memory_enrich.py`). Must be done BEFORE running `Invoke-Eradication.ps1`.
+
+> **Critical gate:** `memory_enrich.py` automatically promotes all recovered domains from process memory to `c2_endpoints[]`. This includes cert-authority OCSP/CRL endpoints, vendor CDN domains, and namespace URIs from the working memory of FP PIDs. Running eradication against an unreviewed `IOCs.json` will sinkhole legitimate infrastructure.
+
+```powershell
+# Step 1: Check what was promoted to c2_endpoints
+$iocs = Get-Content .\reports\<host>\IOCs.json | ConvertFrom-Json
+Write-Host "c2_endpoints count: $($iocs.c2_endpoints.Count)"
+$iocs.c2_endpoints | Select-Object host, country, source | Format-Table
+
+# Step 2: The toolkit now filters benign infrastructure automatically (_is_benign_domain).
+# These will NOT appear in c2_endpoints (Phase 1C fix):
+#   *.adobe.com / *.acrobat.com / *.adobelogin.com / *.adobe.io  (AdobeCollabSync FP)
+#   ocsp.*, crl.*                                                  (cert validation)
+#   schemas.openxmlformats.org, iptc.org, purl.org                (namespace URIs)
+#   *.microsoft.com / *.live.com / *.office.com                   (Microsoft infra)
+#   www.youtube.com / gitforwindows.org                            (browser cache)
+
+# Step 3: For anything remaining, verify it's NOT legitimate infrastructure
+$iocs.c2_endpoints | ForEach-Object {
+    $host_ = $_.host
+    Write-Host "Review: $host_"
+    # Submit to VT / Shodan offline -- DO NOT resolve live on the target host
+}
+
+# Step 4: Remove confirmed-benign entries before eradication
+# $iocs.c2_endpoints = @($iocs.c2_endpoints | Where-Object { <adversary-only-filter> })
+# $iocs | ConvertTo-Json -Depth 10 | Set-Content .\reports\<host>\IOCs.json
+
+# Step 5: Also review memory_eradication.implicated_pids
+# Remove any PID confirmed as FP before the eradication process loop runs
+$iocs.memory_eradication.implicated_pids | ForEach-Object { Write-Host "Implicated PID: $_" }
+```
+
+**Logic breakdown:**
+
+| Condition | What it means | Action |
+|-----------|--------------|--------|
+| `c2_endpoints` has 0 entries | No adversary C2 found in process memory | Do not run Block-C2 step; proceed to persistence eradication only |
+| `c2_endpoints` has entries from `*.adobe.com`, `*.digicert.com` | Filter failed or ran against FP PIDs | The toolkit now suppresses these via `_is_benign_domain()`; if they appear, check which PIDs were enriched |
+| `c2_endpoints` has entries like `evil-c2.ru`, bare IPs (non-RFC1918) | Genuine adversary C2 recovered | Cross-reference with OSINT (VT, Shodan, OTX); add to firewall block; run Block-C2 playbook |
+| `***` or other malformed entries in c2_endpoints | Extraction artifact from netscan null records | The toolkit now filters via `_is_valid_ioc_host()`; if these appear, toolkit version is pre-Phase 1C fix |
+| `memory_eradication.implicated_pids` includes confirmed-FP PIDs | Enrichment ran over FP processes | Remove those PIDs from the list; their memory_eradication data is noise |
+
+> **Rule:** Only enrich PIDs with OPEN or TP adjudication verdicts. Skip PIDs already closed as FP — this prevents IOCs.json contamination and wastes scan time.

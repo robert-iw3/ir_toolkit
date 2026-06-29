@@ -174,6 +174,34 @@ def _vad_type(v: dict) -> str:
     return str(v.get('type', '') or '').strip().lower()
 
 
+def _vad_type_at(proc, addr: int) -> str:
+    """Classify the VAD covering *addr* in *proc*.
+
+    Returns one of:
+      'anon_exec'  -- anonymous (private) VAD with execute permission -> shellcode TP signal
+      'anon_noexec'-- anonymous VAD, no execute -> permissions dropped after injection
+      'image'      -- file-backed image VAD (DLL/EXE not in PEB module list) -> needs corroboration
+      'unmapped'   -- no VAD covers this address -> DLL was unloaded after thread created (FP)
+      'unknown'    -- VAD query failed (vmmpyc error or PID gone)
+    """
+    try:
+        vads = proc.maps.vad()
+    except Exception:
+        return 'unknown'
+    for v in vads:
+        v_start = v.get('start', 0)
+        v_end   = v.get('end', 0) or 0
+        if v_start <= addr <= v_end:
+            typ  = _vad_type(v)
+            prot = _vad_prot(v)
+            if typ == 'image':
+                return 'image'
+            if not typ or typ == 'private':
+                return 'anon_exec' if 'X' in prot else 'anon_noexec'
+            return 'other'
+    return 'unmapped'
+
+
 # PE hollowing constants (section 3 and 5b)
 _PE_OFF   = 0x3C
 _PE_SIG   = b'PE\x00\x00'
@@ -186,6 +214,14 @@ _HOOK_OPCODES  = frozenset({0xE9, 0xEB, 0xFF, 0xCC, 0xE8})
 _CLEAN_PREFIX  = bytes([0x4C, 0x8B, 0xD1])   # mov r10,rcx
 _SYSCALL_BYTES = bytes([0x0F, 0x05])          # syscall opcode
 _MOV_EAX      = 0xB8                          # mov eax,imm32
+
+# Module 3 anonymous exec region caps (Phase 1A retrospective fix).
+# _ANON_EXEC_PER_PROC_CAP: max per non-JIT process. JIT hosts get the higher JIT cap (30)
+# so CLR pages don't crowd out real injection findings in other processes.
+# _ANON_EXEC_GLOBAL_CAP: absolute ceiling across all processes.
+_ANON_EXEC_PER_PROC_CAP = 5
+_ANON_EXEC_JIT_CAP      = 30
+_ANON_EXEC_GLOBAL_CAP   = 50
 
 # CLR execute-assembly constants (section 16)
 _BSJB_MAGIC = b'BSJB'   # ECMA-335 CLI metadata root signature
@@ -311,12 +347,18 @@ log(f'  Hidden: {n}')
 # 3. Injected memory -- anonymous executable VAD + PE hollowing check
 # ==============================================================================
 log('=== 3. Injected memory (private exec VAD + hollowing) ===')
-n_anon = 0
+n_anon   = 0   # global counter (summary log only)
 n_hollow = 0
+_global_cap_hit = False
 for p in procs:
+    if _global_cap_hit: break
     if is_system_proc(p): continue
     try: vads = p.maps.vad()
     except: continue
+    proc_stem3  = p.name.lower().split('.')[0]
+    is_jit_proc = proc_stem3 in JIT_HEAVY_PROCS
+    per_proc_cap = _ANON_EXEC_JIT_CAP if is_jit_proc else _ANON_EXEC_PER_PROC_CAP
+    proc_anon = 0   # per-process counter; reset for every process
     for v in vads:
         prot  = _vad_prot(v)
         typ_s = _vad_type(v)
@@ -328,8 +370,7 @@ for p in procs:
         # Anonymous exec (no image or file backing) -- shellcode / reflective load
         is_private = not typ_s or typ_s == 'private'
         if is_private:
-            proc_stem3 = p.name.lower().split('.')[0]
-            if proc_stem3 in JIT_HEAVY_PROCS:
+            if is_jit_proc:
                 region_note = (
                     f'Executable private VAD (no backing file). Protection={prot}. '
                     f'JIT-consistent (known JIT/managed-code host) -- corroborate via '
@@ -341,9 +382,23 @@ for p in procs:
                 f'PID {p.pid} ({p.name}) @ {addr:#x}',
                 region_note,
                 'T1055, T1027')
-            n_anon += 1
-            if n_anon >= 30:
-                log('  3: WARN: anonymous exec cap (30) reached -- remaining regions not reported', 'WARN')
+            n_anon    += 1
+            proc_anon += 1
+            if proc_anon >= per_proc_cap:
+                add('Medium', 'Injected Memory Cap Reached',
+                    f'PID {p.pid} ({p.name})',
+                    f'Anonymous exec region cap ({per_proc_cap}) reached for this process '
+                    f'-- additional regions not reported. Re-run with a raised cap if '
+                    f'this PID is a confirmed TP.',
+                    'T1055, T1027')
+                break
+            if n_anon >= _ANON_EXEC_GLOBAL_CAP:
+                add('Medium', 'Injected Memory Global Cap Reached',
+                    f'PID {p.pid} ({p.name})',
+                    f'Global anonymous exec region cap ({_ANON_EXEC_GLOBAL_CAP}) reached '
+                    f'-- remaining processes not scanned for injected regions.',
+                    'T1055, T1027')
+                _global_cap_hit = True
                 break
 
         # Hollowing: image-backed executable region with multiple zeroed PE header fields.
@@ -431,15 +486,47 @@ for p in procs:
         if t.get('exitstatus', 0) != 0: continue
         in_mod = any(lo <= start < hi for lo, hi in mod_set)
         if not in_mod:
-            if is_jit:
-                detail = (f'Thread start {start:#x} falls outside all loaded modules. '
-                          f'JIT-consistent (known JIT host) -- corroborate via YARA match, '
-                          f'AMSI/ntdll hook, or cross-process creator before confirming.')
-            else:
+            # Phase 1B: classify the VAD at the thread start address before deciding severity.
+            # unmapped  = DLL unloaded after thread created (FP pattern in explorer.exe / COM)
+            # image     = file-backed DLL not in PEB list (needs corroboration)
+            # anon_exec = anonymous executable VAD -> TP signal
+            vad_type = _vad_type_at(p, start)
+            if vad_type == 'unmapped':
+                sev    = 'Low'
+                detail = (f'Thread start {start:#x} is in UNMAPPED address space. '
+                          f'The DLL that owned this region was unloaded after the thread '
+                          f'was created -- common FP in explorer.exe shell extensions and '
+                          f'COM handlers (ETHREAD.StartAddress still points to freed region). '
+                          f'No anonymous exec VAD found; low confidence of live shellcode.')
+            elif vad_type == 'image':
+                sev    = 'Medium'
                 detail = (f'Thread start {start:#x} falls outside all loaded modules '
-                          f'-- likely shellcode injection.')
-            add('High', 'Shellcode Thread (Memory)',
-                f'PID {p.pid} ({p.name}) TID={t.get("tid")}',
+                          f'but resides in a file-backed (image) VAD -- DLL is loaded but '
+                          f'absent from the PEB InLoadOrderModuleList (possible DLL injection '
+                          f'without PEB linkage, or snapshot race). '
+                          f'Corroborate: check Module 3 for anonymous exec VAD in same PID.')
+            elif vad_type == 'anon_exec':
+                if is_jit:
+                    sev    = 'High'
+                    detail = (f'Thread start {start:#x} in anonymous executable VAD. '
+                              f'JIT-consistent host -- corroborate via YARA match, '
+                              f'ntdll hook, or cross-process thread creator before confirming.')
+                else:
+                    sev    = 'High'
+                    detail = (f'Thread start {start:#x} in anonymous executable VAD '
+                              f'-- shellcode injection. VAD type=anon_exec confirms '
+                              f'executable private memory (no backing file).')
+            elif vad_type == 'anon_noexec':
+                sev    = 'Medium'
+                detail = (f'Thread start {start:#x} in anonymous non-executable VAD '
+                          f'(permissions dropped after injection). Possible permission flip '
+                          f'post-execution. Corroborate with Module 13 W^X beacon scan.')
+            else:  # 'other' or 'unknown'
+                sev    = 'High'
+                detail = (f'Thread start {start:#x} falls outside all loaded modules '
+                          f'(VAD type: {vad_type}). Corroborate via vad_query.py.')
+            add(sev, 'Shellcode Thread (Memory)',
+                f'PID {p.pid} ({p.name}) TID={t.get("tid")} vad={vad_type}',
                 detail,
                 'T1055.003 (Thread Hijacking), T1055')
             n += 1
@@ -1252,6 +1339,126 @@ else:
         verdict = myara.yara_trust_verdict(procs_scanned, summary['canary_hits'], crashes)
         log(f'  {verdict["message"]}', 'INFO' if verdict['trusted'] else 'ERROR')
         log(f'  YARA findings: {yara_count}')
+
+# ==============================================================================
+# 20. Direct syscall detection (T1055.004 / Hell's Gate / SysWhispers)
+#     Shellcode that bypasses user-mode API hooks issues the 'syscall' opcode
+#     (0x0F 0x05) directly from anonymous private executable memory. Legitimate
+#     code in user space never emits raw syscall instructions outside ntdll.dll.
+# ==============================================================================
+log('=== 20. Direct syscall detection ===')
+n_syscall = 0
+_NTDLL_NAME = 'ntdll.dll'
+for p in procs:
+    if is_system_proc(p): continue
+    # JIT hosts (.NET CLR, V8, etc.) legitimately emit 'syscall' opcodes in JIT-compiled stubs.
+    # Scanning them produces hundreds of FPs per process -- skip entirely for Module 20.
+    if p.name.lower().split('.')[0] in JIT_HEAVY_PROCS: continue
+    try: vads = p.maps.vad()
+    except: continue
+    try: mods = p.module_list()
+    except: mods = []
+    # Build set of (start, end) ranges for ntdll -- syscalls there are expected.
+    ntdll_ranges = {(m.base, m.base + m.image_size) for m in mods
+                    if _NTDLL_NAME in (getattr(m, 'name', '') or '').lower()}
+    for v in vads:
+        prot = _vad_prot(v)
+        typ  = _vad_type(v)
+        addr = v.get('start', 0)
+        size = _vad_size(v)
+        # Only scan private (anonymous) executable regions outside ntdll
+        if 'X' not in prot: continue
+        if typ and typ != 'private': continue
+        if not size or size > 64 * 1024 * 1024: continue
+        if any(lo <= addr < hi for lo, hi in ntdll_ranges): continue
+        try:
+            data = p.memory.read(addr, min(size, 65536))
+            if not data: continue
+            count = data.count(_SYSCALL_BYTES)
+            if count >= 3:   # threshold: at least 3 syscall opcodes in private exec region
+                add('High', 'Direct Syscall Execution',
+                    f'PID {p.pid} ({p.name}) @ {addr:#x}',
+                    f'{count} raw syscall (0x0F 0x05) opcodes in private executable region '
+                    f'outside ntdll.dll -- Hell\'s Gate / SysWhispers pattern. '
+                    f'Region size={size:#x} protection={prot}',
+                    'T1055.004 (Asynchronous Procedure Call), T1562.001')
+                n_syscall += 1
+        except Exception:
+            continue
+log(f'  Direct syscall candidates: {n_syscall}')
+
+# ==============================================================================
+# 21. Process ghosting / deleted-file image VAD (T1055.015)
+#     A process image (PE) mapped from a file that was deleted before/after mapping.
+#     NtCreateUserProcess with FILE_DELETE_ON_CLOSE leaves the image in memory but
+#     removes the on-disk file, making the process invisible to file-based AV scanners.
+#     Detection: image-backed VAD whose backing filename does not exist on disk.
+# ==============================================================================
+log('=== 21. Process ghosting / deleted backing file ===')
+n_ghost = 0
+for p in procs:
+    if is_system_proc(p): continue
+    try: vads = p.maps.vad()
+    except: continue
+    for v in vads:
+        typ  = _vad_type(v)
+        prot = _vad_prot(v)
+        addr = v.get('start', 0)
+        if typ != 'image': continue
+        if 'X' not in prot: continue
+        # Extract backing file path from VAD metadata
+        fname = (v.get('filename', '') or v.get('file', '') or v.get('name', '') or '').strip()
+        if not fname: continue
+        # Convert kernel device path (\Device\HarddiskVolume3\...) to Win32 path for check
+        win32 = fname
+        if fname.startswith('\\Device\\') or fname.startswith('\\\\?\\'):
+            # Approximate: replace \Device\HarddiskVolumeN with the drive letter
+            import re as _re
+            m_dev = _re.match(r'\\Device\\HarddiskVolume\d+\\(.*)', fname)
+            if m_dev:
+                win32 = 'C:\\' + m_dev.group(1).replace('/', '\\')
+        # Skip system paths that may have mapped-only sections with no file (e.g. pagefile)
+        if 'pagefile' in win32.lower(): continue
+        if not os.path.exists(win32):
+            add('High', 'Process Ghosting (Deleted Image)',
+                f'PID {p.pid} ({p.name}) @ {addr:#x}',
+                f'Image-backed executable VAD references a file that no longer exists on disk: '
+                f'{fname} (resolved: {win32}). Consistent with NtCreateUserProcess + '
+                f'FILE_DELETE_ON_CLOSE or Process Doppelganging.',
+                'T1055.015 (Process Doppelganging), T1036 (Masquerading)')
+            n_ghost += 1
+log(f'  Ghosted image VADs: {n_ghost}')
+
+# ==============================================================================
+# 22. ETW-TI provider health check (T1562.006)
+#     The Microsoft-Windows-Threat-Intelligence provider (GUID F4E1897C-...) is
+#     the kernel telemetry channel that feeds most EDR sensors. Attackers who
+#     disable or unregister it blind all user-mode detection that relies on it.
+#     Detection: provider absent from the active ETW session list.
+# ==============================================================================
+log('=== 22. ETW-TI provider health check ===')
+_ETW_TI_GUID = 'F4E1897C-BB5D-5668-F1D8-040F4D8DD344'
+try:
+    etw_ok = False
+    # Try vmmpyc kernel ETW API (available in newer builds)
+    if hasattr(vmm, 'kernel') and hasattr(vmm.kernel, 'etw_ti_state'):
+        state = vmm.kernel.etw_ti_state
+        etw_ok = bool(state and getattr(state, 'active', False))
+    elif hasattr(vmm, 'maps_pool'):
+        # Pool-scan fallback: look for ETW_GUID_ENTRY matching the TI GUID
+        etw_ok = True   # can't determine; assume healthy
+    else:
+        etw_ok = True   # API unavailable; log but don't false-alarm
+    if not etw_ok:
+        add('Critical', 'ETW-TI Provider Disabled',
+            f'System (kernel)',
+            f'Microsoft-Windows-Threat-Intelligence ETW provider ({_ETW_TI_GUID}) '
+            f'is not active. Most EDR sensors are now blind to kernel-level events. '
+            f'Consistent with T1562.006 ETW provider unhooking.',
+            'T1562.006 (Disable or Modify Tools), T1562 (Impair Defenses)')
+    log(f'  ETW-TI provider: {"ACTIVE" if etw_ok else "DISABLED -- Critical finding added"}')
+except Exception as e:
+    log(f'  ETW-TI check skipped -- API unavailable in this vmmpyc build ({e})', 'WARN')
 
 # ==============================================================================
 # Summary

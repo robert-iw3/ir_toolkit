@@ -49,6 +49,9 @@ param(
     [int]$QuickModeDaysBack = 90,           # QuickMode: only scan files touched in last N days
     [string]$ScanTarget = 'C:\',            # Override the directory targeted by DeepFileScan/FullScan
     [switch]$ScanYara,                      # YARA sig scan (needs staged tools\yara64.exe + tools\yara_rules\)
+    [switch]$ScanMWCP,                      # DC3-MWCP malware config extraction on flagged files (needs -IncludeMWCP)
+    [string[]]$FilePath,                    # Direct file(s) or directory to scan with YARA/-ScanMWCP,
+                                            # bypassing findings filter -- follow-on investigation of specific artifact
     [switch]$SkipForensics,
     [switch]$SkipHunt,
     [switch]$CaptureMemory,                 # needs a staged memory capture tool in tools\
@@ -884,6 +887,17 @@ try {
             if (-not $fileScanEnabled) { $edrArgs += @('-TargetDirectory', $ScanTarget, '-Recursive') }
             $edrArgs += '-ScanYara'
             Write-Log "YARA scan ENABLED." 'Yellow'
+        }
+        if ($ScanMWCP) {
+            if (-not $fileScanEnabled -and -not $ScanYara) { $edrArgs += @('-TargetDirectory', $ScanTarget, '-Recursive') }
+            $edrArgs += '-ScanMWCP'
+            Write-Log "mwcp file scan ENABLED (DC3-MWCP config extraction on flagged files)." 'Yellow'
+        }
+        if ($FilePath) {
+            # Direct file/directory scan: pass through to YARA and mwcp for targeted investigation
+            $edrArgs += @('-FilePath', ($FilePath -join ','))
+            if ($Recursive) { $edrArgs += '-Recursive' }
+            Write-Log "Direct FilePath scan: $($FilePath -join ', ')" 'Yellow'
         }
         Invoke-Phase -Name 'EDR_Hunt' -ScriptPath $EDRScript -Arguments $edrArgs
 
