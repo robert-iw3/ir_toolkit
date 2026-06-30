@@ -40,6 +40,8 @@ from cloud_controlplane import (normalize_cloudtrail, normalize_gcp_audit,
                                 normalize_azure_activity, normalize_signins)
 from cloud_iam import (normalize_iam_credential_report, normalize_access_analyzer,
                        normalize_gcp_iam_policy, normalize_gcp_sa_keys)
+from cloud_posture import (normalize_security_groups, normalize_nsg_rules,
+                          normalize_gcp_firewall, normalize_public_buckets)
 from cloud_coverage import attack_coverage, coverage_markdown
 
 
@@ -50,11 +52,14 @@ def adjudicate(forensics_dir, provider, c2_ips, c2_domains):
         findings += normalize_cloudtrail(read_json(os.path.join(forensics_dir, "cloudtrail_events.json")))
         findings += normalize_iam_credential_report(read_json(os.path.join(forensics_dir, "aws_iam_credential_report.json")))
         findings += normalize_access_analyzer(read_json(os.path.join(forensics_dir, "aws_access_analyzer.json")))
+        findings += normalize_security_groups(read_json(os.path.join(forensics_dir, "security_groups.json")))
+        findings += normalize_public_buckets(read_json(os.path.join(forensics_dir, "aws_public_buckets.json")))
     elif provider == "gcp":
         findings += normalize_scc(read_json(os.path.join(forensics_dir, "gcp_scc_findings.json")))
         findings += normalize_gcp_audit(read_json(os.path.join(forensics_dir, "gcp_audit_log.json")))
         findings += normalize_gcp_iam_policy(read_json(os.path.join(forensics_dir, "gcp_iam_policy.json")))
         findings += normalize_gcp_sa_keys(read_json(os.path.join(forensics_dir, "gcp_sa_keys.json")))
+        findings += normalize_gcp_firewall(read_json(os.path.join(forensics_dir, "gcp_firewall_rules.json")))
     elif provider == "azure":
         findings += normalize_azure_risky(read_json(os.path.join(forensics_dir, "azure_risky_users.json")))
         findings += normalize_oauth_grants(read_json(os.path.join(forensics_dir, "azure_oauth_grants.json")))
@@ -62,6 +67,7 @@ def adjudicate(forensics_dir, provider, c2_ips, c2_domains):
         findings += normalize_directory_audit(read_json(os.path.join(forensics_dir, "azure_directory_audit.json")))
         findings += normalize_azure_activity(read_json(os.path.join(forensics_dir, "azure_activity_log.json")))
         findings += normalize_signins(read_json(os.path.join(forensics_dir, "azure_signin_logs.json")))
+        findings += normalize_nsg_rules(read_json(os.path.join(forensics_dir, "azure_nsg_rules.json")))
     # Logging-enablement preflight: disabled sources become visibility-gap findings.
     findings += normalize_logging_status(read_json(os.path.join(forensics_dir, "logging_status.json")))
     # Flow-log C2 confirmation (provider-specific file, format-agnostic IP match).

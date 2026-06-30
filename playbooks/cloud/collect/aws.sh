@@ -169,6 +169,26 @@ collect_aws() {
         --output json \
         > "${ARTIFACT_DIR}/security_groups.json" 2>/dev/null || true
 
+    # Public-bucket exposure sweep - which S3 buckets are reachable by anyone.
+    log "Checking S3 buckets for public access..."
+    {
+        echo '{"buckets": ['
+        _first=1
+        for _b in $(aws s3api list-buckets --query 'Buckets[].Name' --output text 2>/dev/null); do
+            [[ -z "${_b}" ]] && continue
+            _pab=$(aws s3api get-public-access-block --bucket "${_b}" \
+                --query 'PublicAccessBlockConfiguration.BlockPublicPolicy' --output text 2>/dev/null)
+            _status=$(aws s3api get-bucket-policy-status --bucket "${_b}" \
+                --query 'PolicyStatus.IsPublic' --output text 2>/dev/null)
+            # public when the policy is public AND public access is not blocked
+            _public=false
+            [[ "${_status}" == "True" && "${_pab}" != "True" ]] && _public=true
+            [[ ${_first} -eq 1 ]] && _first=0 || echo ','
+            printf '{"name":"%s","public":%s}' "${_b}" "${_public}"
+        done
+        echo ']}'
+    } > "${ARTIFACT_DIR}/aws_public_buckets.json" 2>/dev/null || true
+
     # VPC Flow Logs for the incident window - network egress evidence / C2 confirmation.
     log "Pulling VPC flow logs..."
     aws ec2 describe-flow-logs --region "${region}" --output json \

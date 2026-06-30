@@ -2,15 +2,19 @@
 # ==============================================================================
 # IR Cloud Playbook 03 - Cloud Persistence Eradication
 #
-# Removes adversarial cloud persistence mechanisms:
-#   AWS:   Remove malicious IAM user/role/policy, revoke sessions,
-#          delete malicious Lambda functions or scheduled events
-#   Azure: Remove malicious app registrations, revoke service principal tokens,
-#          delete malicious Automation Runbooks/Logic Apps
-#   GCP:   Remove malicious service account keys, Cloud Function triggers,
-#          delete malicious IAM bindings
+# Removes adversarial cloud persistence mechanisms. Identity targets come from
+# IR_MALICIOUS_PROCESSES (IAM users/roles, service principals, service-account emails);
+# resource targets from IR_MALICIOUS_PATHS as prefixed tokens:
+#   AWS:   function:<name> (Lambda), rule:<name> (EventBridge) - deleted after backup;
+#          IAM users (keys deactivated), roles (AWSDenyAll), sessions revoked.
+#   Azure: app:<appId> (SP disabled), logicapp:<resourceId> (disabled),
+#          runbook:<account>/<name> (deleted after export); SP creds rotated + disabled.
+#   GCP:   function:<name> (Cloud Function), scheduler:<name> (Cloud Scheduler) - deleted
+#          after backup; binding:<member>=<role> removed; SA keys deleted.
 #
-# Conservative by default - requires explicit IR_MALICIOUS_* env vars.
+# Conservative + DRY-RUN by default (mutates only when IR_DRY_RUN=0). Every reversible
+# action is journaled so 05_restore_host.sh can undo it; irreversible deletes are backed
+# up first and flagged for manual recreate on restore.
 # ==============================================================================
 set -uo pipefail
 
@@ -72,13 +76,14 @@ eradicate_aws() {
         fi
     done
 
-    # Remove malicious Lambda functions / EventBridge rules
+    # Remove malicious resource-based persistence (IR_MALICIOUS_PATHS): Lambda functions
+    # (function:<name>) and EventBridge scheduled-execution rules (rule:<name>).
     IFS=',' read -ra paths <<< "${MALICIOUS_PATHS}"
     for path in "${paths[@]}"; do
         path="${path// /}"
         [[ -z "${path}" ]] && continue
-        if [[ "${path}" == *"function:"* ]]; then
-            local fn_name="${path##*function:}"
+        if [[ "${path}" == function:* ]]; then
+            local fn_name="${path#function:}"
             if [[ "${DRY_RUN}" == "1" ]]; then
                 log "[DRY-RUN] would back up + delete Lambda function ${fn_name}"; removed=1
             else
@@ -92,6 +97,27 @@ eradicate_aws() {
                 log "Deleting Lambda function ${fn_name}..."
                 aws lambda delete-function --region "${region}" --function-name "${fn_name}" 2>/dev/null && \
                     { log "Lambda ${fn_name} deleted"; removed=1; } || true
+            fi
+        elif [[ "${path}" == rule:* ]]; then
+            local rule_name="${path#rule:}"
+            if [[ "${DRY_RUN}" == "1" ]]; then
+                log "[DRY-RUN] would back up + delete EventBridge rule ${rule_name} (and its targets)"; removed=1
+            else
+                # EventBridge delete is IRREVERSIBLE - back up the rule + its targets first.
+                local bak="${ARTIFACT_DIR}/eventbridge_${rule_name//[^A-Za-z0-9]/_}.json"
+                { aws events describe-rule --region "${region}" --name "${rule_name}" --output json 2>/dev/null
+                  aws events list-targets-by-rule --region "${region}" --rule "${rule_name}" --output json 2>/dev/null; } \
+                    > "${bak}" 2>/dev/null || true
+                journal "{\"action\":\"eventbridge_delete\",\"rule\":\"${rule_name}\",\"backup\":\"${bak}\"}"
+                # Targets must be removed before the rule can be deleted.
+                local tids
+                tids=$(aws events list-targets-by-rule --region "${region}" --rule "${rule_name}" \
+                    --query 'Targets[].Id' --output text 2>/dev/null)
+                # shellcheck disable=SC2086
+                [[ -n "${tids}" && "${tids}" != "None" ]] && \
+                    aws events remove-targets --region "${region}" --rule "${rule_name}" --ids ${tids} 2>/dev/null || true
+                aws events delete-rule --region "${region}" --name "${rule_name}" 2>/dev/null && \
+                    { log "EventBridge rule ${rule_name} deleted"; removed=1; } || true
             fi
         fi
     done
@@ -119,6 +145,48 @@ eradicate_azure() {
                 az ad sp update --id "${entity}" --set "accountEnabled=false" --output none 2>/dev/null && {
                     journal "{\"action\":\"azure_sp_disable\",\"sp\":\"${entity}\"}"
                     log "SP ${entity} disabled"; removed=1; } || true
+            fi
+        fi
+    done
+
+    # Resource-based persistence (IR_MALICIOUS_PATHS): Logic Apps (logicapp:<resourceId>,
+    # disabled - reversible), Automation Runbooks (runbook:<account>/<name>, deleted after
+    # export), and app registrations (app:<appId>, its SP disabled - reversible).
+    local rg="${IR_AZURE_RESOURCE_GROUP:-}"
+    IFS=',' read -ra paths <<< "${MALICIOUS_PATHS}"
+    for path in "${paths[@]}"; do
+        path="${path// /}"
+        [[ -z "${path}" ]] && continue
+        if [[ "${path}" == logicapp:* ]]; then
+            local la_id="${path#logicapp:}"
+            if [[ "${DRY_RUN}" == "1" ]]; then
+                log "[DRY-RUN] would disable Logic App ${la_id}"; removed=1
+            else
+                az resource update --ids "${la_id}" --set "properties.state=Disabled" --output none 2>/dev/null && {
+                    journal "{\"action\":\"azure_logicapp_disable\",\"id\":\"${la_id}\"}"
+                    log "Logic App ${la_id} disabled (reversible)"; removed=1; } || true
+            fi
+        elif [[ "${path}" == runbook:* ]]; then
+            local rb="${path#runbook:}"; local acct="${rb%%/*}"; local name="${rb##*/}"
+            if [[ "${DRY_RUN}" == "1" ]]; then
+                log "[DRY-RUN] would export + delete Automation runbook ${name}"; removed=1
+            else
+                local bak="${ARTIFACT_DIR}/runbook_${name//[^A-Za-z0-9]/_}.json"
+                az automation runbook show --automation-account-name "${acct}" --resource-group "${rg}" \
+                    --name "${name}" --output json > "${bak}" 2>/dev/null || true
+                journal "{\"action\":\"azure_runbook_delete\",\"name\":\"${name}\",\"backup\":\"${bak}\"}"
+                az automation runbook delete --automation-account-name "${acct}" --resource-group "${rg}" \
+                    --name "${name}" --yes --output none 2>/dev/null && \
+                    { log "Automation runbook ${name} deleted"; removed=1; } || true
+            fi
+        elif [[ "${path}" == app:* ]]; then
+            local app_id="${path#app:}"
+            if [[ "${DRY_RUN}" == "1" ]]; then
+                log "[DRY-RUN] would disable app registration ${app_id} (disable its service principal)"; removed=1
+            else
+                az ad sp update --id "${app_id}" --set "accountEnabled=false" --output none 2>/dev/null && {
+                    journal "{\"action\":\"azure_sp_disable\",\"sp\":\"${app_id}\"}"
+                    log "App registration ${app_id} SP disabled (reversible)"; removed=1; } || true
             fi
         fi
     done
@@ -153,6 +221,48 @@ eradicate_gcp() {
                         { log "Deleted SA key ${key_name}"; removed=1; } || true
                 fi
             done
+        fi
+    done
+
+    # Resource-based persistence (IR_MALICIOUS_PATHS): Cloud Functions (function:<name>) and
+    # Cloud Scheduler jobs (scheduler:<name>) deleted after backup; IAM bindings
+    # (binding:<member>=<role>) removed (reversible).
+    IFS=',' read -ra paths <<< "${MALICIOUS_PATHS}"
+    for path in "${paths[@]}"; do
+        path="${path// /}"
+        [[ -z "${path}" ]] && continue
+        if [[ "${path}" == function:* ]]; then
+            local fn="${path#function:}"
+            if [[ "${DRY_RUN}" == "1" ]]; then
+                log "[DRY-RUN] would back up + delete Cloud Function ${fn}"; removed=1
+            else
+                local bak="${ARTIFACT_DIR}/gcp_function_${fn//[^A-Za-z0-9]/_}.json"
+                gcloud functions describe "${fn}" --project="${project}" --format=json > "${bak}" 2>/dev/null || true
+                journal "{\"action\":\"gcp_function_delete\",\"function\":\"${fn}\",\"backup\":\"${bak}\"}"
+                gcloud functions delete "${fn}" --project="${project}" --quiet 2>/dev/null && \
+                    { log "Cloud Function ${fn} deleted"; removed=1; } || true
+            fi
+        elif [[ "${path}" == scheduler:* ]]; then
+            local job="${path#scheduler:}"
+            if [[ "${DRY_RUN}" == "1" ]]; then
+                log "[DRY-RUN] would back up + delete Cloud Scheduler job ${job}"; removed=1
+            else
+                local bak="${ARTIFACT_DIR}/gcp_scheduler_${job//[^A-Za-z0-9]/_}.json"
+                gcloud scheduler jobs describe "${job}" --project="${project}" --format=json > "${bak}" 2>/dev/null || true
+                journal "{\"action\":\"gcp_scheduler_delete\",\"job\":\"${job}\",\"backup\":\"${bak}\"}"
+                gcloud scheduler jobs delete "${job}" --project="${project}" --quiet 2>/dev/null && \
+                    { log "Cloud Scheduler job ${job} deleted"; removed=1; } || true
+            fi
+        elif [[ "${path}" == binding:* ]]; then
+            local b="${path#binding:}"; local member="${b%%=*}"; local role="${b##*=}"
+            if [[ "${DRY_RUN}" == "1" ]]; then
+                log "[DRY-RUN] would remove IAM binding ${member} -> ${role}"; removed=1
+            else
+                gcloud projects remove-iam-policy-binding "${project}" \
+                    --member="${member}" --role="${role}" --quiet 2>/dev/null && {
+                    journal "{\"action\":\"gcp_binding_remove\",\"member\":\"${member}\",\"role\":\"${role}\"}"
+                    log "Removed IAM binding ${member} -> ${role} (reversible)"; removed=1; } || true
+            fi
         fi
     done
 

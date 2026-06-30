@@ -10,10 +10,6 @@
 > that agentic platform. The toolkit serves as the human-in-the-loop validation layer; the
 > autonomous platform is a separate initiative.
 
-The toolkit provides immediate out-of-the-box detection for novice-to-intermediate tactics, instantly flagging known signatures, volume anomalies, and common scripting tools. Because these low-level threats rely on predictable patterns, the system catches them automatically with zero additional engineering required.
-
-In contrast, exposing advanced tradecraft or APTs requires manual, multi-source data correlation. Sophisticated actors intentionally mimic legitimate administrative traffic to "live off the land," leaving behind only tiny, distributed clues. While the forensic evidence is captured across host, network, and identity logs, compiling these scattered data points into a complete attack timeline requires extended investigation and expert human analysis.
-
 Single-command incident response for **Windows**, **Linux**, and **Cloud** (AWS / Azure / GCP).
 
 This file is the summary. The detailed, per-platform operating instructions live in:
@@ -27,8 +23,6 @@ This file is the summary. The detailed, per-platform operating instructions live
 ---
 
 ## Executive summary
-
-**What the toolkit handles automatically vs. what requires human analysis**
 
 The toolkit provides immediate out-of-the-box detection for novice-to-intermediate tactics — instantly flagging known signatures, volume anomalies, and common scripting tools. Because these low-level threats rely on predictable patterns, the system catches them automatically with zero additional engineering.
 

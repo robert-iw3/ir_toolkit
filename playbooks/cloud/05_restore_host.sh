@@ -58,8 +58,24 @@ reverse_iam_revocations() {
                 if [[ "${DRY_RUN}" == "1" ]]; then log "[DRY-RUN] would re-enable GCP service account ${a}"
                 else gcloud iam service-accounts enable "${a}" --project="${IR_GCP_PROJECT:-}" --quiet 2>/dev/null \
                         && log "re-enabled service account ${a}" || log "WARN: could not re-enable SA ${a}"; fi ;;
+            azure_logicapp_disable)  # a=resourceId -> re-enable
+                if [[ "${DRY_RUN}" == "1" ]]; then log "[DRY-RUN] would re-enable Logic App ${a}"
+                else az resource update --ids "${a}" --set "properties.state=Enabled" --output none 2>/dev/null \
+                        && log "re-enabled Logic App ${a}" || log "WARN: could not re-enable Logic App ${a}"; fi ;;
+            gcp_binding_remove)   # a=member b=role -> re-add the binding
+                if [[ "${DRY_RUN}" == "1" ]]; then log "[DRY-RUN] would re-add IAM binding ${a} -> ${b}"
+                else gcloud projects add-iam-policy-binding "${IR_GCP_PROJECT:-}" --member="${a}" --role="${b}" --quiet 2>/dev/null \
+                        && log "re-added IAM binding ${a} -> ${b}" || log "WARN: could not re-add binding ${a} -> ${b}"; fi ;;
             lambda_delete)        # a=function b=backup -> cannot auto-recreate; point at the backup
                 log "MANUAL: Lambda ${a} was deleted - recreate from backup ${b} (aws lambda create-function)" ;;
+            eventbridge_delete)   # a=rule b=backup -> manual recreate
+                log "MANUAL: EventBridge rule ${a} was deleted - recreate from backup ${b} (aws events put-rule + put-targets)" ;;
+            azure_runbook_delete) # a=name b=backup -> manual recreate
+                log "MANUAL: Automation runbook ${a} was deleted - recreate from backup ${b}" ;;
+            gcp_function_delete)  # a=function b=backup -> manual recreate
+                log "MANUAL: Cloud Function ${a} was deleted - recreate from backup ${b} (gcloud functions deploy)" ;;
+            gcp_scheduler_delete) # a=job b=backup -> manual recreate
+                log "MANUAL: Cloud Scheduler job ${a} was deleted - recreate from backup ${b} (gcloud scheduler jobs create)" ;;
         esac
     done < <("${PY}" -c "
 import json,sys
@@ -67,14 +83,20 @@ for ln in open('${ROLLBACK_JOURNAL}'):
     try: e=json.loads(ln)
     except Exception: continue
     a=e.get('action','')
-    if a=='iam_key_deactivate':   print('\t'.join([a,e.get('user',''),e.get('key_id','')]))
-    elif a=='iam_role_deny':      print('\t'.join([a,e.get('role',''),e.get('policy_arn','')]))
-    elif a=='iam_user_deny':      print('\t'.join([a,e.get('user',''),e.get('policy_arn','')]))
-    elif a=='iam_revoke_sessions':print('\t'.join([a,e.get('entity_type',''),e.get('entity','')]))
-    elif a=='azure_sp_disable':   print('\t'.join([a,e.get('sp',''),'']))
-    elif a=='azure_user_disable': print('\t'.join([a,e.get('user',''),'']))
-    elif a=='gcp_sa_disable':     print('\t'.join([a,e.get('sa',''),'']))
-    elif a=='lambda_delete':      print('\t'.join([a,e.get('function',''),e.get('backup','')]))
+    if a=='iam_key_deactivate':     print('\t'.join([a,e.get('user',''),e.get('key_id','')]))
+    elif a=='iam_role_deny':        print('\t'.join([a,e.get('role',''),e.get('policy_arn','')]))
+    elif a=='iam_user_deny':        print('\t'.join([a,e.get('user',''),e.get('policy_arn','')]))
+    elif a=='iam_revoke_sessions':  print('\t'.join([a,e.get('entity_type',''),e.get('entity','')]))
+    elif a=='azure_sp_disable':     print('\t'.join([a,e.get('sp',''),'']))
+    elif a=='azure_user_disable':   print('\t'.join([a,e.get('user',''),'']))
+    elif a=='gcp_sa_disable':       print('\t'.join([a,e.get('sa',''),'']))
+    elif a=='azure_logicapp_disable': print('\t'.join([a,e.get('id',''),'']))
+    elif a=='gcp_binding_remove':   print('\t'.join([a,e.get('member',''),e.get('role','')]))
+    elif a=='lambda_delete':        print('\t'.join([a,e.get('function',''),e.get('backup','')]))
+    elif a=='eventbridge_delete':   print('\t'.join([a,e.get('rule',''),e.get('backup','')]))
+    elif a=='azure_runbook_delete': print('\t'.join([a,e.get('name',''),e.get('backup','')]))
+    elif a=='gcp_function_delete':  print('\t'.join([a,e.get('function',''),e.get('backup','')]))
+    elif a=='gcp_scheduler_delete': print('\t'.join([a,e.get('job',''),e.get('backup','')]))
 ")
 }
 
