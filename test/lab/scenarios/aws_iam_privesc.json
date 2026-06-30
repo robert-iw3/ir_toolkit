@@ -1,0 +1,29 @@
+{
+  "name": "aws-iam-privesc",
+  "provider": "aws",
+  "description": "A leaked IAM user logs in without MFA, mints a backdoor access key on another user, and attaches AdministratorAccess - classic console-to-admin escalation + key persistence.",
+  "collect": {"target": "10.0.0.5", "c2_ips": "", "c2_domains": ""},
+  "aws": {
+    "cloudtrail": [
+      {"eventName": "ConsoleLogin", "sourceIPAddress": "203.0.113.9",
+       "userIdentity": {"type": "IAMUser", "userName": "jdoe"},
+       "responseElements": {"ConsoleLogin": "Success"},
+       "additionalEventData": {"MFAUsed": "No"}},
+      {"eventName": "CreateAccessKey", "sourceIPAddress": "203.0.113.9",
+       "eventSource": "iam.amazonaws.com",
+       "userIdentity": {"userName": "jdoe"},
+       "requestParameters": {"userName": "backupsvc"}},
+      {"eventName": "AttachUserPolicy", "sourceIPAddress": "203.0.113.9",
+       "eventSource": "iam.amazonaws.com",
+       "userIdentity": {"userName": "jdoe"},
+       "requestParameters": {"userName": "backupsvc",
+                             "policyArn": "arn:aws:iam::aws:policy/AdministratorAccess"}}
+    ]
+  },
+  "expect": {
+    "types": ["Cloud Control-Plane Activity"],
+    "mitre_any": ["T1098.001", "T1098.003", "T1078.004"],
+    "min_verdict": "Likely True Positive",
+    "tactics": ["Privilege Escalation", "Persistence", "Initial Access"]
+  }
+}

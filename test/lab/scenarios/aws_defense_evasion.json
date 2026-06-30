@@ -1,0 +1,25 @@
+{
+  "name": "aws-defense-evasion",
+  "provider": "aws",
+  "description": "Attacker disables logging to cover their tracks: StopLogging on the org trail, DeleteFlowLogs, and DisassociateMembers on GuardDuty.",
+  "collect": {"target": "10.0.0.5", "c2_ips": "", "c2_domains": ""},
+  "aws": {
+    "cloudtrail": [
+      {"eventName": "StopLogging", "sourceIPAddress": "203.0.113.9",
+       "eventSource": "cloudtrail.amazonaws.com",
+       "userIdentity": {"userName": "attacker"}},
+      {"eventName": "DeleteFlowLogs", "sourceIPAddress": "203.0.113.9",
+       "eventSource": "ec2.amazonaws.com",
+       "userIdentity": {"userName": "attacker"}},
+      {"eventName": "DisassociateMembers", "sourceIPAddress": "203.0.113.9",
+       "eventSource": "guardduty.amazonaws.com",
+       "userIdentity": {"userName": "attacker"}}
+    ]
+  },
+  "expect": {
+    "types": ["Cloud Control-Plane Activity"],
+    "mitre_any": ["T1562.008"],
+    "min_verdict": "Likely True Positive",
+    "tactics": ["Defense Evasion"]
+  }
+}

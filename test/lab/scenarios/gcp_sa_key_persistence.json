@@ -1,0 +1,25 @@
+{
+  "name": "gcp-sa-key-persistence",
+  "provider": "gcp",
+  "description": "Service-account key persistence + log tampering: the attacker mints a user-managed SA key (audit event + standing key in inventory) and deletes a logging sink to reduce visibility; SCC also fires.",
+  "collect": {"target": "vm-data", "c2_ips": "", "c2_domains": ""},
+  "gcp": {
+    "audit_log": [
+      {"protoPayload": {"methodName": "google.iam.admin.v1.CreateServiceAccountKey",
+        "authenticationInfo": {"principalEmail": "attacker@evil.test"},
+        "resourceName": "projects/p/serviceAccounts/svc@p.iam.gserviceaccount.com"}},
+      {"protoPayload": {"methodName": "google.logging.v2.ConfigServiceV2.DeleteSink",
+        "authenticationInfo": {"principalEmail": "attacker@evil.test"},
+        "resourceName": "projects/p/sinks/audit"}}],
+    "scc": [{"finding": {"category": "PERSISTENCE_IAM_ANOMALOUS_GRANT",
+                         "severity": "HIGH", "state": "ACTIVE"}}],
+    "service_accounts": ["svc@p.iam.gserviceaccount.com"],
+    "sa_key_rows": ["projects/p/serviceAccounts/svc@p.iam.gserviceaccount.com/keys/abc123\t2021-01-01T00:00:00Z"]
+  },
+  "expect": {
+    "types": ["Cloud Control-Plane Activity", "Cloud IAM Posture", "Cloud Detection"],
+    "mitre_any": ["T1098.001", "T1562.008"],
+    "min_verdict": "Likely True Positive",
+    "tactics": ["Persistence", "Defense Evasion"]
+  }
+}

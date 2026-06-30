@@ -1,0 +1,28 @@
+{
+  "name": "aws-exfil-and-c2",
+  "provider": "aws",
+  "description": "Data staging + exfiltration: a bucket policy is opened to the public, an EBS snapshot is shared to an external account, GuardDuty fires an exfil detection, and the known C2 IP is observed in VPC flow logs.",
+  "collect": {"target": "10.0.0.5", "c2_ips": "45.66.77.88", "c2_domains": "evil.test"},
+  "aws": {
+    "cloudtrail": [
+      {"eventName": "PutBucketPolicy", "sourceIPAddress": "203.0.113.9",
+       "eventSource": "s3.amazonaws.com", "userIdentity": {"userName": "attacker"},
+       "requestParameters": {"bucketName": "prod-backups",
+                             "bucketPolicy": {"Statement": [{"Principal": "*", "Effect": "Allow"}]}}},
+      {"eventName": "ModifySnapshotAttribute", "sourceIPAddress": "203.0.113.9",
+       "eventSource": "ec2.amazonaws.com", "userIdentity": {"userName": "attacker"},
+       "requestParameters": {"createVolumePermission": {"add": {"items": [{"userId": "999988887777"}]}}}}
+    ],
+    "guardduty": {"Findings": [
+      {"Title": "Exfiltration:S3/ObjectRead.Unusual", "Type": "Exfiltration:S3/ObjectRead.Unusual",
+       "Severity": 8, "Description": "Unusual bulk S3 object reads from a Tor exit node."}]},
+    "flow_log_lines": [
+      "2 123456789012 eni-0abc 10.0.0.5 45.66.77.88 49152 443 6 200 112000 ACCEPT OK"]
+  },
+  "expect": {
+    "types": ["Cloud Exposure", "Cloud Control-Plane Activity", "Cloud Network Flow to C2", "Cloud Detection"],
+    "mitre_any": ["T1530", "T1537", "T1071"],
+    "min_verdict": "True Positive",
+    "tactics": ["Collection", "Exfiltration", "Command and Control"]
+  }
+}

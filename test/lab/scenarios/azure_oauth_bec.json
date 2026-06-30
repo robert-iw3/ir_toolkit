@@ -1,0 +1,25 @@
+{
+  "name": "azure-oauth-bec",
+  "provider": "azure",
+  "description": "Illicit consent grant + business email compromise: a tenant-wide OAuth app is consented Mail.Read/Mail.Send, a mailbox rule auto-forwards externally and deletes, and the directory audit shows a service-principal credential add.",
+  "collect": {"target": "vm-finance", "c2_ips": "", "c2_domains": ""},
+  "azure": {
+    "oauth_grants": {"value": [
+      {"clientId": "evil-app", "consentType": "AllPrincipals",
+       "scope": "User.Read Mail.Read Mail.Send offline_access"}]},
+    "inbox_rules": {"value": [
+      {"displayName": "auto", "actions": {
+        "forwardTo": [{"emailAddress": {"address": "exfil@evil.test"}}], "delete": true}}]},
+    "directory_audit": {"value": [
+      {"activityDisplayName": "Add service principal credentials",
+       "initiatedBy": {"user": {"userPrincipalName": "attacker@corp.test"}}}]},
+    "risky_users": {"value": [
+      {"userPrincipalName": "victim@corp.test", "riskLevel": "high"}]}
+  },
+  "expect": {
+    "types": ["Cloud OAuth Consent Grant", "Cloud Inbox Forwarding Rule", "Cloud Identity Audit"],
+    "mitre_any": ["T1528", "T1114.003", "T1098.001"],
+    "min_verdict": "Likely True Positive",
+    "tactics": ["Credential Access", "Collection", "Persistence"]
+  }
+}

@@ -1,0 +1,26 @@
+{
+  "name": "azure-signin-takeover",
+  "provider": "azure",
+  "description": "Account takeover via password spray then legacy-auth: repeated failed sign-ins followed by a success from the same IP, plus a successful IMAP (legacy) sign-in that bypasses MFA, and a diagnostic-settings deletion to blind the tenant.",
+  "collect": {"target": "vm-hr", "c2_ips": "", "c2_domains": ""},
+  "azure": {
+    "signin_logs": {"value": [
+      {"userPrincipalName": "victim@corp.test", "ipAddress": "203.0.113.9",
+       "clientAppUsed": "Browser", "status": {"errorCode": 50126}},
+      {"userPrincipalName": "victim@corp.test", "ipAddress": "203.0.113.9",
+       "clientAppUsed": "Browser", "status": {"errorCode": 0}},
+      {"userPrincipalName": "victim@corp.test", "ipAddress": "203.0.113.9",
+       "clientAppUsed": "IMAP4", "status": {"errorCode": 0},
+       "location": {"countryOrRegion": "RU"}}]},
+    "activity_log": [
+      {"operationName": {"value": "Microsoft.Insights/diagnosticSettings/delete"},
+       "caller": "attacker@corp.test", "status": {"value": "Succeeded"},
+       "resourceId": "/subscriptions/s/diag"}]
+  },
+  "expect": {
+    "types": ["Cloud Sign-In", "Cloud Control-Plane Activity"],
+    "mitre_any": ["T1110", "T1078.004", "T1562.008"],
+    "min_verdict": "Likely True Positive",
+    "tactics": ["Credential Access", "Defense Evasion"]
+  }
+}

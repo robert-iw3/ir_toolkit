@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+# Mock AWS CLI for cloud-playbook simulation. Returns canned values for the
+# queries the playbooks make so the happy path completes; logs every call to
+# $IR_MOCK_LOG. Always exits 0.
+[[ -n "${IR_MOCK_LOG:-}" ]] && echo "aws $*" >> "$IR_MOCK_LOG"
+
+args="$*"; query=""; prev=""
+for a in "$@"; do [[ "$prev" == "--query" ]] && query="$a"; prev="$a"; done
+
+# GuardDuty get-findings: emit one HIGH-severity detection for adjudication.
+if [[ "$args" == *"guardduty get-findings"* ]]; then
+    cat <<'JSON'
+{"Findings":[{"Title":"UnauthorizedAccess:EC2/SSHBruteForce","Type":"UnauthorizedAccess:EC2/SSHBruteForce","Severity":8,"Description":"EC2 instance targeted by SSH brute force from a known C2 IP."}]}
+JSON
+    exit 0
+fi
+
+# CloudTrail lookup-events (unfiltered, paginated): one defense-evasion event so the
+# control-plane analyzer has something to adjudicate. No NextToken -> single page.
+if [[ "$args" == *"cloudtrail lookup-events"* ]]; then
+    cat <<'JSON'
+{"Events":[{"EventName":"StopLogging","CloudTrailEvent":"{\"eventName\":\"StopLogging\",\"sourceIPAddress\":\"203.0.113.9\",\"userIdentity\":{\"type\":\"IAMUser\",\"userName\":\"attacker\"}}"}]}
+JSON
+    exit 0
+fi
+# CloudTrail describe-trails (preflight): report a trail so logging reads as enabled.
+if [[ "$args" == *"cloudtrail describe-trails"* ]]; then
+    if [[ "$args" == *"--output text"* ]]; then echo "ir-trail"; else echo '{"trailList":[{"Name":"ir-trail"}]}'; fi
+    exit 0
+fi
+# IAM credential report: a root account with an active key + a console user without MFA.
+if [[ "$args" == *"iam get-credential-report"* ]]; then
+    csv=$'user,arn,password_enabled,mfa_active,access_key_1_active,access_key_1_last_rotated,access_key_2_active,access_key_2_last_rotated\n<root_account>,arn:aws:iam::111:root,true,false,true,2021-01-01T00:00:00+00:00,false,N/A\nalice,arn:aws:iam::111:user/alice,true,false,true,2020-01-01T00:00:00+00:00,false,N/A'
+    printf '{"Content":"%s","ReportFormat":"text/csv"}' "$(printf '%s' "$csv" | base64 | tr -d '\n')"
+    exit 0
+fi
+
+# describe-regions (multi-region sweep): two enabled regions.
+if [[ "$args" == *"describe-regions"* ]]; then
+    if [[ "$args" == *"--output text"* ]]; then printf 'us-east-1\tus-west-2\n'
+    else echo '{"Regions":[{"RegionName":"us-east-1"},{"RegionName":"us-west-2"}]}'; fi
+    exit 0
+fi
+
+# VPC Flow Logs: config lookup (LogGroupName) + the flow records themselves.
+if [[ "$args" == *"describe-flow-logs"* ]]; then
+    if [[ "$query" == *LogGroupName* ]]; then echo "ir-vpc-flow-logs"
+    else echo '{"FlowLogs":[{"LogGroupName":"ir-vpc-flow-logs"}]}'; fi
+    exit 0
+fi
+if [[ "$args" == *"logs filter-log-events"* ]]; then
+    # one ACCEPTed flow to 45.66.77.88 (used by flow-log C2-confirmation tests)
+    echo '{"events":[{"message":"2 123456789012 eni-0abc 10.0.0.5 45.66.77.88 49152 443 6 20 11200 ACCEPT OK"}]}'
+    exit 0
+fi
+
+case "$query" in
+    *SecurityGroups*GroupId*)  echo "sg-orig00000001" ;;
+    *NetworkAclId*)            echo "acl-0mock1234567" ;;
+    *InstanceId*)              echo "i-0mock1234567890" ;;
+    *VpcId*)                   echo "vpc-0mock12345" ;;
+    *GroupId*)
+        if [[ "$args" == *create-security-group* ]]; then echo "sg-0quarantine01"; else echo "None"; fi ;;
+    *Volume*|*Vol*|*BlockDeviceMappings*) echo "vol-0mock1234567" ;;
+    *DetectorId*)              echo "det-0mock00000001" ;;
+    *FindingIds*)              echo "" ;;
+    *SnapshotId*)              echo "snap-0mock0000001" ;;
+    *)
+        # default: emit a JSON-ish blank so --output json consumers don't choke
+        if [[ "$args" == *"--output text"* ]]; then echo ""; else echo "{}"; fi ;;
+esac
+exit 0

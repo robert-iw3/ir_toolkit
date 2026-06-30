@@ -1,0 +1,2 @@
+#!/usr/bin/env bash
+IR_LAB_CLI=aws exec python3 "$(dirname "$0")/_lab.py" "$@"

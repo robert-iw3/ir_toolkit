@@ -1,0 +1,23 @@
+{
+  "name": "gcp-public-exposure",
+  "provider": "gcp",
+  "description": "Public data exposure: an IAM policy binds a storage role to allUsers (both as a live SetIamPolicy audit event and in the point-in-time project policy), exposing a bucket to the internet.",
+  "collect": {"target": "vm-web", "c2_ips": "", "c2_domains": ""},
+  "gcp": {
+    "audit_log": [
+      {"protoPayload": {"methodName": "google.iam.v1.IAMPolicy.SetIamPolicy",
+        "authenticationInfo": {"principalEmail": "attacker@evil.test"},
+        "resourceName": "projects/_/buckets/prod-data",
+        "request": {"policy": {"bindings": [
+          {"role": "roles/storage.objectViewer", "members": ["allUsers"]}]}}}}],
+    "iam_policy": {"bindings": [
+      {"role": "roles/storage.objectViewer", "members": ["allUsers"]},
+      {"role": "roles/owner", "members": ["user:admin@corp.test"]}]}
+  },
+  "expect": {
+    "types": ["Cloud Exposure"],
+    "mitre_any": ["T1530"],
+    "min_verdict": "Likely True Positive",
+    "tactics": ["Collection"]
+  }
+}

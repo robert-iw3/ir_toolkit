@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# Mock gcloud CLI for cloud-playbook simulation. Logs every call and returns empty
+# JSON/values so the GCP playbook paths complete without a real project. Exits 0.
+[[ -n "${IR_MOCK_LOG:-}" ]] && echo "gcloud $*" >> "$IR_MOCK_LOG"
+case "$*" in
+    *"scc findings list"*)
+        echo '[{"finding":{"category":"MALWARE_C2","severity":"HIGH","state":"ACTIVE"}}]' ;;
+    *"compute instances describe"*)
+        echo "https://www.googleapis.com/compute/v1/projects/p/zones/z/disks/disk-1" ;;
+    *"compute disks snapshot"*) exit 0 ;;
+    *vpc_flows*)
+        # one VPC flow record to 45.66.77.88 (flow-log C2-confirmation tests)
+        echo '[{"jsonPayload":{"connection":{"src_ip":"10.0.0.5","dest_ip":"45.66.77.88","dest_port":443},"bytes_sent":"11200"}}]' ;;
+    *list*|*"logging read"*) echo "[]" ;;
+    *describe*) echo "{}" ;;
+    *) echo "" ;;
+esac
+exit 0
