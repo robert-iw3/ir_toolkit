@@ -608,11 +608,33 @@ def check_memfd():
                 "T1620 (Reflective Loading)")
 
 
-# --- Check 14: hidden kernel modules (/sys/module vs /proc/modules) [advanced] -
+# --- Check 14: hidden kernel modules (three-source diff + taint) [advanced] ----
+# /proc/modules bit -> taint letter for the MODULE-related taints (P proprietary,
+# F force-loaded, O out-of-tree, E unsigned). A loaded LKM sets these and the taint is
+# sticky for the kernel's lifetime - it survives the module unlinking itself.
+_MODULE_TAINT_BITS = {0: "P", 2: "F", 12: "O", 13: "E"}
+# Synthetic kallsyms module tags that are NOT loadable modules: JITed BPF programs show
+# as [bpf] and ftrace trampolines as [ftrace]. Expected on every host - but not suppressed,
+# since a rootkit could name itself to hide behind one; downgraded to a low-severity verify.
+_KALLSYMS_PSEUDO_MODULES = {"bpf", "ftrace"}
+
+
+def _kernel_module_taints():
+    """Module-related taint letters currently set on the running kernel."""
+    try:
+        val = int((read_file("/proc/sys/kernel/tainted") or "0").strip())
+    except ValueError:
+        val = 0
+    return {ltr for bit, ltr in _MODULE_TAINT_BITS.items() if val & (1 << bit)}
+
+
 def check_hidden_modules():
+    """Cross-reference three independent module views - /proc/modules, /sys/module,
+    and /proc/kallsyms - plus kernel taint. A rootkit that unlinks from the module list
+    (Diamorphine-style) is caught by whichever source it forgets; if it scrubs all three,
+    the sticky taint flag with no module to account for it still gives it away."""
     proc_mods = set()
-    mods = read_file("/proc/modules") or ""
-    for ln in mods.splitlines():
+    for ln in (read_file("/proc/modules") or "").splitlines():
         if ln.split():
             proc_mods.add(ln.split()[0])
     try:
@@ -620,15 +642,167 @@ def check_hidden_modules():
                     if os.path.isdir(f"/sys/module/{m}") and
                     os.path.exists(f"/sys/module/{m}/initstate")}
     except Exception:
-        return
-    # modules present in sysfs (loaded) but absent from /proc/modules = hidden by rootkit
+        sys_mods = set()
+
+    # 1. present in sysfs (loaded) but hidden from /proc/modules
     for m in sys_mods - proc_mods:
         add("High", "Hidden Kernel Module", m,
             "Module visible in /sys/module but hidden from /proc/modules (LKM rootkit).",
             "T1014 (Rootkit)")
 
+    # 2. owns kernel symbols in /proc/kallsyms but hidden from /proc/modules. (Module names
+    #    appear in [brackets] even when kptr_restrict zeroes the addresses.)
+    kall_mods = set()
+    for ln in (read_file("/proc/kallsyms") or "").splitlines():
+        r = ln.rstrip()
+        if r.endswith("]") and "[" in r:
+            m = r[r.rfind("[") + 1:-1].strip()
+            if m:
+                kall_mods.add(m)
+    for m in kall_mods - proc_mods - sys_mods:
+        if m in _KALLSYMS_PSEUDO_MODULES:
+            add("Info", "Kallsyms Pseudo-Module (verify)", m,
+                f"'{m}' owns kernel symbols but is a synthetic kallsyms tag (JITed BPF / ftrace "
+                f"trampolines), not a loadable module - expected on every host; verify no module "
+                f"is masquerading under this name.", "T1014 (Rootkit)")
+        else:
+            add("High", "Hidden Kernel Module", m,
+                "Module owns kernel symbols (/proc/kallsyms) but is absent from /proc/modules "
+                "(LKM rootkit hiding from the module list).", "T1014 (Rootkit)")
 
-# --- Check 15: capability-endowed binaries outside baseline [intermediate] -----
+    # 3. taint correlation - the catch for a module that scrubs all three lists. Any
+    #    module-taint the running kernel carries should be explained by a visible module's
+    #    per-module /sys/module/<m>/taint; an unexplained one means a module loaded and hid.
+    taints = _kernel_module_taints()
+    if taints:
+        explained = set()
+        for m in sys_mods:
+            explained.update((read_file(f"/sys/module/{m}/taint") or "").strip())
+        unexplained = taints - explained
+        if unexplained:
+            add("Medium", "Kernel Tainted By Unaccounted Module (verify)",
+                f"tainted={''.join(sorted(taints))}",
+                f"Kernel carries module taint {sorted(unexplained)} (out-of-tree/unsigned/"
+                f"forced module loaded) but no visible module accounts for it - possible hidden "
+                f"LKM rootkit (or a module loaded then unloaded).", "T1014 (Rootkit)")
+
+
+# --- Check 15: usermodehelper path hijack (core_pattern / modprobe / uevent) ----
+# The kernel runs these helper programs as root on a trigger; repointing one at an
+# attacker binary is a common privesc / container-escape / persistence primitive.
+# Distro-agnostic allow-list of legitimate coredump handlers (systemd-coredump across
+# systemd distros, Ubuntu/Debian apport, RHEL/Fedora ABRT, kdump).
+_COREDUMP_HANDLERS = ("/usr/lib/systemd/systemd-coredump", "/lib/systemd/systemd-coredump",
+                      "/usr/share/apport/apport",
+                      "/usr/libexec/abrt-hook-ccpp", "/usr/libexec/abrt-ccpp",
+                      "/usr/bin/kdumpctl")
+# Legitimate modprobe locations across distros (usr-merged and split /sbin).
+_MODPROBE_PATHS = ("/sbin/modprobe", "/usr/sbin/modprobe", "/bin/modprobe", "/usr/bin/modprobe")
+_IMPLANT_DIRS = ("/tmp/", "/dev/shm/", "/var/tmp/", "/run/shm/")
+
+
+def check_kernel_helper_paths():
+    # core_pattern: a leading '|' pipes the crash dump to a program run as root.
+    cp = (read_file("/proc/sys/kernel/core_pattern") or "").strip()
+    if cp.startswith("|"):
+        handler = cp[1:].strip().split()[0] if len(cp) > 1 else ""
+        if not any(handler.startswith(h) for h in _COREDUMP_HANDLERS):
+            sev = "Critical" if handler.startswith(_IMPLANT_DIRS) else "High"
+            add(sev, "Kernel core_pattern Hijack", handler or "(empty)",
+                f"core_pattern pipes crash dumps to a non-standard handler run as root: {cp[:200]}",
+                "T1546 (Event Triggered Execution), T1611 (Escape to Host)")
+
+    # modprobe_path: the binary the kernel execs to load a module (default /sbin/modprobe).
+    mp = (read_file("/proc/sys/kernel/modprobe") or "").strip()
+    if mp and mp not in _MODPROBE_PATHS:
+        sev = "Critical" if mp.startswith(_IMPLANT_DIRS) else "High"
+        add(sev, "modprobe_path Hijack", mp,
+            f"kernel modprobe path set to a non-standard binary (root-triggered): {mp}",
+            "T1547.006 (Kernel Modules and Extensions), T1543")
+
+    # uevent/hotplug helper: default empty on modern kernels; a value = root-run on device events.
+    for path in ("/sys/kernel/uevent_helper", "/proc/sys/kernel/hotplug"):
+        uh = (read_file(path) or "").strip()
+        if uh:
+            add("High", "uevent_helper Hijack", uh,
+                f"{path} set to '{uh}' - runs as root on device (uevent) triggers.",
+                "T1546 (Event Triggered Execution)")
+
+
+# --- Check 16: io_uring anti-EDR I/O + eBPF object surface ----------------------
+def _fd_targets(pid):
+    d = f"/proc/{pid}/fd"
+    out = []
+    try:
+        for fd in os.listdir(d):
+            try:
+                out.append(os.readlink(f"{d}/{fd}"))
+            except OSError:
+                pass
+    except OSError:
+        pass
+    return out
+
+
+def _suspect_exe(pid):
+    """(exe, reason) if a process runs from a writable dir or a deleted binary, else (exe, '')."""
+    exe = exe_of(pid) or ""
+    if "(deleted)" in exe:
+        return exe, "a deleted binary"
+    if exe.startswith(tuple(d + "/" for d in WRITABLE_DIRS)):
+        return exe, "a writable dir"
+    return exe, ""
+
+
+def check_io_uring():
+    # io_uring performs file/network I/O without the syscalls most EDR/eBPF hooks watch,
+    # so a covert implant favours it. Flag io_uring users that also look implanted.
+    for pid in proc_pids():
+        rings = sum(1 for t in _fd_targets(pid) if "[io_uring]" in t)
+        if not rings:
+            continue
+        exe, reason = _suspect_exe(pid)
+        if reason:
+            add("High", "io_uring Anti-EDR I/O", f"PID {pid} ({comm(pid) or '?'})",
+                f"Process holds {rings} io_uring ring fd and runs from {reason}: {exe} - "
+                f"syscall-less I/O to evade syscall/eBPF hooks.",
+                "T1106 (Native API), T1562 (Impair Defenses)")
+        else:
+            # io_uring has legitimate users, but it is the only visibility into this
+            # anti-EDR surface (no memory-side check yet) - surface, don't blind.
+            add("Info", "io_uring In Use (verify)", f"PID {pid} ({comm(pid) or '?'})",
+                f"Process holds {rings} io_uring ring fd ({exe or 'unknown'}) - io_uring does I/O "
+                f"without the syscalls most EDR/eBPF hooks watch; verify it is expected.",
+                "T1106 (Native API)")
+
+
+def check_bpf_objects():
+    # A malicious eBPF program is pinned in bpffs or held open by an implant process. Legit
+    # users exist (systemd, cilium), so only escalate the implant-looking holders.
+    for pid in proc_pids():
+        bpf = sum(1 for t in _fd_targets(pid) if "bpf-prog" in t or "bpf-map" in t)
+        if not bpf:
+            continue
+        exe, reason = _suspect_exe(pid)
+        if reason:
+            add("High", "eBPF Object Held By Implant", f"PID {pid} ({comm(pid) or '?'})",
+                f"Process holds {bpf} eBPF prog/map fd and runs from {reason}: {exe} - "
+                f"eBPF backs modern rootkits/C2.", "T1014 (Rootkit), T1562 (Impair Defenses)")
+    # Pinned objects in bpffs survive process exit - a persistence surface worth surfacing.
+    for base in ("/sys/fs/bpf",):
+        pinned = []
+        for root, _dirs, files in os.walk(base):
+            pinned += [os.path.join(root, f) for f in files]
+            if len(pinned) > 200:
+                break
+        if pinned:
+            add("Medium", "Pinned eBPF Objects (verify)", base,
+                f"{len(pinned)} pinned eBPF object(s) under {base} (e.g. {pinned[0]}) - "
+                f"persistence surface; verify each is from an expected agent (systemd/cilium).",
+                "T1014 (Rootkit)")
+
+
+# --- Check 17: capability-endowed binaries outside baseline [intermediate] -----
 def check_capabilities():
     if not shutil.which("getcap"):
         return
@@ -1274,7 +1448,8 @@ def main():
         check_suid, check_persistence, check_entropy,
         check_accounts, check_shell_init, check_authorized_keys, check_pam_modules,
         check_webshells, check_memfd,
-        check_hidden_modules, check_capabilities,
+        check_hidden_modules, check_kernel_helper_paths,
+        check_io_uring, check_bpf_objects, check_capabilities,
         check_network, check_magic_mismatch, check_log_tampering,
         check_privileged_task_integrity, check_persistence_extended,
         check_gtfobins_exec, check_cred_access,

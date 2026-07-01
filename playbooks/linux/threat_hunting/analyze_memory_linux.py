@@ -126,7 +126,13 @@ PLUGINS = ("linux.pslist.PsList", "linux.pidhashtable.PIDHashTable",
            "linux.tracing.tracepoints.CheckTracepoints",
            "linux.malware.process_spoofing.ProcessSpoofing",
            "linux.capabilities.Capabilities", "linux.mountinfo.MountInfo",
-           "linux.library_list.LibraryList")
+           "linux.library_list.LibraryList",
+           # Toolkit custom plugins (resolved via -p PLUGIN_DIR) - structures no stock plugin exposes.
+           # Only validated, bounded-cost plugins run by default. io_uring/namespaces/kernel_timers/
+           # fops_hooks/got_plt analyzers stay wired (they no-op with no rows) but their plugins are
+           # not run by default - io_uring needs a perf rewrite, the others need validation.
+           "linux_ir.kernel_globals.KernelGlobals", "linux_ir.text_hooks.TextHooks",
+           "linux_ir.task_creds.TaskCreds")
 
 # Heavy per-VMA / per-thread plugins (big output, slow on large images) - opt-in with --deep.
 OPTIONAL_PLUGINS = ("linux.proc.Maps", "linux.pscallstack.PsCallStack")
@@ -572,6 +578,166 @@ def analyze_process_spoofing(rows):
     return out
 
 
+# Distro-agnostic legitimate values for the kernel helper globals.
+_COREDUMP_OK = ("/usr/lib/systemd/systemd-coredump", "/lib/systemd/systemd-coredump",
+                "/usr/share/apport/apport", "/usr/libexec/abrt-hook-ccpp", "/usr/libexec/abrt-ccpp")
+_MODPROBE_OK = ("/sbin/modprobe", "/usr/sbin/modprobe", "/bin/modprobe", "/usr/bin/modprobe")
+
+
+def analyze_kernel_globals(rows):
+    """linux_ir.kernel_globals -> usermodehelper path hijacks read from the image:
+    core_pattern piped to a non-standard root-run handler, a hijacked modprobe_path, or a
+    set uevent_helper. The memory-image counterpart of the live check_kernel_helper_paths."""
+    out = []
+    g = {str(_get(r, "Name", "Global")): str(_get(r, "Value")) for r in rows or [] if isinstance(r, dict)}
+    cp = g.get("core_pattern", "").strip()
+    if cp.startswith("|"):
+        handler = cp[1:].strip().split()[0] if len(cp) > 1 else ""
+        if not any(handler.startswith(h) for h in _COREDUMP_OK):
+            out.append(_finding("High", "Kernel core_pattern Hijack (memory)", handler or "(empty)",
+                                f"core_pattern pipes crash dumps to a non-standard handler run as "
+                                f"root: {cp[:200]}",
+                                "T1546 (Event Triggered Execution), T1611 (Escape to Host)"))
+    mp = g.get("modprobe_path", "").strip()
+    if mp and mp not in _MODPROBE_OK:
+        out.append(_finding("High", "modprobe_path Hijack (memory)", mp,
+                            f"kernel modprobe path set to a non-standard binary (root-triggered): {mp}",
+                            "T1547.006 (Kernel Modules and Extensions)"))
+    uh = g.get("uevent_helper", "").strip()
+    if uh:
+        out.append(_finding("High", "uevent_helper Hijack (memory)", uh,
+                            f"uevent_helper set to '{uh}' - runs as root on device (uevent) triggers.",
+                            "T1546 (Event Triggered Execution)"))
+    return out
+
+
+_IMPLANT_EXE_DIRS = ("/tmp/", "/var/tmp/", "/dev/shm/", "/run/shm/")
+
+
+def analyze_io_uring(rows):
+    """linux_ir.io_uring -> tasks holding io_uring rings. io_uring performs I/O without the
+    syscalls most EDR/eBPF hooks watch, so implants favour it. High for a ring-holder running
+    from a writable dir / deleted binary; surface the rest at Info (do not blind the surface)."""
+    out = []
+    for r in rows or []:
+        pid, comm = _get(r, "PID"), _get(r, "Comm", "COMM")
+        path = str(_get(r, "Path", "Exe") or "")
+        rings = _get(r, "Rings", "Count") or "?"
+        implant = path.startswith(_IMPLANT_EXE_DIRS) or "(deleted)" in path
+        if implant:
+            out.append(_finding("High", "io_uring Anti-EDR I/O (memory)", f"PID {pid} ({comm})",
+                                f"Task holds {rings} io_uring ring(s) and runs from {path} - "
+                                f"syscall-less I/O to evade syscall/eBPF hooks.",
+                                "T1106 (Native API), T1562 (Impair Defenses)"))
+        else:
+            out.append(_finding("Info", "io_uring In Use (memory, verify)", f"PID {pid} ({comm})",
+                                f"Task holds {rings} io_uring ring(s) ({path or 'unknown'}) - "
+                                f"io_uring does I/O without the watched syscalls; verify expected.",
+                                "T1106 (Native API)"))
+    return out
+
+
+def analyze_namespaces(rows):
+    """linux_ir.namespaces -> per-task namespace inode ids. A task that is containerized on its
+    mount namespace (differs from host/init) yet shares the HOST pid or net namespace is a
+    container-escape / host-reach signal (T1611). init (PID 1) supplies the host baseline."""
+    out = []
+    rows = [r for r in rows or [] if isinstance(r, dict)]
+    host = next((r for r in rows if str(_get(r, "PID")) == "1"), None)
+    if not host:
+        return out
+    h_mnt, h_pid, h_net = _get(host, "MntNs"), _get(host, "PidNs"), _get(host, "NetNs")
+    for r in rows:
+        pid = str(_get(r, "PID"))
+        if pid == "1":
+            continue
+        mnt, pns, net = _get(r, "MntNs"), _get(r, "PidNs"), _get(r, "NetNs")
+        if mnt and mnt != h_mnt and ((pns and pns == h_pid) or (net and net == h_net)):
+            shared = "pid" if pns == h_pid else "net"
+            out.append(_finding("High", "Namespace Escape (memory)",
+                                f"PID {pid} ({_get(r, 'Comm', 'COMM')})",
+                                f"Task is containerized (own mount ns {mnt}) but shares the HOST "
+                                f"{shared} namespace - container escape / host reach.",
+                                "T1611 (Escape to Host)"))
+    return out
+
+
+def analyze_kernel_timers(rows):
+    """linux_ir.kernel_timers -> armed timer/workqueue callbacks whose handler resolves to no
+    module and no symbol = unbacked/injected code running periodically with no process."""
+    out = []
+    for r in rows or []:
+        sym = str(_get(r, "Symbol", "Function") or "").strip().upper()
+        module = str(_get(r, "Module") or "").strip().lower()
+        addr = _get(r, "Address", "Handler")
+        if sym in ("", "UNKNOWN", "-") and module in ("", "-", "none", "unknown"):
+            out.append(_finding("High", "Kernel Timer Hook (memory)", f"@{addr}",
+                                f"Armed timer/workqueue callback @{addr} resolves to no module and "
+                                f"no symbol - unbacked/injected periodic code.",
+                                "T1053 (Scheduled Task/Job), T1014 (Rootkit)"))
+    return out
+
+
+def analyze_text_hooks(rows):
+    """linux_ir.text_hooks -> kernel .text function prologues starting with a trampoline
+    (jmp/int3/push-ret) = an inline hook installed without ftrace (invisible to CheckFtrace)."""
+    out = []
+    for r in rows or []:
+        if _get(r, "Hooked") is True or str(_get(r, "Hooked")).lower() == "true":
+            sym = _get(r, "Symbol", "Name")
+            pro = _get(r, "Prologue")
+            out.append(_finding("High", "Kernel .text Inline Hook (memory)", str(sym),
+                                f"Function '{sym}' prologue is a trampoline ({pro}) - inline hook "
+                                f"not installed via ftrace.",
+                                "T1014 (Rootkit), T1562.001 (Impair Defenses)"))
+    return out
+
+
+def analyze_fops_hooks(rows):
+    """linux_ir.fops_hooks -> file_operations / inode_operations pointers on key inodes
+    (proc_root, /, /etc) whose handler resolves to no module = a VFS hook for file/dir hiding."""
+    out = []
+    for r in rows or []:
+        module = str(_get(r, "Module") or "").strip().lower()
+        if module in ("", "-", "none", "unknown"):
+            obj, op = _get(r, "Object", "Inode"), _get(r, "Op", "Operation")
+            out.append(_finding("High", "VFS fops Hook (memory)", f"{obj}:{op}",
+                                f"{op} handler on {obj} resolves to no module - VFS hook "
+                                f"(file/directory hiding).", "T1014 (Rootkit)"))
+    return out
+
+
+def analyze_task_creds(rows):
+    """linux_ir.task_creds -> a task whose cred != real_cred (credentials overwritten after
+    fork) is the residue of a kernel privesc such as a magic-signal 'become root' (Diamorphine)."""
+    out = []
+    for r in rows or []:
+        matches = _get(r, "CredMatchesReal")
+        if matches is False or str(matches).lower() == "false":
+            pid, comm = _get(r, "PID"), _get(r, "Comm", "COMM")
+            out.append(_finding("High", "Credential Override (memory)", f"PID {pid} ({comm})",
+                                f"Task cred != real_cred (uid={_get(r, 'UID')} euid={_get(r, 'EUID')}) "
+                                f"- credentials overwritten post-fork (kernel privesc residue).",
+                                "T1068 (Privilege Escalation), T1014 (Rootkit)"))
+    return out
+
+
+def correlate_ebpf_c2(ebpf_rows, netfilter_rows):
+    """A network-hook eBPF program co-occurring with a hooked netfilter hook is the bpfdoor /
+    magic-packet C2 pattern - correlate the two kernel surfaces into one high-confidence finding."""
+    net_ebpf = [r for r in ebpf_rows or []
+                if str(_get(r, "Type") or "").strip().lower() in _EBPF_NETWORK_HOOK_TYPES]
+    nf_hooked = [r for r in netfilter_rows or []
+                 if str(_get(r, "Is Hooked", "IsHooked", "Hooked")).strip().lower() in ("true", "1", "yes")]
+    if net_ebpf and nf_hooked:
+        names = ", ".join(sorted({str(_get(r, "Name") or "?") for r in net_ebpf}))
+        return [_finding("High", "eBPF Network C2 Correlated (memory)", names,
+                         f"A network-hook eBPF program ({names}) co-occurs with a hooked netfilter "
+                         f"hook - magic-packet C2 / traffic-signalling backdoor pattern (bpfdoor-class).",
+                         "T1205.002 (Socket Filters), T1071 (Application Layer Protocol)")]
+    return []
+
+
 def analyze_check_idt(rows):
     """IDT can list all entries; flag only the ones whose handler is unresolved/hooked."""
     out = []
@@ -610,6 +776,9 @@ _EBPF_KERNEL_HOOK_TYPES = frozenset(
     ("kprobe", "kretprobe", "tracepoint", "raw_tracepoint", "perf_event"))
 _EBPF_NETWORK_HOOK_TYPES = frozenset(
     ("socket_filter", "cgroup_skb", "xdp", "sk_skb", "flow_dissector"))
+# BPF-LSM programs attach to security-module hooks; malware uses them to neuter access
+# controls and hide activity from the kernel's own policy layer (defense evasion).
+_EBPF_LSM_TYPES = frozenset(("lsm", "lsm_mac", "lsm_cgroup"))
 
 
 def analyze_ebpf(rows):
@@ -633,11 +802,17 @@ def analyze_ebpf(rows):
         loaded_at = _get(r, "Loaded At", "LoadTime") or ""
         load_note = f" loaded={loaded_at}" if loaded_at else ""
         name_s, tag_s = str(name), str(tag)
+        mitre = "T1014 (Rootkit), T1205 (Traffic Signaling)"
 
-        if typ in _EBPF_NETWORK_HOOK_TYPES:
+        if typ in _EBPF_LSM_TYPES or name_s.lower().startswith("bpf_lsm"):
+            sev = "High"
+            mitre = "T1562.001 (Impair Defenses: Disable or Modify Tools), T1014 (Rootkit)"
+            extra = (" BPF-LSM program hooks kernel security callbacks - can bypass access "
+                     "controls / hide activity from the LSM layer (defense evasion).")
+        elif typ in _EBPF_NETWORK_HOOK_TYPES:
             sev = "High"
             extra = (f" Network-hook type '{typ}' is purpose-built for traffic "
-                     f"interception/filtering - high network-hiding risk.")
+                     f"interception/filtering - high network-hiding risk (magic-packet C2).")
         elif typ in _EBPF_KERNEL_HOOK_TYPES and _EBPF_HIDING_RE.search(name_s + tag_s):
             sev = "High"
             extra = (f" Kernel-hook type '{typ}' with hiding-pattern name/tag - "
@@ -650,7 +825,7 @@ def analyze_ebpf(rows):
             sev, "eBPF Program (memory)", f"{name_s} [{typ}]",
             f"Loaded eBPF program name='{name_s}' type='{typ}' tag='{tag_s}'{load_note} - eBPF "
             f"backs modern rootkits/C2; confirm it is expected.{extra}",
-            "T1014 (Rootkit), T1205 (Traffic Signaling)"))
+            mitre))
     return out
 
 
@@ -918,6 +1093,16 @@ def analyze(plugin_rows):
         + analyze_netfilter(g.get("linux.malware.netfilter.Netfilter"))
         + analyze_keyboard_notifiers(g.get("linux.keyboard_notifiers.Keyboard_notifiers"))
         + analyze_kthreads(g.get("linux.kthreads.Kthreads"))
+        + analyze_kernel_globals(g.get("linux_ir.kernel_globals.KernelGlobals"))
+        + analyze_io_uring(g.get("linux_ir.io_uring.IoUring"))
+        + analyze_namespaces(g.get("linux_ir.namespaces.Namespaces"))
+        + analyze_kernel_timers(g.get("linux_ir.kernel_timers.KernelTimers"))
+        + analyze_text_hooks(g.get("linux_ir.text_hooks.TextHooks"))
+        + analyze_fops_hooks(g.get("linux_ir.fops_hooks.FopsHooks"))
+        + analyze_task_creds(g.get("linux_ir.task_creds.TaskCreds"))
+        + analyze_got_plt(g.get("linux_ir.got_plt.GotPlt"))
+        + correlate_ebpf_c2(g.get("linux.ebpf.EBPF"),
+                            g.get("linux.malware.netfilter.Netfilter"))
         + analyze_ebpf(g.get("linux.ebpf.EBPF"))
         + analyze_ftrace(g.get("linux.tracing.ftrace.CheckFtrace"))
         + analyze_tracepoints(g.get("linux.tracing.tracepoints.CheckTracepoints"))
@@ -944,12 +1129,19 @@ def _vol_exe(explicit=None):
     return staged if os.path.isfile(staged) else None
 
 
+# Toolkit-shipped custom Volatility 3 plugins (reads structures/symbols no stock plugin
+# exposes). Added to vol's plugin search path with -p so `linux_ir.*` plugins resolve.
+PLUGIN_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vol_plugins")
+
+
 def run_plugin(vol, image, plugin, symbols=None, extra=None, timeout=900, progress=False):
     # `-q` suppresses Volatility's progress feedback - keep it for the fast plugins, but DROP it for
     # the long YARA scan so vol's native progress streams (plus a heartbeat) instead of looking hung.
     cmd = [vol, "-r", "json", "-f", image]
     if not progress:
         cmd.insert(1, "-q")
+    if os.path.isdir(PLUGIN_DIR):
+        cmd += ["-p", PLUGIN_DIR]
     if symbols:
         cmd += ["-s", symbols]
     cmd.append(plugin)

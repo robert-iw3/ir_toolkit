@@ -63,6 +63,17 @@ def test_ebpf_xdp_escalates():
     assert len(high) > 0
 
 
+def test_ebpf_lsm_is_defense_evasion_high():
+    """BPF-LSM programs hook security callbacks - High, mapped to defense evasion (T1562.001)."""
+    rows = [{"Type": "lsm", "Name": "bpf_lsm_file_open", "Tag": "1", "PID": 5, "Process": "x"}]
+    f = m.analyze_ebpf(rows)
+    assert f and f[0]["Severity"] == "High"
+    assert "T1562.001" in f[0]["MITRE"]
+    # also caught by name when the type column is generic
+    byname = m.analyze_ebpf([{"Type": "unspec", "Name": "bpf_lsm_bprm_check", "PID": 6}])
+    assert byname and byname[0]["Severity"] == "High" and "T1562.001" in byname[0]["MITRE"]
+
+
 def test_ebpf_empty_rows_returns_empty():
     assert m.analyze_ebpf([]) == []
     assert m.analyze_ebpf(None) == []
