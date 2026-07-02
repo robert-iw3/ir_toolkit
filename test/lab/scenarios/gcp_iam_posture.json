@@ -1,0 +1,22 @@
+{
+  "name": "gcp-iam-posture",
+  "provider": "gcp",
+  "description": "IAM posture: a long-lived user-managed service-account key exists (persistence risk) and the project IAM policy grants a storage role to allUsers (public data exposure).",
+  "collect": {"target": "vm-data", "c2_ips": "", "c2_domains": ""},
+  "gcp": {
+    "iam_policy": {"bindings": [
+      {"role": "roles/storage.objectViewer", "members": ["allUsers"]},
+      {"role": "roles/owner", "members": ["user:admin@corp.test"]}]},
+    "service_accounts": ["svc@p.iam.gserviceaccount.com"],
+    "sa_key_rows": ["projects/p/serviceAccounts/svc@p.iam.gserviceaccount.com/keys/abc\t2021-01-01T00:00:00Z"],
+    "firewall_rules": [
+      {"name": "fw-open", "direction": "INGRESS", "sourceRanges": ["0.0.0.0/0"],
+       "allowed": [{"IPProtocol": "tcp", "ports": ["22"]}]}]
+  },
+  "expect": {
+    "types": ["Cloud Exposure", "Cloud IAM Posture"],
+    "mitre_any": ["T1530", "T1098.001"],
+    "min_verdict": "Likely True Positive",
+    "tactics": ["Collection", "Persistence"]
+  }
+}

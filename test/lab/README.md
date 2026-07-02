@@ -64,6 +64,19 @@ Provider blocks the engine understands:
 
 Anything unspecified gets a safe empty default so the happy path still completes.
 
+## Realism: benign baseline + clean-tenant guard
+
+Real tenants are mostly benign activity with an attack buried in it, so `baseline.json` holds normal
+telemetry per provider (routine `Describe`/`List` calls, MFA logins, internal-only network, no public
+exposure, no risky identities). The engine **merges the baseline into every scenario** (lists are
+concatenated, baseline first), so each attack is adjudicated *amid realistic noise* — not in a vacuum.
+
+The `*_benign_baseline.json` scenarios run the baseline **with no attack** and assert `no_true_positive`:
+the workflow must produce **zero true-positive-class findings** on a normal tenant. This is the
+false-positive guard to trust before pointing the workflow at a real tenant — if a benign scenario
+starts flagging, an analyzer is over-firing. Keep the baseline representative of the environments you
+run in (add normal-but-unusual patterns that have burned you as benign entries).
+
 ## Refining detection logic
 
 When a scenario fails, it means the workflow under-detects (or mis-adjudicates) that attack — fix the

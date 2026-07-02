@@ -143,3 +143,46 @@ def test_collection_emits_exposure_findings(tmp_path):
     exposures = [f for f in combined if f["Type"] == "Cloud Exposure"]
     assert any("Security group" in f["Details"] for f in exposures)   # world-open SG
     assert any(f["Target"] == "loot-bucket" for f in exposures)        # public bucket
+
+
+# ── C4 depth: public snapshots/AMIs + IMDSv1 ────────────────────────────────────
+def test_public_snapshot_is_tp():
+    out = cp.normalize_public_snapshots({"Snapshots": [{"SnapshotId": "snap-1"}]})
+    assert out and out[0]["Verdict"] in TP_CLASS and "T1537" in out[0]["MITRE"]
+    assert out[0]["Target"] == "snap-1"
+
+
+def test_public_ami_is_tp():
+    out = cp.normalize_public_amis({"Images": [{"ImageId": "ami-1"}]})
+    assert out and out[0]["Verdict"] in TP_CLASS and out[0]["Type"] == "Cloud Exposure"
+
+
+def test_imdsv1_optional_is_flagged():
+    out = cp.normalize_imds({"instances": [
+        {"InstanceId": "i-1", "HttpTokens": "optional"},
+        {"InstanceId": "i-2", "HttpTokens": "required"}]})
+    assert len(out) == 1 and out[0]["Target"] == "i-1"
+    assert "T1552.005" in out[0]["MITRE"] and out[0]["Verdict"] == "Indeterminate"
+
+
+def test_posture_depth_empty_safe():
+    assert cp.normalize_public_snapshots(None) == []
+    assert cp.normalize_public_amis(None) == []
+    assert cp.normalize_imds(None) == []
+
+
+def test_collection_emits_posture_depth_findings(tmp_path):
+    env = cloud_env(incident="c4-e2e", mock_log=tmp_path / "calls.log")
+    out_root = tmp_path / "proj"
+    out_root.mkdir()
+    r = subprocess.run(
+        ["bash", IRCOLLECT_CLOUD_SH, "--provider", "aws", "--target", "10.0.0.5",
+         "--incident-id", "c4-e2e", "--output-root", str(out_root)],
+        env=env, capture_output=True, text=True, timeout=180)
+    assert r.returncode == 0, r.stderr
+    host = out_root / "aws-10_0_0_5"
+    combined = json.loads(list(host.glob("Combined_Findings_*.json"))[0].read_text())
+    exposures = [f for f in combined if f["Type"] == "Cloud Exposure"]
+    assert any(f["Target"] == "snap-public01" for f in exposures)   # public snapshot
+    assert any(f["Target"] == "ami-public01" for f in exposures)    # public AMI
+    assert any(f["Target"] == "i-imds01" for f in exposures)        # IMDSv1

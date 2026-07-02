@@ -1,0 +1,25 @@
+{
+  "name": "aws-exposure-posture",
+  "provider": "aws",
+  "description": "Point-in-time attack surface: a security group open to the internet on SSH, a public S3 bucket, a publicly-restorable EBS snapshot, a public AMI, an IMDSv1 instance, and a credential report showing a root access key and a console user without MFA.",
+  "collect": {"target": "10.0.0.5", "c2_ips": "", "c2_domains": ""},
+  "aws": {
+    "security_groups": [
+      {"GroupId": "sg-open", "IpPermissions": [
+        {"IpProtocol": "tcp", "FromPort": 22, "ToPort": 22,
+         "IpRanges": [{"CidrIp": "0.0.0.0/0"}]}]}],
+    "public_buckets": [{"name": "prod-loot", "public": true}],
+    "public_snapshots": [{"SnapshotId": "snap-leak01", "VolumeId": "vol-x"}],
+    "public_amis": [{"ImageId": "ami-leak01"}],
+    "imds": [{"InstanceId": "i-imds1", "HttpTokens": "optional"}],
+    "access_analyzer": {"findings": [
+      {"resource": "arn:aws:s3:::exposed-bucket", "status": "ACTIVE", "isPublic": true}]},
+    "credential_report_csv": "user,arn,password_enabled,mfa_active,access_key_1_active,access_key_1_last_rotated,access_key_2_active,access_key_2_last_rotated\n<root_account>,arn:aws:iam::1:root,true,false,true,2021-01-01T00:00:00+00:00,false,N/A\nalice,arn:aws:iam::1:user/alice,true,false,false,N/A,false,N/A"
+  },
+  "expect": {
+    "types": ["Cloud Exposure", "Cloud IAM Posture"],
+    "mitre_any": ["T1562.007", "T1530", "T1537", "T1552.005", "T1078.004"],
+    "min_verdict": "Likely True Positive",
+    "tactics": ["Defense Evasion", "Collection", "Exfiltration", "Credential Access", "Initial Access"]
+  }
+}

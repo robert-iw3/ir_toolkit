@@ -1,0 +1,8 @@
+{
+  "name": "aws-benign-baseline",
+  "provider": "aws",
+  "description": "A normal, un-attacked aws tenant: only the benign baseline telemetry (routine reads, MFA logins, internal-only network, no public exposure, no risky identities). The workflow must produce NO true-positive-class finding - the false-positive guard for real-tenant use.",
+  "collect": {"target": "10.0.0.5", "c2_ips": "", "c2_domains": ""},
+  "aws": {},
+  "expect": {"no_true_positive": true}
+}

@@ -1,0 +1,43 @@
+{
+  "_comment": "Benign baseline telemetry merged into EVERY scenario so attacks are adjudicated amid realistic normal activity (as in a real tenant). None of this must produce a true-positive-class finding; the benign-only scenarios assert exactly that. Lists are concatenated with the scenario's telemetry; a scenario's string/scalar values override the baseline.",
+  "aws": {
+    "cloudtrail": [
+      {"eventName": "DescribeInstances", "eventSource": "ec2.amazonaws.com", "userIdentity": {"userName": "ops"}},
+      {"eventName": "ListBuckets", "eventSource": "s3.amazonaws.com", "userIdentity": {"userName": "ops"}},
+      {"eventName": "GetCallerIdentity", "eventSource": "sts.amazonaws.com", "userIdentity": {"userName": "ci"}},
+      {"eventName": "AssumeRole", "eventSource": "sts.amazonaws.com", "userIdentity": {"userName": "ci"}},
+      {"eventName": "ConsoleLogin", "sourceIPAddress": "10.1.2.3",
+       "userIdentity": {"type": "IAMUser", "userName": "admin"},
+       "responseElements": {"ConsoleLogin": "Success"}, "additionalEventData": {"MFAUsed": "Yes"}}
+    ],
+    "credential_report_csv": "user,arn,password_enabled,mfa_active,access_key_1_active,access_key_1_last_rotated,access_key_2_active,access_key_2_last_rotated\nadmin,arn:aws:iam::1:user/admin,true,true,false,N/A,false,N/A\ndeploy,arn:aws:iam::1:user/deploy,false,true,false,N/A,false,N/A",
+    "security_groups": [
+      {"GroupId": "sg-internal", "IpPermissions": [
+        {"IpProtocol": "tcp", "FromPort": 22, "ToPort": 22, "IpRanges": [{"CidrIp": "10.0.0.0/8"}]}]}],
+    "public_buckets": [{"name": "app-assets", "public": false}],
+    "imds": [{"InstanceId": "i-normal", "HttpTokens": "required"}]
+  },
+  "azure": {
+    "activity_log": [
+      {"operationName": {"value": "Microsoft.Compute/virtualMachines/read"}, "caller": "ops@corp.test",
+       "status": {"value": "Succeeded"}}],
+    "signin_logs": {"value": [
+      {"userPrincipalName": "user@corp.test", "ipAddress": "10.1.2.3", "clientAppUsed": "Browser",
+       "status": {"errorCode": 0}, "location": {"countryOrRegion": "US"}}]},
+    "nsg_rules": [
+      {"name": "nsg-internal", "securityRules": [
+        {"name": "ssh-internal", "direction": "Inbound", "access": "Allow",
+         "sourceAddressPrefix": "10.0.0.0/8", "destinationPortRange": "22"}]}],
+    "defender_alerts": []
+  },
+  "gcp": {
+    "audit_log": [
+      {"protoPayload": {"methodName": "google.iam.admin.v1.GetServiceAccount",
+        "authenticationInfo": {"principalEmail": "ops@corp.test"}}}],
+    "iam_policy": {"bindings": [{"role": "roles/viewer", "members": ["user:alice@corp.test"]}]},
+    "firewall_rules": [
+      {"name": "fw-internal", "direction": "INGRESS", "sourceRanges": ["10.0.0.0/8"],
+       "allowed": [{"IPProtocol": "tcp", "ports": ["22"]}]}],
+    "sa_key_rows": []
+  }
+}

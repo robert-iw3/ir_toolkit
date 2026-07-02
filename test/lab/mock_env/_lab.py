@@ -30,6 +30,44 @@ def _scenario():
     return {}
 
 
+def _baseline():
+    """Benign baseline telemetry merged into every scenario (real-tenant noise)."""
+    path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "baseline.json")
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return json.load(fh)
+    except Exception:
+        return {}
+
+
+def _merge(base, scen):
+    """Merge scenario telemetry over the benign baseline: lists are concatenated (baseline
+    first, then attack), nested dict lists (e.g. {"value":[...]}) likewise, scalars override."""
+    out = dict(base)
+    for k, v in (scen or {}).items():
+        b = out.get(k)
+        if isinstance(v, list) and isinstance(b, list):
+            out[k] = b + v
+        elif isinstance(v, dict) and isinstance(b, dict):
+            merged = dict(b)
+            for kk, vv in v.items():
+                if isinstance(vv, list) and isinstance(merged.get(kk), list):
+                    merged[kk] = merged[kk] + vv
+                else:
+                    merged[kk] = vv
+            out[k] = merged
+        else:
+            out[k] = v
+    return out
+
+
+def _provider_data(prog):
+    """Baseline + scenario telemetry for the CLI's provider."""
+    scn = _scenario()
+    pkey = PROVIDER_KEY.get(prog, prog)
+    return _merge(_baseline().get(pkey, {}), scn.get(pkey, {}))
+
+
 def _emit(s):
     if not s.endswith("\n"):
         s += "\n"
@@ -40,6 +78,12 @@ def _is_text(line):
     return ("--output text" in line or "--output tsv" in line
             or "--format=value" in line or "--format 'value" in line
             or "--format='value" in line)
+
+
+def _arg(line, flag):
+    """Value token following a flag on the command line (e.g. --bucket NAME)."""
+    toks = line.split()
+    return toks[toks.index(flag) + 1] if flag in toks and toks.index(flag) + 1 < len(toks) else ""
 
 
 # ── AWS ─────────────────────────────────────────────────────────────────────────
@@ -81,15 +125,41 @@ def _aws(line, data, text):
             return "fl-lab001"
         return json.dumps({"FlowLogs": [{"LogGroupName": "ir-vpc-flow-logs", "FlowLogId": "fl-lab001"}]})
     if "logs filter-log-events" in line:
+        # S3 data-event log group (data-plane exfil) vs the VPC flow-log group.
+        if "ir-s3-dataevents" in line:
+            recs = data.get("s3_data_events", [])
+            return json.dumps({"events": [{"message": json.dumps(r)} for r in recs]})
         lines = data.get("flow_log_lines", [])
         return json.dumps({"events": [{"message": m} for m in lines]})
+    # Posture: public snapshots / AMIs / IMDSv1 instances.
+    if "describe-snapshots" in line and "restorable-by-user-ids" in line:
+        return json.dumps({"Snapshots": data.get("public_snapshots", [])})
+    if "describe-images" in line and "is-public" in line:
+        return json.dumps({"Images": data.get("public_amis", [])})
+    if "ec2 describe-instances" in line and "HttpTokens" in line:
+        return json.dumps(data.get("imds", []))
     if "ec2 describe-instances" in line:
         if text:
             return "i-lab0001" if "InstanceId" in line else ("vpc-lab01" if "VpcId" in line else "")
         return json.dumps({"Reservations": [{"Instances": [
             {"InstanceId": "i-lab0001", "VpcId": "vpc-lab01"}]}]})
     if "ec2 describe-security-groups" in line:
-        return "sg-lab01" if text else json.dumps({"SecurityGroups": []})
+        if "--query" in line:                    # containment lookups
+            return "sg-lab01" if text else json.dumps({"SecurityGroups": []})
+        return json.dumps({"SecurityGroups": data.get("security_groups", [])})   # posture sweep
+    # Posture: public S3 buckets (list + per-bucket public status).
+    if "s3api list-buckets" in line:
+        names = [b.get("name") for b in data.get("public_buckets", [])]
+        return "\t".join(n for n in names if n) if text else json.dumps(
+            {"Buckets": [{"Name": n} for n in names]})
+    if "s3api get-bucket-policy-status" in line:
+        b = _arg(line, "--bucket")
+        return "True" if any(x.get("name") == b and x.get("public")
+                             for x in data.get("public_buckets", [])) else "False"
+    if "s3api get-public-access-block" in line:
+        b = _arg(line, "--bucket")
+        return "False" if any(x.get("name") == b and x.get("public")
+                              for x in data.get("public_buckets", [])) else "True"
     return "" if text else "{}"
 
 
@@ -101,6 +171,8 @@ def _az(line, data, text):
         return json.dumps(data.get("activity_log", []) or [{"_": "preflight"}])
     if "monitor activity-log list" in line:
         return json.dumps(data.get("activity_log", []))
+    if "security alert list" in line:
+        return json.dumps(data.get("defender_alerts", []))
     if "network nsg list" in line:
         return json.dumps(data.get("nsg_rules", []))
     if "network watcher flow-log list" in line:
@@ -157,7 +229,7 @@ def main():
     if mlog:
         with open(mlog, "a", encoding="utf-8") as fh:
             fh.write(f"{prog} {line}\n")
-    data = _scenario().get(PROVIDER_KEY.get(prog, prog), {})
+    data = _provider_data(prog)          # benign baseline + scenario attack telemetry
     text = _is_text(line)
     handler = {"aws": _aws, "az": _az, "gcloud": _gcloud}.get(prog)
     _emit(handler(line, data, text) if handler else ("" if text else "{}"))

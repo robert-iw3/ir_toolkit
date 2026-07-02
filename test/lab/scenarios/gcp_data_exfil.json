@@ -1,0 +1,566 @@
+{
+  "name": "gcp-data-exfil",
+  "provider": "gcp",
+  "description": "Data-plane exfiltration: a human user performs bulk object reads (60 storage.objects.get) across sensitive buckets in the data-access audit stream - collection/exfil at the object level, not a control-plane change. Must be Likely-TP class (a service account doing the same would be Indeterminate).",
+  "collect": {
+    "target": "vm-data",
+    "c2_ips": "",
+    "c2_domains": ""
+  },
+  "gcp": {
+    "audit_log": [
+      {
+        "protoPayload": {
+          "methodName": "storage.objects.get",
+          "authenticationInfo": {
+            "principalEmail": "contractor@corp.test"
+          },
+          "resourceName": "projects/_/buckets/customer-pii/objects/f0"
+        }
+      },
+      {
+        "protoPayload": {
+          "methodName": "storage.objects.get",
+          "authenticationInfo": {
+            "principalEmail": "contractor@corp.test"
+          },
+          "resourceName": "projects/_/buckets/prod-secrets/objects/f1"
+        }
+      },
+      {
+        "protoPayload": {
+          "methodName": "storage.objects.get",
+          "authenticationInfo": {
+            "principalEmail": "contractor@corp.test"
+          },
+          "resourceName": "projects/_/buckets/customer-pii/objects/f2"
+        }
+      },
+      {
+        "protoPayload": {
+          "methodName": "storage.objects.get",
+          "authenticationInfo": {
+            "principalEmail": "contractor@corp.test"
+          },
+          "resourceName": "projects/_/buckets/prod-secrets/objects/f3"
+        }
+      },
+      {
+        "protoPayload": {
+          "methodName": "storage.objects.get",
+          "authenticationInfo": {
+            "principalEmail": "contractor@corp.test"
+          },
+          "resourceName": "projects/_/buckets/customer-pii/objects/f4"
+        }
+      },
+      {
+        "protoPayload": {
+          "methodName": "storage.objects.get",
+          "authenticationInfo": {
+            "principalEmail": "contractor@corp.test"
+          },
+          "resourceName": "projects/_/buckets/prod-secrets/objects/f5"
+        }
+      },
+      {
+        "protoPayload": {
+          "methodName": "storage.objects.get",
+          "authenticationInfo": {
+            "principalEmail": "contractor@corp.test"
+          },
+          "resourceName": "projects/_/buckets/customer-pii/objects/f6"
+        }
+      },
+      {
+        "protoPayload": {
+          "methodName": "storage.objects.get",
+          "authenticationInfo": {
+            "principalEmail": "contractor@corp.test"
+          },
+          "resourceName": "projects/_/buckets/prod-secrets/objects/f7"
+        }
+      },
+      {
+        "protoPayload": {
+          "methodName": "storage.objects.get",
+          "authenticationInfo": {
+            "principalEmail": "contractor@corp.test"
+          },
+          "resourceName": "projects/_/buckets/customer-pii/objects/f8"
+        }
+      },
+      {
+        "protoPayload": {
+          "methodName": "storage.objects.get",
+          "authenticationInfo": {
+            "principalEmail": "contractor@corp.test"
+          },
+          "resourceName": "projects/_/buckets/prod-secrets/objects/f9"
+        }
+      },
+      {
+        "protoPayload": {
+          "methodName": "storage.objects.get",
+          "authenticationInfo": {
+            "principalEmail": "contractor@corp.test"
+          },
+          "resourceName": "projects/_/buckets/customer-pii/objects/f10"
+        }
+      },
+      {
+        "protoPayload": {
+          "methodName": "storage.objects.get",
+          "authenticationInfo": {
+            "principalEmail": "contractor@corp.test"
+          },
+          "resourceName": "projects/_/buckets/prod-secrets/objects/f11"
+        }
+      },
+      {
+        "protoPayload": {
+          "methodName": "storage.objects.get",
+          "authenticationInfo": {
+            "principalEmail": "contractor@corp.test"
+          },
+          "resourceName": "projects/_/buckets/customer-pii/objects/f12"
+        }
+      },
+      {
+        "protoPayload": {
+          "methodName": "storage.objects.get",
+          "authenticationInfo": {
+            "principalEmail": "contractor@corp.test"
+          },
+          "resourceName": "projects/_/buckets/prod-secrets/objects/f13"
+        }
+      },
+      {
+        "protoPayload": {
+          "methodName": "storage.objects.get",
+          "authenticationInfo": {
+            "principalEmail": "contractor@corp.test"
+          },
+          "resourceName": "projects/_/buckets/customer-pii/objects/f14"
+        }
+      },
+      {
+        "protoPayload": {
+          "methodName": "storage.objects.get",
+          "authenticationInfo": {
+            "principalEmail": "contractor@corp.test"
+          },
+          "resourceName": "projects/_/buckets/prod-secrets/objects/f15"
+        }
+      },
+      {
+        "protoPayload": {
+          "methodName": "storage.objects.get",
+          "authenticationInfo": {
+            "principalEmail": "contractor@corp.test"
+          },
+          "resourceName": "projects/_/buckets/customer-pii/objects/f16"
+        }
+      },
+      {
+        "protoPayload": {
+          "methodName": "storage.objects.get",
+          "authenticationInfo": {
+            "principalEmail": "contractor@corp.test"
+          },
+          "resourceName": "projects/_/buckets/prod-secrets/objects/f17"
+        }
+      },
+      {
+        "protoPayload": {
+          "methodName": "storage.objects.get",
+          "authenticationInfo": {
+            "principalEmail": "contractor@corp.test"
+          },
+          "resourceName": "projects/_/buckets/customer-pii/objects/f18"
+        }
+      },
+      {
+        "protoPayload": {
+          "methodName": "storage.objects.get",
+          "authenticationInfo": {
+            "principalEmail": "contractor@corp.test"
+          },
+          "resourceName": "projects/_/buckets/prod-secrets/objects/f19"
+        }
+      },
+      {
+        "protoPayload": {
+          "methodName": "storage.objects.get",
+          "authenticationInfo": {
+            "principalEmail": "contractor@corp.test"
+          },
+          "resourceName": "projects/_/buckets/customer-pii/objects/f20"
+        }
+      },
+      {
+        "protoPayload": {
+          "methodName": "storage.objects.get",
+          "authenticationInfo": {
+            "principalEmail": "contractor@corp.test"
+          },
+          "resourceName": "projects/_/buckets/prod-secrets/objects/f21"
+        }
+      },
+      {
+        "protoPayload": {
+          "methodName": "storage.objects.get",
+          "authenticationInfo": {
+            "principalEmail": "contractor@corp.test"
+          },
+          "resourceName": "projects/_/buckets/customer-pii/objects/f22"
+        }
+      },
+      {
+        "protoPayload": {
+          "methodName": "storage.objects.get",
+          "authenticationInfo": {
+            "principalEmail": "contractor@corp.test"
+          },
+          "resourceName": "projects/_/buckets/prod-secrets/objects/f23"
+        }
+      },
+      {
+        "protoPayload": {
+          "methodName": "storage.objects.get",
+          "authenticationInfo": {
+            "principalEmail": "contractor@corp.test"
+          },
+          "resourceName": "projects/_/buckets/customer-pii/objects/f24"
+        }
+      },
+      {
+        "protoPayload": {
+          "methodName": "storage.objects.get",
+          "authenticationInfo": {
+            "principalEmail": "contractor@corp.test"
+          },
+          "resourceName": "projects/_/buckets/prod-secrets/objects/f25"
+        }
+      },
+      {
+        "protoPayload": {
+          "methodName": "storage.objects.get",
+          "authenticationInfo": {
+            "principalEmail": "contractor@corp.test"
+          },
+          "resourceName": "projects/_/buckets/customer-pii/objects/f26"
+        }
+      },
+      {
+        "protoPayload": {
+          "methodName": "storage.objects.get",
+          "authenticationInfo": {
+            "principalEmail": "contractor@corp.test"
+          },
+          "resourceName": "projects/_/buckets/prod-secrets/objects/f27"
+        }
+      },
+      {
+        "protoPayload": {
+          "methodName": "storage.objects.get",
+          "authenticationInfo": {
+            "principalEmail": "contractor@corp.test"
+          },
+          "resourceName": "projects/_/buckets/customer-pii/objects/f28"
+        }
+      },
+      {
+        "protoPayload": {
+          "methodName": "storage.objects.get",
+          "authenticationInfo": {
+            "principalEmail": "contractor@corp.test"
+          },
+          "resourceName": "projects/_/buckets/prod-secrets/objects/f29"
+        }
+      },
+      {
+        "protoPayload": {
+          "methodName": "storage.objects.get",
+          "authenticationInfo": {
+            "principalEmail": "contractor@corp.test"
+          },
+          "resourceName": "projects/_/buckets/customer-pii/objects/f30"
+        }
+      },
+      {
+        "protoPayload": {
+          "methodName": "storage.objects.get",
+          "authenticationInfo": {
+            "principalEmail": "contractor@corp.test"
+          },
+          "resourceName": "projects/_/buckets/prod-secrets/objects/f31"
+        }
+      },
+      {
+        "protoPayload": {
+          "methodName": "storage.objects.get",
+          "authenticationInfo": {
+            "principalEmail": "contractor@corp.test"
+          },
+          "resourceName": "projects/_/buckets/customer-pii/objects/f32"
+        }
+      },
+      {
+        "protoPayload": {
+          "methodName": "storage.objects.get",
+          "authenticationInfo": {
+            "principalEmail": "contractor@corp.test"
+          },
+          "resourceName": "projects/_/buckets/prod-secrets/objects/f33"
+        }
+      },
+      {
+        "protoPayload": {
+          "methodName": "storage.objects.get",
+          "authenticationInfo": {
+            "principalEmail": "contractor@corp.test"
+          },
+          "resourceName": "projects/_/buckets/customer-pii/objects/f34"
+        }
+      },
+      {
+        "protoPayload": {
+          "methodName": "storage.objects.get",
+          "authenticationInfo": {
+            "principalEmail": "contractor@corp.test"
+          },
+          "resourceName": "projects/_/buckets/prod-secrets/objects/f35"
+        }
+      },
+      {
+        "protoPayload": {
+          "methodName": "storage.objects.get",
+          "authenticationInfo": {
+            "principalEmail": "contractor@corp.test"
+          },
+          "resourceName": "projects/_/buckets/customer-pii/objects/f36"
+        }
+      },
+      {
+        "protoPayload": {
+          "methodName": "storage.objects.get",
+          "authenticationInfo": {
+            "principalEmail": "contractor@corp.test"
+          },
+          "resourceName": "projects/_/buckets/prod-secrets/objects/f37"
+        }
+      },
+      {
+        "protoPayload": {
+          "methodName": "storage.objects.get",
+          "authenticationInfo": {
+            "principalEmail": "contractor@corp.test"
+          },
+          "resourceName": "projects/_/buckets/customer-pii/objects/f38"
+        }
+      },
+      {
+        "protoPayload": {
+          "methodName": "storage.objects.get",
+          "authenticationInfo": {
+            "principalEmail": "contractor@corp.test"
+          },
+          "resourceName": "projects/_/buckets/prod-secrets/objects/f39"
+        }
+      },
+      {
+        "protoPayload": {
+          "methodName": "storage.objects.get",
+          "authenticationInfo": {
+            "principalEmail": "contractor@corp.test"
+          },
+          "resourceName": "projects/_/buckets/customer-pii/objects/f40"
+        }
+      },
+      {
+        "protoPayload": {
+          "methodName": "storage.objects.get",
+          "authenticationInfo": {
+            "principalEmail": "contractor@corp.test"
+          },
+          "resourceName": "projects/_/buckets/prod-secrets/objects/f41"
+        }
+      },
+      {
+        "protoPayload": {
+          "methodName": "storage.objects.get",
+          "authenticationInfo": {
+            "principalEmail": "contractor@corp.test"
+          },
+          "resourceName": "projects/_/buckets/customer-pii/objects/f42"
+        }
+      },
+      {
+        "protoPayload": {
+          "methodName": "storage.objects.get",
+          "authenticationInfo": {
+            "principalEmail": "contractor@corp.test"
+          },
+          "resourceName": "projects/_/buckets/prod-secrets/objects/f43"
+        }
+      },
+      {
+        "protoPayload": {
+          "methodName": "storage.objects.get",
+          "authenticationInfo": {
+            "principalEmail": "contractor@corp.test"
+          },
+          "resourceName": "projects/_/buckets/customer-pii/objects/f44"
+        }
+      },
+      {
+        "protoPayload": {
+          "methodName": "storage.objects.get",
+          "authenticationInfo": {
+            "principalEmail": "contractor@corp.test"
+          },
+          "resourceName": "projects/_/buckets/prod-secrets/objects/f45"
+        }
+      },
+      {
+        "protoPayload": {
+          "methodName": "storage.objects.get",
+          "authenticationInfo": {
+            "principalEmail": "contractor@corp.test"
+          },
+          "resourceName": "projects/_/buckets/customer-pii/objects/f46"
+        }
+      },
+      {
+        "protoPayload": {
+          "methodName": "storage.objects.get",
+          "authenticationInfo": {
+            "principalEmail": "contractor@corp.test"
+          },
+          "resourceName": "projects/_/buckets/prod-secrets/objects/f47"
+        }
+      },
+      {
+        "protoPayload": {
+          "methodName": "storage.objects.get",
+          "authenticationInfo": {
+            "principalEmail": "contractor@corp.test"
+          },
+          "resourceName": "projects/_/buckets/customer-pii/objects/f48"
+        }
+      },
+      {
+        "protoPayload": {
+          "methodName": "storage.objects.get",
+          "authenticationInfo": {
+            "principalEmail": "contractor@corp.test"
+          },
+          "resourceName": "projects/_/buckets/prod-secrets/objects/f49"
+        }
+      },
+      {
+        "protoPayload": {
+          "methodName": "storage.objects.get",
+          "authenticationInfo": {
+            "principalEmail": "contractor@corp.test"
+          },
+          "resourceName": "projects/_/buckets/customer-pii/objects/f50"
+        }
+      },
+      {
+        "protoPayload": {
+          "methodName": "storage.objects.get",
+          "authenticationInfo": {
+            "principalEmail": "contractor@corp.test"
+          },
+          "resourceName": "projects/_/buckets/prod-secrets/objects/f51"
+        }
+      },
+      {
+        "protoPayload": {
+          "methodName": "storage.objects.get",
+          "authenticationInfo": {
+            "principalEmail": "contractor@corp.test"
+          },
+          "resourceName": "projects/_/buckets/customer-pii/objects/f52"
+        }
+      },
+      {
+        "protoPayload": {
+          "methodName": "storage.objects.get",
+          "authenticationInfo": {
+            "principalEmail": "contractor@corp.test"
+          },
+          "resourceName": "projects/_/buckets/prod-secrets/objects/f53"
+        }
+      },
+      {
+        "protoPayload": {
+          "methodName": "storage.objects.get",
+          "authenticationInfo": {
+            "principalEmail": "contractor@corp.test"
+          },
+          "resourceName": "projects/_/buckets/customer-pii/objects/f54"
+        }
+      },
+      {
+        "protoPayload": {
+          "methodName": "storage.objects.get",
+          "authenticationInfo": {
+            "principalEmail": "contractor@corp.test"
+          },
+          "resourceName": "projects/_/buckets/prod-secrets/objects/f55"
+        }
+      },
+      {
+        "protoPayload": {
+          "methodName": "storage.objects.get",
+          "authenticationInfo": {
+            "principalEmail": "contractor@corp.test"
+          },
+          "resourceName": "projects/_/buckets/customer-pii/objects/f56"
+        }
+      },
+      {
+        "protoPayload": {
+          "methodName": "storage.objects.get",
+          "authenticationInfo": {
+            "principalEmail": "contractor@corp.test"
+          },
+          "resourceName": "projects/_/buckets/prod-secrets/objects/f57"
+        }
+      },
+      {
+        "protoPayload": {
+          "methodName": "storage.objects.get",
+          "authenticationInfo": {
+            "principalEmail": "contractor@corp.test"
+          },
+          "resourceName": "projects/_/buckets/customer-pii/objects/f58"
+        }
+      },
+      {
+        "protoPayload": {
+          "methodName": "storage.objects.get",
+          "authenticationInfo": {
+            "principalEmail": "contractor@corp.test"
+          },
+          "resourceName": "projects/_/buckets/prod-secrets/objects/f59"
+        }
+      }
+    ]
+  },
+  "expect": {
+    "types": [
+      "Cloud Data Exfiltration"
+    ],
+    "mitre_any": [
+      "T1530"
+    ],
+    "min_verdict": "Likely True Positive",
+    "tactics": [
+      "Collection"
+    ]
+  }
+}

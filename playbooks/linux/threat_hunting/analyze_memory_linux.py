@@ -128,11 +128,17 @@ PLUGINS = ("linux.pslist.PsList", "linux.pidhashtable.PIDHashTable",
            "linux.capabilities.Capabilities", "linux.mountinfo.MountInfo",
            "linux.library_list.LibraryList",
            # Toolkit custom plugins (resolved via -p PLUGIN_DIR) - structures no stock plugin exposes.
-           # Only validated, bounded-cost plugins run by default. io_uring/namespaces/kernel_timers/
-           # fops_hooks/got_plt analyzers stay wired (they no-op with no rows) but their plugins are
-           # not run by default - io_uring needs a perf rewrite, the others need validation.
+           # All validated on a real image + bounded-cost. io_uring was rewritten path-free (compares
+           # each fd's f_op to io_uring_fops, no dentry walk, 2:24). kernel_timers walks the per-cpu
+           # timer wheel (timer_bases + __per_cpu_offset[cpu]); fops_hooks checks the /proc root
+           # file/inode_operations handlers. Both distinguish a real (even injected) handler from
+           # smear via layer.is_valid (address actually mapped), then flag mapped handlers that
+           # resolve to no module - ~3:00, 0 FP on a clean host. got_plt analyzer stays wired
+           # (no-op with no rows) but its plugin is pending.
            "linux_ir.kernel_globals.KernelGlobals", "linux_ir.text_hooks.TextHooks",
-           "linux_ir.task_creds.TaskCreds")
+           "linux_ir.task_creds.TaskCreds", "linux_ir.namespaces.Namespaces",
+           "linux_ir.io_uring.IoUring", "linux_ir.kernel_timers.KernelTimers",
+           "linux_ir.fops_hooks.FopsHooks")
 
 # Heavy per-VMA / per-thread plugins (big output, slow on large images) - opt-in with --deep.
 OPTIONAL_PLUGINS = ("linux.proc.Maps", "linux.pscallstack.PsCallStack")
@@ -1134,12 +1140,33 @@ def _vol_exe(explicit=None):
 PLUGIN_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vol_plugins")
 
 
+def _gentle_prefix():
+    """Scheduling prefix that keeps analysis from taxing the host: lower CPU priority (`nice`) and
+    the idle IO class (`ionice -c3`, only gets disk when nothing else wants it). Memory analysis is
+    not latency-sensitive, so trading a little speed for staying out of the system's way is the right
+    default on a live/production or analyst box. Distro-agnostic (skips whatever isn't present) and
+    disabled with IR_MEM_NO_NICE=1. Computed once."""
+    if os.environ.get("IR_MEM_NO_NICE", "").strip() in ("1", "true", "yes"):
+        return []
+    prefix = []
+    nice = shutil.which("nice")
+    if nice:
+        prefix += [nice, "-n", os.environ.get("IR_MEM_NICE", "10")]
+    ionice = shutil.which("ionice")
+    if ionice:
+        prefix += [ionice, "-c3"]          # idle IO class - yields disk to everything else
+    return prefix
+
+
+_GENTLE_PREFIX = _gentle_prefix()
+
+
 def run_plugin(vol, image, plugin, symbols=None, extra=None, timeout=900, progress=False):
     # `-q` suppresses Volatility's progress feedback - keep it for the fast plugins, but DROP it for
     # the long YARA scan so vol's native progress streams (plus a heartbeat) instead of looking hung.
-    cmd = [vol, "-r", "json", "-f", image]
+    cmd = list(_GENTLE_PREFIX) + [vol, "-r", "json", "-f", image]
     if not progress:
-        cmd.insert(1, "-q")
+        cmd.insert(len(_GENTLE_PREFIX) + 1, "-q")   # right after the vol binary, past any nice/ionice
     if os.path.isdir(PLUGIN_DIR):
         cmd += ["-p", PLUGIN_DIR]
     if symbols:

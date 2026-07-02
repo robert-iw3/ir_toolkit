@@ -15,7 +15,8 @@ flowchart TD
     B0(["PROVIDER APIs - aws / az / gcloud (online)"]):::phase
     B0 --> B1["Invoke-IRCollection-Cloud.sh
     --provider aws|azure|gcp --target T
-    [--lookback-hours N | --window-start/--window-end] [--all-regions]"]:::tool
+    [--lookback-hours N | --window-start/--window-end]
+    [--all-regions | --all-projects | --all-subscriptions]"]:::tool
     B1 --> B2{"--contain?"}:::decision
     B2 -->|yes| B3["① Containment: isolate instance / SG"]:::step
     B2 -->|no| B4
@@ -25,7 +26,8 @@ flowchart TD
     Azure Activity/NSG/sign-in + Entra/M365 identity"]:::step
     B4 --> B5["③ adjudicate_cloud.py: normalize → verdict ladder
     detectors (GuardDuty/SCC) + control-plane behaviour
-    (IAM privesc · defense evasion · exposure) ·
+    (IAM privesc · defense evasion · exposure) · data-plane
+    exfil (S3/GCS bulk read · copy · M365 export) ·
     OAuth/inbox/directory · logging gaps · operator C2"]:::step
     B5 --> B6[/"Combined_Findings · IOCs.json
     Incident_Report · Attack_Graph"/]:::artifact
@@ -62,9 +64,14 @@ rather than a fixed couple of hours. Default look-back is **7 days** (`168h`); p
 `--window-start/--window-end` (ISO-8601). The window bounds every time-scoped pull (CloudTrail,
 Activity log, Cloud Audit logs, flow logs, GuardDuty/SCC).
 
-**Multi-region (AWS):** attackers pivot to regions nobody watches. `--all-regions` sweeps every
-enabled region for GuardDuty + CloudTrail (merged into single artifacts); the default is the single
-`--region`.
+**Multi-scope sweep:** attackers pivot to the region/project/subscription nobody watches. Each
+provider has a flag to widen collection beyond the single target scope, merging results into single
+artifacts:
+- **AWS** `--all-regions` - every enabled region for GuardDuty + CloudTrail.
+- **GCP** `--all-projects` - every accessible project for Cloud Audit logs + SCC (`gcloud projects list`).
+- **Azure** `--all-subscriptions` - every accessible subscription for the Activity log + Defender alerts (`az account list`).
+
+The default is the single `--region` / `--project` / `--subscription`.
 
 ### Pre-flight: is the logging even on?
 
@@ -78,9 +85,9 @@ can possibly see and flags a source an adversary may have switched off to evade 
 
 | Provider | Collected |
 |---|---|
-| **AWS** | GuardDuty findings, **full CloudTrail management events** (paginated over the window, no event-name filter, optionally all regions), **IAM credential report + Access Analyzer**, EC2 instance + security groups, **VPC Flow Logs**, logging-enablement status |
-| **Azure** | Activity log, **Entra sign-in logs**, NSG rules + **NSG flow-log config**, Entra risky users, **OAuth consent grants**, **Entra directory audit**, **mailbox inbox forwarding rules**, logging-enablement status |
-| **GCP** | Cloud Audit logs (admin + data-access + system-event), Security Command Center findings, **project IAM policy + user-managed SA-key inventory**, firewall rules, **VPC Flow Logs**, logging-enablement status |
+| **AWS** | GuardDuty findings, **full CloudTrail management events** (paginated over the window, no event-name filter, optionally all regions), **S3 data events** (object-level, from the trail's CloudWatch data-event sink - set `IR_S3_DATAEVENT_LOG_GROUP`), **IAM credential report + Access Analyzer**, EC2 instance + security groups, **public-bucket exposure sweep**, **VPC Flow Logs**, logging-enablement status |
+| **Azure** | Activity log, **Entra sign-in logs**, NSG rules + **NSG flow-log config**, Entra risky users, **OAuth consent grants**, **Entra directory audit**, **mailbox inbox forwarding rules**, **M365 unified audit** (download/export events, best-effort), logging-enablement status |
+| **GCP** | Cloud Audit logs (admin + **data-access** + system-event), Security Command Center findings, **project IAM policy + user-managed SA-key inventory**, firewall rules, **VPC Flow Logs**, logging-enablement status |
 
 ### Control-plane behavioral analysis
 
@@ -103,6 +110,24 @@ blank (gaps to go back and check).
 collected flow logs for each C2 IP. A match upgrades the indicator from *asserted* to
 *observed on the wire* - a `Cloud Network Flow to C2` finding (True Positive, T1071). Format-agnostic
 across all three providers (an IP is the same string in any flow schema).
+
+### Data-plane / SaaS exfil analysis
+
+Control-plane analysis answers *who changed what*; data-plane analysis (`cloud_dataplane.py`) answers
+*who read how much* - the Collection/Exfiltration end of the kill chain. It works over **data events**
+(object-level access), not management events, and emits the `Cloud Data Exfiltration` finding type.
+
+| Source | Detections | ATT&CK |
+|---|---|---|
+| **AWS S3 data events** (`normalize_s3_data_events`) | bulk `GetObject` per principal (tiered by volume + bucket spread), cross-account/`CopyObject` transfer to another bucket | T1530, T1537 |
+| **GCP data-access** (`normalize_gcp_data_access`) | bulk `storage.objects.get`/`list` per principal (reads the same data-access audit stream) | T1530 |
+| **M365 unified audit** (`normalize_m365_audit`) | mass SharePoint/OneDrive `FileDownloaded`, mailbox / compliance export request | T1213, T1567, T1114.002 |
+
+**FP discipline (downgrade, never blind):** bulk reads by an *automation* identity (service account /
+assumed role) are routine (ETL/backup/analytics), so on their own they are **Indeterminate** (verify).
+The same volume by a *human* principal, any **cross-account object copy**, and any **mailbox export**
+are **Likely True Positive**. Below-threshold reads simply do not fire - nothing is suppressed. These
+findings light up the **Collection** and **Exfiltration** tactics on the coverage grid.
 
 ### Disk-snapshot acquisition (opt-in: `--snapshot-disks`)
 
@@ -161,7 +186,7 @@ an analyst follow-up. These normalizers are pure functions covered by pytest
 - Known-bad C2 supplied via `--c2-ips/--c2-domains` (or read from `IOCs.json`) stays blocked by
   `04_block_c2.sh` across restoration.
 - Adjudicator: `playbooks/cloud/adjudicate_cloud.py` (CLI) over the analyzer modules
-  `cloud_findings/detectors/controlplane/identity/coverage.py`; collection is the
+  `cloud_findings/detectors/controlplane/dataplane/identity/iam/posture/coverage.py`; collection is the
   `00_collect_forensics.sh` dispatcher over `collect/{lib,aws,azure,gcp}.sh`.
 
 ### Identity-first containment + session revocation
@@ -177,6 +202,21 @@ overturned verdict:
 | **AWS** | attach `AWSDenyAll` + put an `IRRevokeOlderSessions` inline policy (denies any token issued before now) on the user/role |
 | **Azure** | disable the user / service principal + Graph `revokeSignInSessions` |
 | **GCP** | disable the service account (invalidates its tokens) |
+
+**Persistence eradication breadth** (`03`, resource targets via `IR_MALICIOUS_PATHS` prefixed tokens):
+
+| Provider | Removable persistence |
+|---|---|
+| **AWS** | `function:<name>` (Lambda) · `rule:<name>` (EventBridge) - deleted after backup; IAM keys/roles |
+| **Azure** | `app:<appId>` (SP disabled) · `logicapp:<id>` (disabled) · `runbook:<acct>/<name>` (deleted after export) |
+| **GCP** | `function:<name>` (Cloud Function) · `scheduler:<name>` (Cloud Scheduler) - deleted after backup; `binding:<member>=<role>` removed; SA keys |
+
+Reversible actions are journaled and undone by `05_restore_host.sh` on an overturned verdict;
+irreversible deletes are backed up first and flagged for manual recreate.
+
+**DNS-based C2 blocking** (`04`, when `--c2-domains` supplied): AWS Route 53 Resolver DNS Firewall
+(block list + rule group, VPC-associated) · GCP Cloud DNS response policy (sinkhole) · Azure Private
+DNS zone per domain (`A → 0.0.0.0`). Creation is dry-run-first (`IR_DRY_RUN`).
 
 ### Identity posture + blast radius
 
@@ -194,6 +234,18 @@ compromised principal could reach:
 implicated principal (from `Principals.json`), the GCP roles it holds (privileged flagged), the
 CloudTrail actions it was observed making, and the adjudicated findings attributable to it - answering
 "what could they touch" and prioritising which principal to contain first.
+
+### Posture / exposure snapshot
+
+`cloud_posture.py` reads the point-in-time attack surface that explains how the breach was reachable -
+mostly from telemetry already collected:
+
+| Source | Detections | ATT&CK |
+|---|---|---|
+| **AWS security groups** (`normalize_security_groups`) | ingress from `0.0.0.0/0` (admin port SSH/RDP → Likely TP) | T1562.007 |
+| **Azure NSGs** (`normalize_nsg_rules`) | inbound Allow from Internet | T1562.007 |
+| **GCP firewall** (`normalize_gcp_firewall`) | `0.0.0.0/0` ingress allow | T1562.007 |
+| **Public buckets** (`normalize_public_buckets`) | S3 bucket reachable by anyone (sweep) | T1530 |
 
 ### Findings feed the same reports as the host workflows
 

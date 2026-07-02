@@ -75,10 +75,11 @@ eradicate_aws() {
 eradicate_azure() {
     local rg="${IR_AZURE_RESOURCE_GROUP:-}"
 
-    # Find VM by IP
+    # Find VM by IP. -d/--show-details is REQUIRED to populate publicIps/privateIps, and those
+    # fields are comma-joined strings of all the VM's IPs, so match with contains(), not ==.
     local vm_name
-    vm_name=$(az vm list --resource-group "${rg}" \
-        --query "[?publicIps=='${TARGET}' || privateIps=='${TARGET}'].name | [0]" \
+    vm_name=$(az vm list -d --resource-group "${rg}" \
+        --query "[?contains(to_string(publicIps), '${TARGET}') || contains(to_string(privateIps), '${TARGET}')].name | [0]" \
         --output tsv 2>/dev/null)
 
     [[ -z "${vm_name}" ]] && { log "No Azure VM found for ${TARGET}"; emit "skipped" "vm_not_found"; return 0; }

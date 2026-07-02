@@ -30,7 +30,7 @@ MGMT_IPS="10.0.0.0/8"; REGION="us-east-1"; CONTAIN=0; SKIP_REPORTS=0; SNAPSHOT_D
 EVIDENCE_BUCKET=""; PROVISION_EVIDENCE=0; EVIDENCE_RETENTION_DAYS=365; EVIDENCE_CONTAINER="ir-evidence"
 LLM_REVIEW=0
 LOOKBACK_HOURS=168; WINDOW_START=""; WINDOW_END=""    # default look-back: 7 days
-ALL_REGIONS=0
+ALL_REGIONS=0; ALL_PROJECTS=0; ALL_SUBSCRIPTIONS=0
 OUTPUT_ROOT="${SCRIPT_DIR}"
 
 while [[ $# -gt 0 ]]; do
@@ -46,6 +46,8 @@ while [[ $# -gt 0 ]]; do
         --window-start) WINDOW_START="$2"; shift 2 ;;                 # explicit ISO-8601 window start (overrides lookback)
         --window-end)   WINDOW_END="$2"; shift 2 ;;                   # explicit ISO-8601 window end (default: now)
         --all-regions)  ALL_REGIONS=1; shift ;;                       # AWS: sweep every enabled region, not just --region
+        --all-projects) ALL_PROJECTS=1; shift ;;                      # GCP: sweep every accessible project, not just --project
+        --all-subscriptions) ALL_SUBSCRIPTIONS=1; shift ;;           # Azure: sweep every accessible subscription
         --contain)      CONTAIN=1; shift ;;
         --snapshot-disks) SNAPSHOT_DISKS=1; shift ;;               # acquire disk snapshots before eradication (billable)
         --evidence-bucket) EVIDENCE_BUCKET="$2"; shift 2 ;;        # upload collection to this S3/GCS bucket or Azure storage account
@@ -81,7 +83,7 @@ export IR_AWS_REGION="$REGION" IR_AZURE_SUBSCRIPTION="${IR_AZURE_SUBSCRIPTION:-}
 export IR_AZURE_RESOURCE_GROUP="${IR_AZURE_RESOURCE_GROUP:-}" IR_GCP_PROJECT="${IR_GCP_PROJECT:-}"
 export IR_SNAPSHOT_DISKS="$SNAPSHOT_DISKS"
 export IR_LOOKBACK_HOURS="$LOOKBACK_HOURS" IR_WINDOW_START="$WINDOW_START" IR_WINDOW_END="$WINDOW_END"
-export IR_ALL_REGIONS="$ALL_REGIONS"
+export IR_ALL_REGIONS="$ALL_REGIONS" IR_ALL_PROJECTS="$ALL_PROJECTS" IR_ALL_SUBSCRIPTIONS="$ALL_SUBSCRIPTIONS"
 
 run_phase() {  # name, command...
     local name="$1"; shift

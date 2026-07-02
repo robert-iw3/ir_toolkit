@@ -7,8 +7,12 @@ case "$*" in
         echo '{"value":[{"userPrincipalName":"victim@corp.test","riskLevel":"high"}]}' ;;
     *signIns*)
         echo '{"value":[{"userPrincipalName":"victim@corp.test","ipAddress":"203.0.113.9","clientAppUsed":"IMAP4","status":{"errorCode":0},"location":{"countryOrRegion":"RU"}}]}' ;;
+    *"security alert list"*)
+        echo '[{"alertDisplayName":"Suspicious process executed","severity":"High","status":"Active","description":"anomalous process on the VM","compromisedEntity":"vm-target"}]' ;;
     *"vm show"*)         echo "/subscriptions/s/resourceGroups/rg/providers/Microsoft.Compute/disks/osdisk-1" ;;
     *"snapshot create"*) echo "/subscriptions/s/resourceGroups/rg/providers/Microsoft.Compute/snapshots/irsnap-1" ;;
+    # vm list -d --query "...contains(publicIps,TARGET)..." --output tsv -> the matched VM name.
+    *"vm list"*)         echo "vm-target" ;;
     *list*|*show*|*"network nsg"*) echo "[]" ;;
     *) echo "{}" ;;
 esac

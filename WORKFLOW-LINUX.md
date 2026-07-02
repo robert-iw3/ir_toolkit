@@ -277,6 +277,35 @@ python3 playbooks/linux/threat_hunting/analyze_memory_linux.py --offline-dir vol
 | YARA (`--yara`) | rule hits in memory (Linux-applicable rules only - PE/dotnet/macho + Windows-API rules dropped by content, ~9,600→~400; ELF canary proves the engine read memory). **`--yara-engine native`** (default) = yara-python over the whole image, fast + full physical coverage, no per-PID; **`--yara-engine vol`** = per-process worker driving Volatility as a library (init once, loop in-process) for **per-PID attribution + per-process timeout + rolling resumable JSONL** | T1055 / T1027 |
 | **Correlation** | `Correlated Memory Threat` - emitted when a strong signal (injection / hidden-proc / LOTL / YARA hit) and another signal **converge on one PID** → high-confidence compromise | T1055 / T1059 |
 
+#### Custom kernel-structure plugins (`linux_ir.*`)
+
+Advanced kernel TTPs that no stock Volatility plugin exposes are read by toolkit-shipped plugins in
+`vol_plugins/linux_ir/` (resolved with `-p`). Each is **anomaly-only** (emits nothing on a clean
+host), validated end-to-end on a real 24 GB image, and degrades to empty (never crashes) on a kernel
+layout it doesn't recognize.
+
+| Plugin | Finding | ATT&CK |
+|---|---|---|
+| `linux_ir.kernel_globals` | usermodehelper hijack read from the image - `modprobe_path` / `core_pattern` (piped) / `uevent_helper` / `poweroff_cmd` pointing at a non-standard/writable handler (kernel runs it as root) | T1547.006 / T1543 |
+| `linux_ir.text_hooks` | kernel `.text` function prologue overwritten with a trampoline (inline hook installed **without** ftrace - invisible to `CheckFtrace`) | T1014 / T1562.001 |
+| `linux_ir.task_creds` | a task whose `cred != real_cred` (credentials overwritten post-fork) - residue of a kernel privesc such as a magic-signal "become root" (Diamorphine) | T1068 / T1014 |
+| `linux_ir.namespaces` | a task containerized in some namespaces but sharing the **host** namespace in others - container escape / host reach; bind-mount over a system path | T1611 |
+| `linux_ir.io_uring` | a task holding `io_uring` rings (I/O performed without the syscalls EDR/eBPF watch) - High when run from a writable dir / deleted binary, Info for legit users. Path-free `f_op` compare (no dentry walk) | T1106 / T1562 |
+| `linux_ir.kernel_timers` | armed per-CPU timer-wheel callback (`timer_bases + __per_cpu_offset[cpu]`) that resolves to no module - unbacked/injected periodic code with no owning process | T1053 / T1014 |
+| `linux_ir.fops_hooks` | a `/proc` root `file_operations`/`inode_operations` handler (e.g. `iterate_shared` = readdir) redirected to unbacked code - PID/file hiding | T1014 |
+
+**Smear discrimination:** the timer and fops plugins distinguish a real (even injected) handler from
+a stale/garbage memory read using `layer.is_valid` (is the address actually mapped) rather than a
+hardcoded address range - injected code must be mapped to run (kept), a freed-slot garbage value is
+unmapped (dropped). This avoids a whole class of false positives on captured images.
+
+**Resource discipline (stability > raw speed):** memory analysis is not latency-sensitive, so the
+engine runs plugins **sequentially** (one `vol` at a time - never a parallel fan-out that multiplies
+RAM/CPU on a large image) and each `vol` invocation runs under `nice -n 10 ionice -c3` (idle IO
+class - takes disk only when nothing else wants it). Distro-agnostic, tunable (`IR_MEM_NICE`),
+disable-able (`IR_MEM_NO_NICE=1`). Walks stay bounded regardless; this is scheduling politeness on
+top of already-capped worst-case cost.
+
 Output `Memory_Findings_<stamp>.json` (common schema, **priority-ordered** - correlated threats
 first) → add to `Combined_Findings` and re-run `adjudicate.py` to fold into the verdict ladder.
 YARA perf knobs: `--yara-engine native|vol`, `--yara-broad` (add generic rules), `--yara-timeout`

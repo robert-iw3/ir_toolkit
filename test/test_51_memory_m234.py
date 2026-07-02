@@ -106,9 +106,13 @@ def test_dispatch_wires_new_analyzers():
     findings = am.analyze({
         "linux_ir.io_uring.IoUring": [{"PID": 1, "Comm": "x", "Path": "/tmp/x", "Rings": 1}],
         "linux_ir.task_creds.TaskCreds": [{"PID": 2, "CredMatchesReal": False, "UID": 1000, "EUID": 0}],
+        "linux_ir.kernel_timers.KernelTimers": [{"Symbol": "-", "Module": "-", "Address": "0xffffc0009000"}],
+        "linux_ir.fops_hooks.FopsHooks": [{"Object": "proc_root_operations", "Op": "iterate_shared", "Module": "-"}],
         "linux.ebpf.EBPF": [{"Type": "xdp", "Name": "m"}],
         "linux.malware.netfilter.Netfilter": [{"Is Hooked": "True"}]})
     types = {f["Type"] for f in findings}
     assert "io_uring Anti-EDR I/O (memory)" in types
     assert "Credential Override (memory)" in types
+    assert "Kernel Timer Hook (memory)" in types
+    assert "VFS fops Hook (memory)" in types
     assert "eBPF Network C2 Correlated (memory)" in types

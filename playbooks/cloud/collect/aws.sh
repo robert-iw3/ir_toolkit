@@ -34,7 +34,7 @@ _aws_collect_guardduty() {  # regions...
                     --region "${r}" \
                     --detector-id "${detector_id}" \
                     --finding-criteria "{\"Criterion\":{\"updatedAt\":{\"GreaterThanOrEqual\":$(date -d "${WINDOW_START}" +%s 2>/dev/null || echo 0000000000)}}}" \
-                    --query 'FindingIds' --output text 2>/dev/null | head -c 500) \
+                    --query 'FindingIds' --output text 2>/dev/null | tr '\t' '\n' | head -n 50) \
                 >> "${ARTIFACT_DIR}/_gd_pages.jsonl" 2>/dev/null || true
             echo >> "${ARTIFACT_DIR}/_gd_pages.jsonl"
         fi
@@ -79,6 +79,21 @@ _aws_collect_cloudtrail() {  # regions...
         || cp -f "${ARTIFACT_DIR}/_ct_page.json" "${ARTIFACT_DIR}/cloudtrail_events.json" 2>/dev/null || true
     rm -f "${ARTIFACT_DIR}/_ct_pages.jsonl" "${ARTIFACT_DIR}/_ct_page.json" 2>/dev/null || true
     log "CloudTrail events (${ct_page} page(s)) → ${ARTIFACT_DIR}/cloudtrail_events.json"
+}
+
+# S3 data events (object-level GetObject/CopyObject) for data-plane exfil detection.
+# CloudTrail lookup-events returns only MANAGEMENT events, so data events must come from the
+# trail's data-event sink: a CloudWatch Logs group (set IR_S3_DATAEVENT_LOG_GROUP). Best-effort -
+# absent config leaves an empty file and the analyzer simply finds nothing (no FP).
+_aws_collect_s3_data_events() {  # region
+    local region="$1" grp="${IR_S3_DATAEVENT_LOG_GROUP:-}"
+    : > "${ARTIFACT_DIR}/aws_s3_data_events.json"
+    [[ -z "${grp}" ]] && { log "S3 data-event log group not set (IR_S3_DATAEVENT_LOG_GROUP) - skipping data-plane pull"; return 0; }
+    log "Pulling S3 data events from ${grp}..."
+    aws logs filter-log-events --region "${region}" --log-group-name "${grp}" \
+        --start-time "$(( $(date -d "${WINDOW_START}" +%s 2>/dev/null || echo 0) * 1000 ))" \
+        --output json > "${ARTIFACT_DIR}/aws_s3_data_events.json" 2>/dev/null || true
+    log "S3 data events → ${ARTIFACT_DIR}/aws_s3_data_events.json"
 }
 
 # EBS disk snapshots before any eradication (opt-in; creates billable snapshots).
@@ -148,6 +163,8 @@ collect_aws() {
 
     [[ "${IR_SNAPSHOT_DISKS:-0}" == "1" && -n "${TARGET}" ]] && _aws_snapshot_disks "${region}"
 
+    _aws_collect_s3_data_events "${region}"
+
     # IAM identity posture - credential report (key age / MFA / console / root key) and
     # Access Analyzer external-access findings. Adjudicated by cloud_iam.py.
     log "Collecting IAM credential report..."
@@ -188,6 +205,26 @@ collect_aws() {
         done
         echo ']}'
     } > "${ARTIFACT_DIR}/aws_public_buckets.json" 2>/dev/null || true
+
+    # Public disk-image exposure: EBS snapshots restorable by any account, and public AMIs.
+    log "Checking for public snapshots / AMIs..."
+    aws ec2 describe-snapshots --region "${region}" --owner-ids self \
+        --restorable-by-user-ids all --output json \
+        > "${ARTIFACT_DIR}/aws_public_snapshots.json" 2>/dev/null || true
+    aws ec2 describe-images --region "${region}" --owners self \
+        --filters "Name=is-public,Values=true" --output json \
+        > "${ARTIFACT_DIR}/aws_public_amis.json" 2>/dev/null || true
+
+    # IMDSv1 exposure: instances that accept metadata requests without a token (SSRF cred theft).
+    log "Checking instance metadata (IMDSv1) posture..."
+    aws ec2 describe-instances --region "${region}" \
+        --query 'Reservations[].Instances[].{InstanceId:InstanceId,HttpTokens:MetadataOptions.HttpTokens}' \
+        --output json 2>/dev/null | "${PY:-python3}" -c \
+        'import json,sys
+try: rows=json.load(sys.stdin)
+except Exception: rows=[]
+json.dump({"instances": rows if isinstance(rows,list) else []}, open(sys.argv[1],"w"))' \
+        "${ARTIFACT_DIR}/aws_imds.json" 2>/dev/null || true
 
     # VPC Flow Logs for the incident window - network egress evidence / C2 confirmation.
     log "Pulling VPC flow logs..."

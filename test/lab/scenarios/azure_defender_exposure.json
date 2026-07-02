@@ -1,0 +1,21 @@
+{
+  "name": "azure-defender-exposure",
+  "provider": "azure",
+  "description": "Microsoft Defender for Cloud raises a high-severity alert on the VM (the Azure provider-native detector), and an NSG rule is opened to the internet inbound on RDP.",
+  "collect": {"target": "vm-web", "c2_ips": "", "c2_domains": ""},
+  "azure": {
+    "defender_alerts": [
+      {"alertDisplayName": "Suspicious process executed", "severity": "High", "status": "Active",
+       "description": "anomalous process on the VM", "compromisedEntity": "vm-web"}],
+    "nsg_rules": [
+      {"name": "nsg1", "securityRules": [
+        {"name": "rdp-open", "direction": "Inbound", "access": "Allow",
+         "sourceAddressPrefix": "Internet", "destinationPortRange": "3389"}]}]
+  },
+  "expect": {
+    "types": ["Cloud Detection", "Cloud Exposure"],
+    "mitre_any": ["T1078", "T1562.007"],
+    "min_verdict": "Likely True Positive",
+    "tactics": ["Defense Evasion", "Initial Access"]
+  }
+}

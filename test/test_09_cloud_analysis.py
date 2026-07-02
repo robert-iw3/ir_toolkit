@@ -176,3 +176,34 @@ def test_cloud_collection_adjudicates_real_telemetry(tmp_path):
     # the GuardDuty SSH-brute-force detection (severity 8) was adjudicated TP-class
     assert any(f["Verdict"] in TP_CLASS and "GuardDuty" in f["Details"] for f in combined)
     assert list(host.glob("Adjudication_*.json")), "no adjudication artifact emitted"
+
+
+# ── Microsoft Defender for Cloud alerts (Azure provider-native detector) ────────
+def test_defender_alert_high_active_is_tp():
+    out = ac.normalize_defender_alerts([
+        {"alertDisplayName": "Suspicious process", "severity": "High", "status": "Active",
+         "description": "x", "compromisedEntity": "vm-x"}])
+    assert out and out[0]["Verdict"] in TP_CLASS and out[0]["Type"] == "Cloud Detection"
+    assert "Defender" in out[0]["Details"]
+
+
+def test_defender_alert_low_is_indeterminate():
+    out = ac.normalize_defender_alerts([
+        {"alertDisplayName": "Info", "severity": "Low", "status": "Active"}])
+    assert out and out[0]["Verdict"] == "Indeterminate"
+
+
+def test_defender_alert_dismissed_ignored():
+    out = ac.normalize_defender_alerts([
+        {"alertDisplayName": "x", "severity": "High", "status": "Dismissed"}])
+    assert out == []
+
+
+def test_defender_alerts_wired_into_azure_adjudicate(tmp_path):
+    fz = tmp_path / "fz"
+    fz.mkdir()
+    (fz / "azure_risky_users.json").write_text(json.dumps({"value": []}))
+    (fz / "azure_defender_alerts.json").write_text(json.dumps([
+        {"alertDisplayName": "Suspicious process", "severity": "High", "status": "Active"}]))
+    findings = ac.adjudicate(str(fz), "azure", "", "")
+    assert any(f["Type"] == "Cloud Detection" and "Defender" in f["Details"] for f in findings)

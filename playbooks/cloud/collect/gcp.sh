@@ -35,34 +35,58 @@ _gcp_snapshot_disks() {  # project
     log "GCP disk snapshots → ${ARTIFACT_DIR}/gcp_disk_snapshots.json"
 }
 
+# Merge a per-project JSON array (gcloud --format=json) into a combined jsonl-of-arrays that
+# merge_pages folds into one {"entries":[...]} file the analyzer reads.
+_gcp_append_array() {  # src_json  jsonl_out  key
+    [[ -s "$1" ]] || return 0
+    PY_SRC="$1" PY_KEY="$3" "${PY:-python3}" -c \
+        'import json,os
+try: arr=json.load(open(os.environ["PY_SRC"]))
+except Exception: arr=[]
+print(json.dumps({os.environ["PY_KEY"]: arr if isinstance(arr,list) else []}))' \
+        >> "$2" 2>/dev/null || true
+}
+
 collect_gcp() {
     local project="${IR_GCP_PROJECT:-}"
-    log "GCP project=${project} target=${TARGET}"
+    # Attackers pivot to projects nobody watches. --all-projects (IR_ALL_PROJECTS=1) sweeps every
+    # accessible project for audit logs + SCC; default is the single target project.
+    local projects="${project}"
+    if [[ "${IR_ALL_PROJECTS:-0}" == "1" ]]; then
+        projects=$(gcloud projects list --format='value(projectId)' 2>/dev/null)
+        [[ -z "${projects}" ]] && projects="${project}"
+    fi
+    log "GCP project(s)=${projects} target=${TARGET}"
     [[ -z "${project}" ]] && { log "WARN: IR_GCP_PROJECT not set"; }
 
     # Cloud Audit Logs - admin-activity, data-access, AND system-event streams (all under
     # cloudaudit). data_access carries SA-key use and object reads; --limit raised so a
-    # multi-day window is not truncated. Analyzed by normalize_gcp_audit.
+    # multi-day window is not truncated. Analyzed by normalize_gcp_audit + normalize_gcp_data_access.
     log "Pulling Cloud Audit Logs (admin + data-access + system-event)..."
-    gcloud logging read \
-        "timestamp>=\"${WINDOW_START}\" AND timestamp<=\"${WINDOW_END}\" AND logName:\"cloudaudit.googleapis.com\"" \
-        --project="${project}" \
-        --format=json \
-        --limit=5000 \
-        > "${ARTIFACT_DIR}/gcp_audit_log.json" 2>/dev/null || \
-    gcloud logging read \
-        "timestamp>=\"${WINDOW_START}\" AND timestamp<=\"${WINDOW_END}\" AND logName:\"cloudaudit\"" \
-        --project="${project}" \
-        --format=json \
-        > "${ARTIFACT_DIR}/gcp_audit_log.json" 2>/dev/null || true
-    log "Audit logs → ${ARTIFACT_DIR}/gcp_audit_log.json"
+    : > "${ARTIFACT_DIR}/_gcp_audit_pages.jsonl"; : > "${ARTIFACT_DIR}/_gcp_scc_pages.jsonl"
+    local p
+    for p in ${projects}; do
+        [[ -z "${p}" ]] && continue
+        gcloud logging read \
+            "timestamp>=\"${WINDOW_START}\" AND timestamp<=\"${WINDOW_END}\" AND logName:\"cloudaudit.googleapis.com\"" \
+            --project="${p}" --format=json --limit=5000 \
+            > "${ARTIFACT_DIR}/_gcp_audit_one.json" 2>/dev/null || \
+        gcloud logging read \
+            "timestamp>=\"${WINDOW_START}\" AND timestamp<=\"${WINDOW_END}\" AND logName:\"cloudaudit\"" \
+            --project="${p}" --format=json \
+            > "${ARTIFACT_DIR}/_gcp_audit_one.json" 2>/dev/null || true
+        _gcp_append_array "${ARTIFACT_DIR}/_gcp_audit_one.json" "${ARTIFACT_DIR}/_gcp_audit_pages.jsonl" "entries"
 
-    log "Pulling Security Command Center findings..."
-    gcloud scc findings list "projects/${project}" \
-        --filter="state=ACTIVE AND eventTime>\"${WINDOW_START}\"" \
-        --format=json \
-        > "${ARTIFACT_DIR}/gcp_scc_findings.json" 2>/dev/null || true
-    log "SCC findings → ${ARTIFACT_DIR}/gcp_scc_findings.json"
+        gcloud scc findings list "projects/${p}" \
+            --filter="state=ACTIVE AND eventTime>\"${WINDOW_START}\"" --format=json \
+            > "${ARTIFACT_DIR}/_gcp_scc_one.json" 2>/dev/null || true
+        _gcp_append_array "${ARTIFACT_DIR}/_gcp_scc_one.json" "${ARTIFACT_DIR}/_gcp_scc_pages.jsonl" "findings"
+    done
+    merge_pages "${ARTIFACT_DIR}/_gcp_audit_pages.jsonl" "${ARTIFACT_DIR}/gcp_audit_log.json" "entries" || true
+    merge_pages "${ARTIFACT_DIR}/_gcp_scc_pages.jsonl" "${ARTIFACT_DIR}/gcp_scc_findings.json" "findings" || true
+    rm -f "${ARTIFACT_DIR}/_gcp_audit_pages.jsonl" "${ARTIFACT_DIR}/_gcp_audit_one.json" \
+          "${ARTIFACT_DIR}/_gcp_scc_pages.jsonl" "${ARTIFACT_DIR}/_gcp_scc_one.json" 2>/dev/null || true
+    log "Audit logs → ${ARTIFACT_DIR}/gcp_audit_log.json ; SCC → ${ARTIFACT_DIR}/gcp_scc_findings.json"
 
     log "Pulling VPC firewall rules..."
     gcloud compute firewall-rules list \

@@ -130,6 +130,55 @@ def normalize_gcp_firewall(data):
     return out
 
 
+def normalize_public_snapshots(data):
+    """EBS snapshots shared to all accounts (publicly restorable) -> data-exposure findings."""
+    out = []
+    snaps = (data or {}).get("Snapshots", []) if isinstance(data, dict) else (data or [])
+    for s in snaps if isinstance(snaps, list) else []:
+        if not isinstance(s, dict):
+            continue
+        sid = s.get("SnapshotId", "snapshot")
+        out.append(finding(
+            "Cloud Exposure", sid,
+            f"EBS snapshot {sid} is publicly restorable (shared to all AWS accounts) - "
+            f"anyone can copy the disk image.",
+            "T1537 (Transfer Data to Cloud Account)", "Likely True Positive", "High"))
+    return out
+
+
+def normalize_public_amis(data):
+    """AMIs launchable by all accounts (public) -> image/data-exposure findings."""
+    out = []
+    imgs = (data or {}).get("Images", []) if isinstance(data, dict) else (data or [])
+    for i in imgs if isinstance(imgs, list) else []:
+        if not isinstance(i, dict):
+            continue
+        iid = i.get("ImageId", "ami")
+        out.append(finding(
+            "Cloud Exposure", iid,
+            f"AMI {iid} is public (launchable by all accounts) - image contents exposed.",
+            "T1537 (Transfer Data to Cloud Account)", "Likely True Positive", "High"))
+    return out
+
+
+def normalize_imds(data):
+    """EC2 instances allowing IMDSv1 (HttpTokens=optional) - an SSRF can then read the
+    instance-role credentials from the metadata service without a token."""
+    out = []
+    insts = (data or {}).get("instances", []) if isinstance(data, dict) else (data or [])
+    for i in insts if isinstance(insts, list) else []:
+        if not isinstance(i, dict) or str(i.get("HttpTokens", "")).lower() != "optional":
+            continue
+        iid = i.get("InstanceId", "instance")
+        out.append(finding(
+            "Cloud Exposure", iid,
+            f"Instance {iid} allows IMDSv1 (HttpTokens=optional) - an SSRF can steal the "
+            f"instance-role credentials from the metadata service.",
+            "T1552.005 (Cloud Instance Metadata API)", "Indeterminate", "Medium",
+            severity="Medium"))
+    return out
+
+
 def normalize_public_buckets(data):
     """Public-storage sweep ({"buckets":[{"name","public"}]}) -> exposure findings."""
     out = []

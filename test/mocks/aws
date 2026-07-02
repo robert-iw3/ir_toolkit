@@ -40,6 +40,16 @@ if [[ "$args" == *"describe-security-groups"* && "$args" != *"--query"* ]]; then
     echo '{"SecurityGroups":[{"GroupId":"sg-exposed01","IpPermissions":[{"IpProtocol":"tcp","FromPort":22,"ToPort":22,"IpRanges":[{"CidrIp":"0.0.0.0/0"}]}]}]}'
     exit 0
 fi
+# Posture: publicly-restorable EBS snapshot, public AMI, IMDSv1-enabled instance.
+if [[ "$args" == *"describe-snapshots"* && "$args" == *"restorable-by-user-ids"* ]]; then
+    echo '{"Snapshots":[{"SnapshotId":"snap-public01","VolumeId":"vol-x"}]}'; exit 0
+fi
+if [[ "$args" == *"describe-images"* && "$args" == *"is-public"* ]]; then
+    echo '{"Images":[{"ImageId":"ami-public01"}]}'; exit 0
+fi
+if [[ "$args" == *"describe-instances"* && "$args" == *"HttpTokens"* ]]; then
+    echo '[{"InstanceId":"i-imds01","HttpTokens":"optional"}]'; exit 0
+fi
 
 # describe-regions (multi-region sweep): two enabled regions.
 if [[ "$args" == *"describe-regions"* ]]; then

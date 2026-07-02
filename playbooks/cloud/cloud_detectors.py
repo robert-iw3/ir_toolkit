@@ -26,9 +26,12 @@ def normalize_guardduty(data):
 
 
 def normalize_scc(data):
-    """GCP Security Command Center findings -> common findings."""
+    """GCP Security Command Center findings -> common findings. Accepts a raw list or a
+    {"findings":[...]} wrapper (the multi-project collector merges per-project arrays)."""
     out = []
-    for item in data if isinstance(data, list) else []:
+    items = data if isinstance(data, list) else (data or {}).get("findings", []) \
+        if isinstance(data, dict) else []
+    for item in items if isinstance(items, list) else []:
         f = item.get("finding", item) if isinstance(item, dict) else {}
         cat = f.get("category", "SCC finding")
         sev = f.get("severity", "")
@@ -53,6 +56,31 @@ def normalize_azure_risky(data):
                            f"Entra risky user (riskLevel={level})",
                            "T1078 (Valid Accounts)", verdict,
                            "High" if verdict.startswith("Likely True") else "Low"))
+    return out
+
+
+def normalize_defender_alerts(data):
+    """Microsoft Defender for Cloud alerts -> common findings. Azure's provider-native
+    detector, the counterpart of AWS GuardDuty / GCP Security Command Center. Active
+    High/Critical alerts are true-positive class; lower severities are Indeterminate."""
+    out = []
+    alerts = data if isinstance(data, list) else (data or {}).get("value", []) \
+        if isinstance(data, dict) else []
+    for a in alerts if isinstance(alerts, list) else []:
+        if not isinstance(a, dict):
+            continue
+        if str(a.get("status", "Active")).lower() in ("dismissed", "resolved"):
+            continue
+        name = a.get("alertDisplayName") or a.get("alertType") or "Defender alert"
+        sev = a.get("severity", "")
+        entity = a.get("compromisedEntity") or a.get("resourceIdentifiers") or ""
+        verdict = "Likely True Positive" if sev_is_high(sev) else "Indeterminate"
+        out.append(finding(
+            "Cloud Detection", name,
+            f"Microsoft Defender for Cloud: {a.get('description', name)} "
+            f"(severity={sev}, entity={entity})",
+            "T1078 (Valid Accounts)", verdict,
+            "High" if sev_is_high(sev) else "Low"))
     return out
 
 

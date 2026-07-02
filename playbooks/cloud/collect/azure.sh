@@ -65,6 +65,20 @@ _azure_collect_identity() {
     } > "${ARTIFACT_DIR}/azure_inbox_rules.json" 2>/dev/null || true
 }
 
+# M365 unified audit log (SharePoint/OneDrive downloads + mailbox export) for SaaS data-plane
+# exfil detection. The authoritative source is the Office 365 Management Activity API / Purview
+# (Search-UnifiedAuditLog); this is a best-effort Graph pull. Absent access leaves an empty file
+# and the analyzer finds nothing (no FP).
+_azure_collect_m365_audit() {
+    log "Pulling M365 unified audit (download/export events, best-effort)..."
+    : > "${ARTIFACT_DIR}/azure_m365_audit.json"
+    az rest --method get \
+        --url "https://graph.microsoft.com/beta/security/auditLog/queries" \
+        --output json > "${ARTIFACT_DIR}/azure_m365_audit.json" 2>/dev/null || \
+        echo '{"value": []}' > "${ARTIFACT_DIR}/azure_m365_audit.json"
+    log "M365 unified audit → ${ARTIFACT_DIR}/azure_m365_audit.json"
+}
+
 # Azure managed-disk snapshots before eradication (opt-in).
 _azure_snapshot_disks() {  # resource_group
     local rg="$1"
@@ -90,20 +104,48 @@ _azure_snapshot_disks() {  # resource_group
     log "Azure disk snapshots → ${ARTIFACT_DIR}/azure_disk_snapshots.json"
 }
 
+# Merge a per-subscription JSON array into a jsonl-of-arrays for merge_pages.
+_azure_append_array() {  # src_json  jsonl_out  key
+    [[ -s "$1" ]] || return 0
+    PY_SRC="$1" PY_KEY="$3" "${PY:-python3}" -c \
+        'import json,os
+try: arr=json.load(open(os.environ["PY_SRC"]))
+except Exception: arr=[]
+print(json.dumps({os.environ["PY_KEY"]: arr if isinstance(arr,list) else []}))' \
+        >> "$2" 2>/dev/null || true
+}
+
 collect_azure() {
     local subscription="${IR_AZURE_SUBSCRIPTION:-}"
     local rg="${IR_AZURE_RESOURCE_GROUP:-}"
-    log "Azure subscription=${subscription} resource_group=${rg} target=${TARGET}"
+    # Attackers pivot to subscriptions nobody watches. --all-subscriptions (IR_ALL_SUBSCRIPTIONS=1)
+    # sweeps every accessible subscription for the Activity Log + Defender alerts.
+    local subs="${subscription}"
+    if [[ "${IR_ALL_SUBSCRIPTIONS:-0}" == "1" ]]; then
+        subs=$(az account list --query '[].id' --output tsv 2>/dev/null)
+        [[ -z "${subs}" ]] && subs="${subscription}"
+    fi
+    log "Azure subscription(s)=${subs} resource_group=${rg} target=${TARGET}"
     [[ -z "${subscription}" ]] && { log "WARN: IR_AZURE_SUBSCRIPTION not set"; }
 
-    log "Pulling Azure Activity Log..."
-    az monitor activity-log list \
-        --subscription "${subscription}" \
-        --start-time "${WINDOW_START}" \
-        --end-time   "${WINDOW_END}" \
-        --output json \
-        > "${ARTIFACT_DIR}/azure_activity_log.json" 2>/dev/null || true
-    log "Activity log → ${ARTIFACT_DIR}/azure_activity_log.json"
+    log "Pulling Azure Activity Log + Defender alerts..."
+    : > "${ARTIFACT_DIR}/_az_activity_pages.jsonl"; : > "${ARTIFACT_DIR}/_az_defender_pages.jsonl"
+    local s
+    for s in ${subs}; do
+        [[ -z "${s}" ]] && continue
+        az monitor activity-log list --subscription "${s}" \
+            --start-time "${WINDOW_START}" --end-time "${WINDOW_END}" --output json \
+            > "${ARTIFACT_DIR}/_az_activity_one.json" 2>/dev/null || true
+        _azure_append_array "${ARTIFACT_DIR}/_az_activity_one.json" "${ARTIFACT_DIR}/_az_activity_pages.jsonl" "value"
+        az security alert list --subscription "${s}" --output json \
+            > "${ARTIFACT_DIR}/_az_defender_one.json" 2>/dev/null || true
+        _azure_append_array "${ARTIFACT_DIR}/_az_defender_one.json" "${ARTIFACT_DIR}/_az_defender_pages.jsonl" "value"
+    done
+    merge_pages "${ARTIFACT_DIR}/_az_activity_pages.jsonl" "${ARTIFACT_DIR}/azure_activity_log.json" "value" || true
+    merge_pages "${ARTIFACT_DIR}/_az_defender_pages.jsonl" "${ARTIFACT_DIR}/azure_defender_alerts.json" "value" || true
+    rm -f "${ARTIFACT_DIR}/_az_activity_pages.jsonl" "${ARTIFACT_DIR}/_az_activity_one.json" \
+          "${ARTIFACT_DIR}/_az_defender_pages.jsonl" "${ARTIFACT_DIR}/_az_defender_one.json" 2>/dev/null || true
+    log "Activity log → ${ARTIFACT_DIR}/azure_activity_log.json ; Defender → ${ARTIFACT_DIR}/azure_defender_alerts.json"
 
     if [[ -n "${rg}" ]]; then
         log "Pulling NSG rules for RG ${rg}..."
@@ -121,6 +163,7 @@ collect_azure() {
         > "${ARTIFACT_DIR}/azure_flow_logs.json" 2>/dev/null || true
 
     _azure_collect_identity
+    _azure_collect_m365_audit
 
     [[ "${IR_SNAPSHOT_DISKS:-0}" == "1" && -n "${TARGET}" ]] && _azure_snapshot_disks "${rg}"
 

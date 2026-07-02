@@ -40,7 +40,8 @@ def test_lab_scenario_is_detected_and_adjudicated(scenario_path, tmp_path):
     env["IR_MOCK_LOG"] = str(tmp_path / "calls.log")
     # provider context the collectors expect (values are irrelevant to the mock)
     env.update({"IR_AZURE_SUBSCRIPTION": "lab-sub", "IR_AZURE_RESOURCE_GROUP": "lab-rg",
-                "IR_GCP_PROJECT": "lab-proj", "IR_AWS_REGION": "us-east-1"})
+                "IR_GCP_PROJECT": "lab-proj", "IR_AWS_REGION": "us-east-1",
+                "IR_S3_DATAEVENT_LOG_GROUP": "ir-s3-dataevents"})
 
     out_root = tmp_path / "proj"
     out_root.mkdir()
@@ -56,6 +57,13 @@ def test_lab_scenario_is_detected_and_adjudicated(scenario_path, tmp_path):
 
     host = next(out_root.glob(f"{provider}-*"))
     findings = json.loads(next(host.glob("Combined_Findings_*.json")).read_text())
+
+    # clean-tenant scenario: benign baseline only, must produce NO true-positive-class finding
+    if expect.get("no_true_positive"):
+        tp = [(f["Type"], f["Target"]) for f in findings
+              if VERDICT_RANK.get(f.get("Verdict"), 0) >= 3]
+        assert not tp, f"{scn['name']}: clean-tenant baseline produced true-positive-class: {tp}"
+        return
 
     # 1. every expected finding TYPE was produced
     types_seen = {f["Type"] for f in findings}
@@ -84,3 +92,44 @@ def test_lab_scenario_is_detected_and_adjudicated(scenario_path, tmp_path):
 def test_lab_has_scenarios_for_every_provider():
     provs = {json.load(open(p, encoding="utf-8"))["provider"] for p in SCENARIOS}
     assert {"aws", "azure", "gcp"} <= provs, f"lab missing provider coverage: {provs}"
+
+
+# Every finding TYPE the cloud workflow can emit from attack telemetry. The lab must
+# exercise each - if a new detection type is added, add a covering scenario (or extend one).
+_DETECTION_CATALOG = {
+    "Cloud Control-Plane Activity", "Cloud Detection", "Cloud Exposure", "Cloud IAM Posture",
+    "Cloud OAuth Consent Grant", "Cloud Inbox Forwarding Rule", "Cloud Identity Audit",
+    "Cloud Identity Risk", "Cloud Sign-In", "Cloud Network Flow to C2", "Cloud C2 Beacon",
+    "Cloud Data Exfiltration"}
+
+
+def _collect_scenario(scenario_path, workdir):
+    scn = json.load(open(scenario_path, encoding="utf-8"))
+    provider = scn["provider"]
+    coll = scn.get("collect", {})
+    env = dict(os.environ)
+    env["PATH"] = MOCK_ENV + os.pathsep + env.get("PATH", "")
+    env["IR_LAB_SCENARIO"] = scenario_path
+    env.update({"IR_AZURE_SUBSCRIPTION": "lab-sub", "IR_AZURE_RESOURCE_GROUP": "lab-rg",
+                "IR_GCP_PROJECT": "lab-proj", "IR_AWS_REGION": "us-east-1",
+                "IR_S3_DATAEVENT_LOG_GROUP": "ir-s3-dataevents"})
+    workdir.mkdir(parents=True, exist_ok=True)
+    cmd = ["bash", IRCOLLECT_CLOUD_SH, "--provider", provider,
+           "--target", coll.get("target", "10.0.0.5"),
+           "--incident-id", scn["name"], "--output-root", str(workdir)]
+    if coll.get("c2_ips"):
+        cmd += ["--c2-ips", coll["c2_ips"]]
+    if coll.get("c2_domains"):
+        cmd += ["--c2-domains", coll["c2_domains"]]
+    r = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=240)
+    assert r.returncode == 0, r.stderr
+    host = next(workdir.glob(f"{provider}-*"))
+    return json.loads(next(host.glob("Combined_Findings_*.json")).read_text())
+
+
+def test_lab_scenarios_cover_all_detection_types(tmp_path):
+    produced = set()
+    for i, sp in enumerate(SCENARIOS):
+        produced |= {f["Type"] for f in _collect_scenario(sp, tmp_path / f"s{i}")}
+    missing = _DETECTION_CATALOG - produced
+    assert not missing, f"detection types with NO covering lab scenario: {sorted(missing)}"

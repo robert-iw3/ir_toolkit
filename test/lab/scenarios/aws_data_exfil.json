@@ -1,0 +1,700 @@
+{
+  "name": "aws-data-exfil",
+  "provider": "aws",
+  "description": "Data-plane exfiltration: a human IAM user performs bulk S3 GetObject across sensitive buckets (delivered via the CloudWatch data-event sink) and copies an object to an attacker-controlled bucket (cross-account transfer). Object-level collection/exfil, not a control-plane change.",
+  "collect": {
+    "target": "10.0.0.5",
+    "c2_ips": "",
+    "c2_domains": ""
+  },
+  "aws": {
+    "s3_data_events": [
+      {
+        "eventName": "GetObject",
+        "sourceIPAddress": "203.0.113.77",
+        "userIdentity": {
+          "type": "IAMUser",
+          "userName": "contractor"
+        },
+        "requestParameters": {
+          "bucketName": "prod-secrets"
+        }
+      },
+      {
+        "eventName": "GetObject",
+        "sourceIPAddress": "203.0.113.77",
+        "userIdentity": {
+          "type": "IAMUser",
+          "userName": "contractor"
+        },
+        "requestParameters": {
+          "bucketName": "customer-pii"
+        }
+      },
+      {
+        "eventName": "GetObject",
+        "sourceIPAddress": "203.0.113.77",
+        "userIdentity": {
+          "type": "IAMUser",
+          "userName": "contractor"
+        },
+        "requestParameters": {
+          "bucketName": "prod-secrets"
+        }
+      },
+      {
+        "eventName": "GetObject",
+        "sourceIPAddress": "203.0.113.77",
+        "userIdentity": {
+          "type": "IAMUser",
+          "userName": "contractor"
+        },
+        "requestParameters": {
+          "bucketName": "customer-pii"
+        }
+      },
+      {
+        "eventName": "GetObject",
+        "sourceIPAddress": "203.0.113.77",
+        "userIdentity": {
+          "type": "IAMUser",
+          "userName": "contractor"
+        },
+        "requestParameters": {
+          "bucketName": "prod-secrets"
+        }
+      },
+      {
+        "eventName": "GetObject",
+        "sourceIPAddress": "203.0.113.77",
+        "userIdentity": {
+          "type": "IAMUser",
+          "userName": "contractor"
+        },
+        "requestParameters": {
+          "bucketName": "customer-pii"
+        }
+      },
+      {
+        "eventName": "GetObject",
+        "sourceIPAddress": "203.0.113.77",
+        "userIdentity": {
+          "type": "IAMUser",
+          "userName": "contractor"
+        },
+        "requestParameters": {
+          "bucketName": "prod-secrets"
+        }
+      },
+      {
+        "eventName": "GetObject",
+        "sourceIPAddress": "203.0.113.77",
+        "userIdentity": {
+          "type": "IAMUser",
+          "userName": "contractor"
+        },
+        "requestParameters": {
+          "bucketName": "customer-pii"
+        }
+      },
+      {
+        "eventName": "GetObject",
+        "sourceIPAddress": "203.0.113.77",
+        "userIdentity": {
+          "type": "IAMUser",
+          "userName": "contractor"
+        },
+        "requestParameters": {
+          "bucketName": "prod-secrets"
+        }
+      },
+      {
+        "eventName": "GetObject",
+        "sourceIPAddress": "203.0.113.77",
+        "userIdentity": {
+          "type": "IAMUser",
+          "userName": "contractor"
+        },
+        "requestParameters": {
+          "bucketName": "customer-pii"
+        }
+      },
+      {
+        "eventName": "GetObject",
+        "sourceIPAddress": "203.0.113.77",
+        "userIdentity": {
+          "type": "IAMUser",
+          "userName": "contractor"
+        },
+        "requestParameters": {
+          "bucketName": "prod-secrets"
+        }
+      },
+      {
+        "eventName": "GetObject",
+        "sourceIPAddress": "203.0.113.77",
+        "userIdentity": {
+          "type": "IAMUser",
+          "userName": "contractor"
+        },
+        "requestParameters": {
+          "bucketName": "customer-pii"
+        }
+      },
+      {
+        "eventName": "GetObject",
+        "sourceIPAddress": "203.0.113.77",
+        "userIdentity": {
+          "type": "IAMUser",
+          "userName": "contractor"
+        },
+        "requestParameters": {
+          "bucketName": "prod-secrets"
+        }
+      },
+      {
+        "eventName": "GetObject",
+        "sourceIPAddress": "203.0.113.77",
+        "userIdentity": {
+          "type": "IAMUser",
+          "userName": "contractor"
+        },
+        "requestParameters": {
+          "bucketName": "customer-pii"
+        }
+      },
+      {
+        "eventName": "GetObject",
+        "sourceIPAddress": "203.0.113.77",
+        "userIdentity": {
+          "type": "IAMUser",
+          "userName": "contractor"
+        },
+        "requestParameters": {
+          "bucketName": "prod-secrets"
+        }
+      },
+      {
+        "eventName": "GetObject",
+        "sourceIPAddress": "203.0.113.77",
+        "userIdentity": {
+          "type": "IAMUser",
+          "userName": "contractor"
+        },
+        "requestParameters": {
+          "bucketName": "customer-pii"
+        }
+      },
+      {
+        "eventName": "GetObject",
+        "sourceIPAddress": "203.0.113.77",
+        "userIdentity": {
+          "type": "IAMUser",
+          "userName": "contractor"
+        },
+        "requestParameters": {
+          "bucketName": "prod-secrets"
+        }
+      },
+      {
+        "eventName": "GetObject",
+        "sourceIPAddress": "203.0.113.77",
+        "userIdentity": {
+          "type": "IAMUser",
+          "userName": "contractor"
+        },
+        "requestParameters": {
+          "bucketName": "customer-pii"
+        }
+      },
+      {
+        "eventName": "GetObject",
+        "sourceIPAddress": "203.0.113.77",
+        "userIdentity": {
+          "type": "IAMUser",
+          "userName": "contractor"
+        },
+        "requestParameters": {
+          "bucketName": "prod-secrets"
+        }
+      },
+      {
+        "eventName": "GetObject",
+        "sourceIPAddress": "203.0.113.77",
+        "userIdentity": {
+          "type": "IAMUser",
+          "userName": "contractor"
+        },
+        "requestParameters": {
+          "bucketName": "customer-pii"
+        }
+      },
+      {
+        "eventName": "GetObject",
+        "sourceIPAddress": "203.0.113.77",
+        "userIdentity": {
+          "type": "IAMUser",
+          "userName": "contractor"
+        },
+        "requestParameters": {
+          "bucketName": "prod-secrets"
+        }
+      },
+      {
+        "eventName": "GetObject",
+        "sourceIPAddress": "203.0.113.77",
+        "userIdentity": {
+          "type": "IAMUser",
+          "userName": "contractor"
+        },
+        "requestParameters": {
+          "bucketName": "customer-pii"
+        }
+      },
+      {
+        "eventName": "GetObject",
+        "sourceIPAddress": "203.0.113.77",
+        "userIdentity": {
+          "type": "IAMUser",
+          "userName": "contractor"
+        },
+        "requestParameters": {
+          "bucketName": "prod-secrets"
+        }
+      },
+      {
+        "eventName": "GetObject",
+        "sourceIPAddress": "203.0.113.77",
+        "userIdentity": {
+          "type": "IAMUser",
+          "userName": "contractor"
+        },
+        "requestParameters": {
+          "bucketName": "customer-pii"
+        }
+      },
+      {
+        "eventName": "GetObject",
+        "sourceIPAddress": "203.0.113.77",
+        "userIdentity": {
+          "type": "IAMUser",
+          "userName": "contractor"
+        },
+        "requestParameters": {
+          "bucketName": "prod-secrets"
+        }
+      },
+      {
+        "eventName": "GetObject",
+        "sourceIPAddress": "203.0.113.77",
+        "userIdentity": {
+          "type": "IAMUser",
+          "userName": "contractor"
+        },
+        "requestParameters": {
+          "bucketName": "customer-pii"
+        }
+      },
+      {
+        "eventName": "GetObject",
+        "sourceIPAddress": "203.0.113.77",
+        "userIdentity": {
+          "type": "IAMUser",
+          "userName": "contractor"
+        },
+        "requestParameters": {
+          "bucketName": "prod-secrets"
+        }
+      },
+      {
+        "eventName": "GetObject",
+        "sourceIPAddress": "203.0.113.77",
+        "userIdentity": {
+          "type": "IAMUser",
+          "userName": "contractor"
+        },
+        "requestParameters": {
+          "bucketName": "customer-pii"
+        }
+      },
+      {
+        "eventName": "GetObject",
+        "sourceIPAddress": "203.0.113.77",
+        "userIdentity": {
+          "type": "IAMUser",
+          "userName": "contractor"
+        },
+        "requestParameters": {
+          "bucketName": "prod-secrets"
+        }
+      },
+      {
+        "eventName": "GetObject",
+        "sourceIPAddress": "203.0.113.77",
+        "userIdentity": {
+          "type": "IAMUser",
+          "userName": "contractor"
+        },
+        "requestParameters": {
+          "bucketName": "customer-pii"
+        }
+      },
+      {
+        "eventName": "GetObject",
+        "sourceIPAddress": "203.0.113.77",
+        "userIdentity": {
+          "type": "IAMUser",
+          "userName": "contractor"
+        },
+        "requestParameters": {
+          "bucketName": "prod-secrets"
+        }
+      },
+      {
+        "eventName": "GetObject",
+        "sourceIPAddress": "203.0.113.77",
+        "userIdentity": {
+          "type": "IAMUser",
+          "userName": "contractor"
+        },
+        "requestParameters": {
+          "bucketName": "customer-pii"
+        }
+      },
+      {
+        "eventName": "GetObject",
+        "sourceIPAddress": "203.0.113.77",
+        "userIdentity": {
+          "type": "IAMUser",
+          "userName": "contractor"
+        },
+        "requestParameters": {
+          "bucketName": "prod-secrets"
+        }
+      },
+      {
+        "eventName": "GetObject",
+        "sourceIPAddress": "203.0.113.77",
+        "userIdentity": {
+          "type": "IAMUser",
+          "userName": "contractor"
+        },
+        "requestParameters": {
+          "bucketName": "customer-pii"
+        }
+      },
+      {
+        "eventName": "GetObject",
+        "sourceIPAddress": "203.0.113.77",
+        "userIdentity": {
+          "type": "IAMUser",
+          "userName": "contractor"
+        },
+        "requestParameters": {
+          "bucketName": "prod-secrets"
+        }
+      },
+      {
+        "eventName": "GetObject",
+        "sourceIPAddress": "203.0.113.77",
+        "userIdentity": {
+          "type": "IAMUser",
+          "userName": "contractor"
+        },
+        "requestParameters": {
+          "bucketName": "customer-pii"
+        }
+      },
+      {
+        "eventName": "GetObject",
+        "sourceIPAddress": "203.0.113.77",
+        "userIdentity": {
+          "type": "IAMUser",
+          "userName": "contractor"
+        },
+        "requestParameters": {
+          "bucketName": "prod-secrets"
+        }
+      },
+      {
+        "eventName": "GetObject",
+        "sourceIPAddress": "203.0.113.77",
+        "userIdentity": {
+          "type": "IAMUser",
+          "userName": "contractor"
+        },
+        "requestParameters": {
+          "bucketName": "customer-pii"
+        }
+      },
+      {
+        "eventName": "GetObject",
+        "sourceIPAddress": "203.0.113.77",
+        "userIdentity": {
+          "type": "IAMUser",
+          "userName": "contractor"
+        },
+        "requestParameters": {
+          "bucketName": "prod-secrets"
+        }
+      },
+      {
+        "eventName": "GetObject",
+        "sourceIPAddress": "203.0.113.77",
+        "userIdentity": {
+          "type": "IAMUser",
+          "userName": "contractor"
+        },
+        "requestParameters": {
+          "bucketName": "customer-pii"
+        }
+      },
+      {
+        "eventName": "GetObject",
+        "sourceIPAddress": "203.0.113.77",
+        "userIdentity": {
+          "type": "IAMUser",
+          "userName": "contractor"
+        },
+        "requestParameters": {
+          "bucketName": "prod-secrets"
+        }
+      },
+      {
+        "eventName": "GetObject",
+        "sourceIPAddress": "203.0.113.77",
+        "userIdentity": {
+          "type": "IAMUser",
+          "userName": "contractor"
+        },
+        "requestParameters": {
+          "bucketName": "customer-pii"
+        }
+      },
+      {
+        "eventName": "GetObject",
+        "sourceIPAddress": "203.0.113.77",
+        "userIdentity": {
+          "type": "IAMUser",
+          "userName": "contractor"
+        },
+        "requestParameters": {
+          "bucketName": "prod-secrets"
+        }
+      },
+      {
+        "eventName": "GetObject",
+        "sourceIPAddress": "203.0.113.77",
+        "userIdentity": {
+          "type": "IAMUser",
+          "userName": "contractor"
+        },
+        "requestParameters": {
+          "bucketName": "customer-pii"
+        }
+      },
+      {
+        "eventName": "GetObject",
+        "sourceIPAddress": "203.0.113.77",
+        "userIdentity": {
+          "type": "IAMUser",
+          "userName": "contractor"
+        },
+        "requestParameters": {
+          "bucketName": "prod-secrets"
+        }
+      },
+      {
+        "eventName": "GetObject",
+        "sourceIPAddress": "203.0.113.77",
+        "userIdentity": {
+          "type": "IAMUser",
+          "userName": "contractor"
+        },
+        "requestParameters": {
+          "bucketName": "customer-pii"
+        }
+      },
+      {
+        "eventName": "GetObject",
+        "sourceIPAddress": "203.0.113.77",
+        "userIdentity": {
+          "type": "IAMUser",
+          "userName": "contractor"
+        },
+        "requestParameters": {
+          "bucketName": "prod-secrets"
+        }
+      },
+      {
+        "eventName": "GetObject",
+        "sourceIPAddress": "203.0.113.77",
+        "userIdentity": {
+          "type": "IAMUser",
+          "userName": "contractor"
+        },
+        "requestParameters": {
+          "bucketName": "customer-pii"
+        }
+      },
+      {
+        "eventName": "GetObject",
+        "sourceIPAddress": "203.0.113.77",
+        "userIdentity": {
+          "type": "IAMUser",
+          "userName": "contractor"
+        },
+        "requestParameters": {
+          "bucketName": "prod-secrets"
+        }
+      },
+      {
+        "eventName": "GetObject",
+        "sourceIPAddress": "203.0.113.77",
+        "userIdentity": {
+          "type": "IAMUser",
+          "userName": "contractor"
+        },
+        "requestParameters": {
+          "bucketName": "customer-pii"
+        }
+      },
+      {
+        "eventName": "GetObject",
+        "sourceIPAddress": "203.0.113.77",
+        "userIdentity": {
+          "type": "IAMUser",
+          "userName": "contractor"
+        },
+        "requestParameters": {
+          "bucketName": "prod-secrets"
+        }
+      },
+      {
+        "eventName": "GetObject",
+        "sourceIPAddress": "203.0.113.77",
+        "userIdentity": {
+          "type": "IAMUser",
+          "userName": "contractor"
+        },
+        "requestParameters": {
+          "bucketName": "customer-pii"
+        }
+      },
+      {
+        "eventName": "GetObject",
+        "sourceIPAddress": "203.0.113.77",
+        "userIdentity": {
+          "type": "IAMUser",
+          "userName": "contractor"
+        },
+        "requestParameters": {
+          "bucketName": "prod-secrets"
+        }
+      },
+      {
+        "eventName": "GetObject",
+        "sourceIPAddress": "203.0.113.77",
+        "userIdentity": {
+          "type": "IAMUser",
+          "userName": "contractor"
+        },
+        "requestParameters": {
+          "bucketName": "customer-pii"
+        }
+      },
+      {
+        "eventName": "GetObject",
+        "sourceIPAddress": "203.0.113.77",
+        "userIdentity": {
+          "type": "IAMUser",
+          "userName": "contractor"
+        },
+        "requestParameters": {
+          "bucketName": "prod-secrets"
+        }
+      },
+      {
+        "eventName": "GetObject",
+        "sourceIPAddress": "203.0.113.77",
+        "userIdentity": {
+          "type": "IAMUser",
+          "userName": "contractor"
+        },
+        "requestParameters": {
+          "bucketName": "customer-pii"
+        }
+      },
+      {
+        "eventName": "GetObject",
+        "sourceIPAddress": "203.0.113.77",
+        "userIdentity": {
+          "type": "IAMUser",
+          "userName": "contractor"
+        },
+        "requestParameters": {
+          "bucketName": "prod-secrets"
+        }
+      },
+      {
+        "eventName": "GetObject",
+        "sourceIPAddress": "203.0.113.77",
+        "userIdentity": {
+          "type": "IAMUser",
+          "userName": "contractor"
+        },
+        "requestParameters": {
+          "bucketName": "customer-pii"
+        }
+      },
+      {
+        "eventName": "GetObject",
+        "sourceIPAddress": "203.0.113.77",
+        "userIdentity": {
+          "type": "IAMUser",
+          "userName": "contractor"
+        },
+        "requestParameters": {
+          "bucketName": "prod-secrets"
+        }
+      },
+      {
+        "eventName": "GetObject",
+        "sourceIPAddress": "203.0.113.77",
+        "userIdentity": {
+          "type": "IAMUser",
+          "userName": "contractor"
+        },
+        "requestParameters": {
+          "bucketName": "customer-pii"
+        }
+      },
+      {
+        "eventName": "CopyObject",
+        "sourceIPAddress": "203.0.113.77",
+        "userIdentity": {
+          "type": "IAMUser",
+          "userName": "contractor"
+        },
+        "requestParameters": {
+          "bucketName": "exfil-staging",
+          "copySource": "prod-secrets/master.key"
+        }
+      }
+    ]
+  },
+  "expect": {
+    "types": [
+      "Cloud Data Exfiltration"
+    ],
+    "mitre_any": [
+      "T1530",
+      "T1537"
+    ],
+    "min_verdict": "Likely True Positive",
+    "tactics": [
+      "Collection",
+      "Exfiltration"
+    ]
+  }
+}
