@@ -66,20 +66,28 @@ def _select_parsers(file_type, available):
         # defeat memory/file scanning. Detect via thread context (DR0-DR7),
         # YARA sleeping-beacon rules, and egress monitor network modeling.
         'CobaltStrikeConfig', 'SliverConfig', 'HavocConfig',
-        'BruteRatelConfig', 'MythicConfig', 'MerlinConfig',
-        'NjRATConfig', 'AsyncRATConfig', 'SMTPExfilConfig',
+        'BruteRatelConfig', 'MythicConfig', 'MerlinConfig', 'AdaptixC2Config',
+        # RATs (plaintext / .NET string configs -- all use identify() to reject non-matching)
+        'NjRATConfig', 'AsyncRATConfig', 'DcRATConfig', 'XWormConfig',
+        'QuasarRATConfig', 'AgentTeslaConfig',
+        # Exfil / credential stealers
+        'SMTPExfilConfig', 'DiscordExfilConfig', 'TelegramC2Config',
     ]
     type_specific = {
-        'PE':      _PE_C2 + ['Executable', 'GenericDropper'],
+        # Executable and GenericDropper require 'rugosa' which is not in our offline bundle;
+        # mwcp raises pytest.Skipped (a BaseException) for missing deps, bypassing except-Exception.
+        # Omit them entirely -- our IR Toolkit parsers cover the relevant C2 patterns.
+        'PE':      _PE_C2,
         'UNKNOWN': _PE_C2,   # carved regions may lack MZ header
         'PDF':     ['PDF'],
         'ZIP':     ['Archive'],
         'GZIP':    ['Archive'],
         'ISO':     ['ISO'],
-        'PS1':     ['PowerShell', 'PowerShellDecoder', 'PoshC2Config', 'TelegramC2Config'],
-        'VBS':     ['VisualBasic', 'PowerShellDecoder', 'TelegramC2Config'],
-        'HTA':     ['PowerShellDecoder', 'TelegramC2Config'],
-        'BAT':     ['PowerShellDecoder', 'TelegramC2Config'],
+        'PS1':     ['PowerShell', 'PowerShellDecoder', 'PoshC2Config', 'PowGratConfig',
+                    'TelegramC2Config', 'DiscordExfilConfig', 'AgentTeslaConfig'],
+        'VBS':     ['VisualBasic', 'PowerShellDecoder', 'TelegramC2Config', 'DiscordExfilConfig'],
+        'HTA':     ['PowerShellDecoder', 'TelegramC2Config', 'DiscordExfilConfig'],
+        'BAT':     ['PowerShellDecoder', 'TelegramC2Config', 'DiscordExfilConfig'],
         'WSF':     ['PowerShellDecoder'],
         'LNK':     ['LNKParser', 'PowerShellDecoder'],
         'PY':      ['Python'],
@@ -110,12 +118,14 @@ def _select_parsers(file_type, available):
         'Executable','GenericDropper','PDF','Archive','ISO',
         'PowerShell','VisualBasic','Python','MachO','RSA','Decoy','Quarantined',
         # IR Toolkit generic
-        'GenericMutex','GenericC2','PowerShellDecoder','LNKParser','TelegramC2Config',
+        'GenericMutex','GenericC2','PowerShellDecoder','LNKParser',
+        'TelegramC2Config','DiscordExfilConfig',
         # IR Toolkit C2 frameworks
         'CobaltStrikeConfig','SliverConfig','HavocConfig','BruteRatelConfig',
-        'MythicConfig','MerlinConfig','PoshC2Config',
+        'MythicConfig','MerlinConfig','PoshC2Config','AdaptixC2Config','PowGratConfig',
         # IR Toolkit RATs / stealers
-        'NjRATConfig','AsyncRATConfig','SMTPExfilConfig',
+        'NjRATConfig','AsyncRATConfig','DcRATConfig','XWormConfig','QuasarRATConfig',
+        'AgentTeslaConfig','SMTPExfilConfig',
     }
     for p in available:
         if p not in known_generic and p not in selected:
@@ -188,8 +198,10 @@ def _run(mwcp_mod, meta, parsers_to_run, file_path):
         try:
             report = mwcp_mod.run(pname, file_path=file_path)
             _extract_metadata(report.as_dict(), out)
-        except Exception:
-            continue  # parser didn't match this file type -- expected behaviour
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except BaseException:
+            continue  # parser didn't match or has missing optional dep (mwcp raises pytest.Skipped for rugosa)
     return out
 
 

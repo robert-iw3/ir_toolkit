@@ -5,50 +5,25 @@ All parsers in `mwcp_parsers/` are staged into `tools/mwcp/lib/mwcp/parsers/`
 by `Build-OfflineToolkit.ps1 -IncludeMWCP`. Each parser runs automatically against
 the appropriate file type via the file-type detection in `mwcp_scan.py`.
 
----
-
-## Implemented
-
-All detection uses **structural/protocol indicators** — not framework name strings that operators strip.
-
-| Parser | File types | Detection basis | Extracts | Status |
-|--------|-----------|-----------------|----------|--------|
-| `GenericMutex.py` | ALL | CreateMutex API proximity + hex token pattern | Mutex names | ✅ |
-| `GenericC2.py` | ALL | IP:port regex, URL schemes, domain TLDs | C2 addresses, URLs, domains, registry paths | ✅ |
-| `PowerShellDecoder.py` | PS1, VBS, HTA, BAT, LNK, PE | `-enc` flag + UTF-16LE base64 | Decoded PS payloads, download cradle URLs | ✅ |
-| `LNKParser.py` | LNK | MS-SHLLINK binary magic + CLSID | LNK Arguments field (payload lives here), embedded URLs | ✅ |
-| `TelegramC2Config.py` | ALL | Bot token regex `\d{8,10}:[A-Za-z0-9_-]{35}` — Telegram API format | Bot token (actionable), chat ID, API URL | ✅ |
-| `CobaltStrikeConfig.py` | PE, UNKNOWN | XOR config block `ID\|type\|len\|value` — protocol-required binary structure | C2/URI, beacon type, sleep+jitter, UserAgent, HostHeader, SpawnTo, PipeName, RSA pubkey | ✅ |
-| `SliverConfig.py` | PE (Go), UNKNOWN | Wire-protocol JSON fields (`"implant_name"`, `"c2s"`, `"reconnect_interval"`) + `mtls://`/`wg://` transport schemes | C2 URL, implant name (pivot), reconnect interval, mTLS cert fingerprint | ✅ |
-| `HavocConfig.py` | PE, UNKNOWN | `0xDEADBEEF` magic + valid config_size OR protocol fields (`DemonID`, `SleepTime`, `Injection`) | C2 host, sleep+jitter, injection technique | ✅ |
-| `BruteRatelConfig.py` | PE, UNKNOWN | SMB pipe `\pipe\ratel` (C2 protocol required) + internal transport function names | C2 URL, pipe name, sleep, mutex | ✅ |
-| `MythicConfig.py` | PE, UNKNOWN | Required C2 profile fields (`PayloadUUID`, `callback_interval`, `AES_PSK`) | C2 host, callback interval, UUID (pivot indicator), AES PSK | ✅ |
-| `MerlinConfig.py` | PE (Go), UNKNOWN | Protocol-required JSON fields (`"psk"`, `"skew"`, `"maxRetry"`, `"proto"`, `"padding"`) | C2 URL, PSK, protocol, timing, JA3 fingerprint | ✅ |
-| `PoshC2Config.py` | PS1 | Config variable names (`$server`, `$URLS`, `$Payload`, `$kill_date`) — PoshC2 module API | C2 URL, payload URL, kill date, proxy | ✅ |
-| `NjRATConfig.py` | ALL | Pipe-delimited ASCII `host|port|key|name|campaign` — plaintext protocol config | C2 host:port, mutex/campaign name, registry key | ✅ |
-| `AsyncRATConfig.py` | PE, UNKNOWN | .NET string cluster: `Hosts`, `Ports`, `Version`, `Mutex`, `Certificate` within 4KB | C2 host:port, Mutex, Group, Version | ✅ |
-| `SMTPExfilConfig.py` | PE, UNKNOWN | SMTP host (`smtp.*`/`mail.*`) + port + credential proximity | SMTP host:port, username, plaintext password | ✅ |
+What is implemented and validated is documented in [README.md](README.md).
+This file tracks only what is planned but not yet built.
 
 ---
 
-## Tier 1 — Modern C2 Frameworks (highest IR encounter rate)
+## Tier 1 — Additional C2 Frameworks
 
 Detection strategy: `identify()` uses **wire-protocol field names and binary
 structural indicators** — NOT framework name strings that operators strip.
-An operator cannot rename protocol-required JSON fields without breaking
-compatibility with the C2 team server.
 
-| Parser | Target | Detects via | Extracts | Status |
-|--------|--------|-------------|----------|--------|
-| `CobaltStrikeConfig.py` | PE, UNKNOWN | XOR-encoded binary config block (ID\|type\|len\|value) — structure is protocol-required | Sleep+jitter, C2 host/URI, UserAgent, HostHeader, SpawnTo, PipeName, RSA pubkey | ✅ |
-| `SliverConfig.py` | PE (Go), UNKNOWN | Wire-protocol JSON field names (`"implant_name"`, `"c2s"`, `"reconnect_interval"`) + `mtls://`/`wg://` schemes unique to Sliver transport | C2 URL, implant name, reconnect interval, DNS C2, mTLS cert fingerprint | ✅ |
-| `HavocConfig.py` | PE, UNKNOWN | Magic `0xDEADBEEF` + valid config_size OR protocol field names (`DemonID`, `SleepTime`, `Injection`) | C2 host, sleep+jitter, injection technique | ✅ |
-| `BruteRatelConfig.py` | PE, UNKNOWN | Named pipe `\pipe\ratel` (SMB C2 protocol) + internal transport function names | C2 URL, pipe name, sleep, mutex | ✅ |
-| `MythicConfig.py` | PE, UNKNOWN | Required C2 profile fields (`PayloadUUID`, `callback_interval`, `AES_PSK`) — server-mandated names | C2 host, callback interval, UUID (pivot), AES PSK | ✅ |
-| `MerlinConfig.py` | PE (Go), UNKNOWN | Protocol-required JSON fields (`"psk"`, `"skew"`, `"maxRetry"`, `"proto"`, `"padding"`) | C2 URL, PSK, protocol, timing, JA3 fingerprint | ✅ |
-| `PoshC2Config.py` | PS1 | Config variable names (`$server`, `$URLS`, `$Payload`, `$kill_date`) — part of PoshC2 module API | C2 URL, payload URL, kill date, proxy | ✅ |
+| Parser | Target | Detection basis | Extracts |
+|--------|--------|-----------------|----------|
+| `DeimosConfig.py` | PE (Go) | Go struct field names (`CallbackURL`, `Interval`, `PubKey`) unique to Deimos | C2 URL, interval, public key |
+| `MacroPackConfig.py` | ALL | MacroPack marker strings in macro documents + payload URL pattern | Delivery URL, payload type |
+| `IcedIDConfig.py` | PE | RC4-encrypted botnet config in PE overlay with documented key location | Bot ID, campaign ID, C2 domain |
+| `QakBotConfig.py` | PE | XOR-encoded config block with `tid`/`campaign_id`/C2 list | Campaign ID, C2 IP list |
+| `EmotedConfig.py` | PE | Emotet's multi-layer RSA+AES config with documented structure | C2 IP:port list, public key |
 
-**NightHawk — NOT implemented as mwcp parser (intentional):**
+**NightHawk — NOT planned as mwcp parser (intentional):**
 MDSec explicitly engineered NightHawk to defeat all file-content and memory-
 scanning signatures. Detection requires behavioral telemetry that mwcp cannot provide:
 - **Thread context**: hardware breakpoints (DR0-DR7) set without a debugger attached
@@ -61,48 +36,25 @@ These belong in `memory_enrich.py` (thread context module), the egress monitor
 
 ---
 
-## Tier 1 — Additional C2 Frameworks
+## Tier 1 — Common RATs (commodity malware, high volume)
 
 | Parser | Target | Detection basis | Extracts |
 |--------|--------|-----------------|----------|
-| `AdaptixC2Config.py` | PE | Protocol field names (`agent_id`, `callback_url`, `profile`) in Adaptix agent JSON | C2 URL, agent ID, callback interval |
-| `DeimosConfig.py` | PE (Go) | Go struct field names (`CallbackURL`, `Interval`, `PubKey`) unique to Deimos | C2 URL, interval, public key |
-| `MacroPackConfig.py` | ALL | MacroPack marker strings in macro documents + payload URL pattern | Delivery URL, payload type |
-| `PowGratConfig.py` | PS1 | `$C2Server`, `$C2Port`, `$Password` variable cluster in PowGrat stager | C2 server, port, PSK |
-| `IcedIDConfig.py` | PE | RC4-encrypted botnet config in PE overlay with documented key location | Bot ID, campaign ID, C2 domain |
-| `QakBotConfig.py` | PE | XOR-encoded config block with `tid`/`campaign_id`/C2 list | Campaign ID, C2 IP list |
-| `EmotedConfig.py` | PE | Emotet's multi-layer RSA+AES config with documented structure | C2 IP:port list, public key |
-
----
-
-## Tier 1 — Common RATs (commodity malware, high volume)
-
-| Parser | Target | Extracts | Status |
-|--------|--------|----------|--------|
-| `AsyncRATConfig.py` | PE | C2 host:port, mutex, group (campaign), version, base64 config blob | ✅ |
-| `NjRATConfig.py` | PE | Host:port, campaign/tag, mutex, registry key | ✅ |
-| `QuasarRATConfig.py` | PE | Host:port, mutex, reconnect delay, AES-128 key — AES key derivation documented |
-| `DcRATConfig.py` | PE | C2 host:port, mutex, HWID salt, install filename — AsyncRAT codebase variant |
-| `RemcosConfig.py` | PE | C2 host:port, mutex, license key, campaign tag, keylog path — RC4-encrypted config |
-| `NanoCoreConfig.py` | PE | C2 host:port, mutex, Group, BuildTime, plugin list — .NET resource as encrypted XML |
-| `AgentTeslaConfig.py` | PE | Exfil method (SMTP/FTP/Telegram), host + credentials, keylog path |
-| `XWormConfig.py` | PE | Host:port, mutex, botnet ID — plaintext .NET strings |
-| `AsyncSpyConfig.py` | PE | C2 host:port, mutex — AsyncRAT variant |
+| `RemcosConfig.py` | PE | `SETTINGS` PE section + RC4-encrypted config with documented key derivation | C2 host:port, mutex, license key, campaign tag, keylog path |
+| `NanoCoreConfig.py` | PE | .NET resource named `MANIFEST` containing encrypted XML with documented structure | C2 host:port, mutex, Group, BuildTime, plugin list |
+| `AsyncSpyConfig.py` | PE | AsyncRAT variant cluster — same field names but with `AsyncSpy` marker string | C2 host:port, mutex |
 
 ---
 
 ## Tier 1 — Stealers (high volume in initial access incidents)
 
-| Parser | Target | Extracts | Status |
-|--------|--------|----------|--------|
-| `TelegramC2Config.py` | ALL | Bot token + chat ID — works across Redline, Vidar, Lumma, clipboard stealers | ✅ |
-| `SMTPExfilConfig.py` | PE, UNKNOWN | SMTP host:port, username, plaintext password | ✅ |
-| `RedlineConfig.py` | PE | C2 host:port, build ID, license ID — XML or base64 embedded resource |
-| `VidarConfig.py` | PE | C2 URL, botnet ID, Telegram channel (newer variants) — PE overlay/rsrc config URL |
-| `LummaConfig.py` | PE | Multiple encrypted C2 URLs in PE overlay, build ID |
-| `StealcConfig.py` | PE | C2 URL, bot ID — plaintext or lightly encoded in PE |
-| `RaccoonConfig.py` | PE | C2 URL, build ID — hardcoded URL extraction |
-| `DiscordExfilConfig.py` | ALL | Discord webhook URL + channel/server IDs — cross-family exfil vector |
+| Parser | Target | Detection basis | Extracts |
+|--------|--------|-----------------|----------|
+| `RedlineConfig.py` | PE | .NET resource named `cfg` containing base64 XML config | C2 host:port, build ID, license ID |
+| `VidarConfig.py` | PE | PE overlay URL string after section boundary + Telegram channel in newer variants | C2 URL, botnet ID, Telegram channel |
+| `LummaConfig.py` | PE | Multiple base64-encoded C2 URLs in PE overlay separated by null bytes | C2 URL list, build ID |
+| `StealcConfig.py` | PE | Plaintext C2 URL adjacent to `Content-Type: application/x-www-form-urlencoded` marker | C2 URL, bot ID |
+| `RaccoonConfig.py` | PE | Hardcoded C2 URL string in PE data section (Raccoon v2 uses Telegram for C2 URL delivery) | C2 URL, build ID |
 
 ---
 
@@ -164,7 +116,8 @@ the server (which looks like legitimate traffic to network defenders).
 | `PastebinC2Config.py` | ALL | Pastebin API keys + paste IDs used as dead-drop C2 staging |
 
 Detection note: these configs are often visible in plaintext (API tokens) even in
-compiled binaries — TelegramC2Config.py demonstrates the pattern for Telegram.
+compiled binaries — TelegramC2Config.py and DiscordExfilConfig.py demonstrate the
+pattern for Telegram and Discord respectively.
 
 ---
 
@@ -178,8 +131,6 @@ compiled binaries — TelegramC2Config.py demonstrates the pattern for Telegram.
 | `KerberoastConfig.py` | PS1 | SPN targets, ticket requests embedded in PS Kerberoasting scripts |
 | `DCsyncConfig.py` | PS1, PE | DRSUAPI replication source DC, target account — DCsync attack config |
 | `AntiAnalysisStrings.py` | PE | VM/sandbox names, analyst tool names the binary checks — confirms malware-awareness |
-
----
 
 ---
 
@@ -268,7 +219,9 @@ class MyParser(mwcp.Parser):
 **To add a new parser:**
 1. Write `MyParser.py` in this directory
 2. Copy to `tools/mwcp/lib/mwcp/parsers/`
-3. **Add entry to `tools/mwcp/lib/mwcp/parser_config.yml`** (required — see §1 above)
-4. Add to `mwcp_scan.py` `_select_parsers()` type map for the relevant file type
-5. Test: `python mwcp_scan.py <lib> <out> <sample.ps1>` — verify `address`/`decoded` in JSON output
-6. Rebuild: `Build-OfflineToolkit.ps1 -IncludeMWCP` stages parsers + updated config to tools/
+3. **Add entry to `parser_config.yml`** here AND in `tools/mwcp/lib/mwcp/parser_config.yml` (required — see §1 above)
+4. Add to `mwcp_scan.py` `_select_parsers()` type map and `known_generic` set
+5. Add TP/FP samples to `test/windows/lab_mwcp/generate_samples.py` and write tests
+6. Run `pytest test/test_53_mwcp_parsers.py` and `Invoke-Pester test/windows/lab_mwcp/` — both must pass
+7. Add parser to `README.md` once validated
+8. Rebuild: `Build-OfflineToolkit.ps1 -IncludeMWCP` stages parsers + updated config to tools/

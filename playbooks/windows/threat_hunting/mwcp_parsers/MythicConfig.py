@@ -36,17 +36,23 @@ _MYTHIC_REQUIRED_FIELDS = [
 ]
 
 _JSON_RE = re.compile(
-    rb'\{[^{}]{30,8000}(?:PayloadUUID|callback_interval|c2_profiles|agent_uuid|AES_PSK)[^{}]{0,8000}\}',
+    # Match JSON objects containing ANY Mythic required field.
+    # Use lookahead so 30-char prefix isn't required (PayloadUUID can be the first key).
+    rb'\{(?=[^{}]{0,8000}(?:PayloadUUID|callback_interval|c2_profiles|agent_uuid|AES_PSK))'
+    rb'[^{}]{0,8000}\}',
     re.DOTALL | re.IGNORECASE
 )
 
+# JSON encodes key names with closing quote: "PayloadUUID": "uuid-value"
+# [":=] accidentally matches the closing " of the key name, leaving ": "uuid" unmatched.
+# Fix: skip the optional closing quote + separator before the actual value.
 _UUID_RE  = re.compile(
-    rb'(?:PayloadUUID|agent_uuid|uuid)\s*[":=]\s*["\']?([0-9a-fA-F\-]{32,36})',
+    rb'(?:PayloadUUID|agent_uuid|uuid)["\']?\s*[":=]\s*["\']?([0-9a-fA-F\-]{32,36})',
     re.IGNORECASE
 )
 _URL_RE   = re.compile(rb'https?://[^\s\x00\'"<>]{8,200}', re.IGNORECASE)
 _KEY_RE   = re.compile(
-    rb'(?:AES_PSK|encryption_key|crypto_key)\s*[":=]\s*["\']?([A-Za-z0-9+/=]{20,64})',
+    rb'(?:AES_PSK|encryption_key|crypto_key)["\']?\s*[":=]\s*["\']?([A-Za-z0-9+/=]{20,64})',
     re.IGNORECASE
 )
 
@@ -64,6 +70,35 @@ class MythicConfig(mwcp.Parser):
         hits = sum(1 for f in _MYTHIC_REQUIRED_FIELDS if f in data)
         return hits >= 2
 
+    @staticmethod
+    def _find_json_blobs(data: bytes):
+        """Brace-counting JSON scanner -- handles nested objects that [^{}] regex cannot."""
+        results = []
+        i = 0
+        n = len(data)
+        while i < n:
+            if data[i] == ord('{'):
+                depth, j = 0, i
+                while j < n:
+                    c = data[j]
+                    if c == ord('{'):
+                        depth += 1
+                    elif c == ord('}'):
+                        depth -= 1
+                        if depth == 0:
+                            candidate = data[i:j + 1]
+                            if any(f in candidate for f in _MYTHIC_REQUIRED_FIELDS):
+                                try:
+                                    obj = json.loads(candidate.decode('utf-8', 'ignore'))
+                                    if isinstance(obj, dict):
+                                        results.append(obj)
+                                except Exception:
+                                    pass
+                            break
+                    j += 1
+            i += 1
+        return results
+
     def run(self):
         data = self.file_object.data
         if not data:
@@ -71,10 +106,9 @@ class MythicConfig(mwcp.Parser):
 
         seen: set[str] = set()
 
-        # 1. Structured JSON extraction
-        for m in _JSON_RE.finditer(data):
+        # 1. Structured JSON extraction -- brace-counting handles nested c2_profiles dicts
+        for obj in self._find_json_blobs(data):
             try:
-                obj = json.loads(m.group(0).decode('utf-8', 'ignore'))
                 if not isinstance(obj, dict):
                     continue
 

@@ -1,0 +1,4 @@
+Date|Event|Status|Duration|Notes
+2024-01-01|startup|ok|90s|no issues
+2024-01-02|shutdown|ok|120s|maintenance window
+2024-01-03|restart|warn|45s|brief interruption

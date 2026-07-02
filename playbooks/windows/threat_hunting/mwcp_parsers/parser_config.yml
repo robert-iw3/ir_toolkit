@@ -199,3 +199,49 @@ SMTPExfilConfig:
   author: IR_Toolkit
   parsers:
     - .SMTPExfilConfig
+
+DiscordExfilConfig:
+  description: Discord Webhook/Bot Token C2/Exfil Extractor
+  author: IR_Toolkit
+  parsers:
+    - .DiscordExfilConfig
+
+AgentTeslaConfig:
+  description: Agent Tesla Keylogger/Stealer Config Extractor
+  author: IR_Toolkit
+  parsers:
+    - .AgentTeslaConfig
+
+# RAT variants
+
+DcRATConfig:
+  description: DcRAT/VenomRAT Config Extractor
+  author: IR_Toolkit
+  parsers:
+    - .DcRATConfig
+
+XWormConfig:
+  description: XWorm RAT Config Extractor
+  author: IR_Toolkit
+  parsers:
+    - .XWormConfig
+
+QuasarRATConfig:
+  description: Quasar RAT Config Extractor
+  author: IR_Toolkit
+  parsers:
+    - .QuasarRATConfig
+
+# Additional C2 frameworks
+
+AdaptixC2Config:
+  description: Adaptix C2 Agent Config Extractor
+  author: IR_Toolkit
+  parsers:
+    - .AdaptixC2Config
+
+PowGratConfig:
+  description: PowGrat PS1 Stager Config Extractor
+  author: IR_Toolkit
+  parsers:
+    - .PowGratConfig

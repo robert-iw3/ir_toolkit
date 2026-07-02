@@ -1,0 +1,5 @@
+# Status notification config
+notify_channel = discord
+channel_name = "#ops-alerts"
+server = my-discord-server
+# No webhook configured -- use manual posting

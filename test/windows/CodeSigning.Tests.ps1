@@ -70,15 +70,15 @@ Describe "Invoke-PrepareDefender.ps1 — cert import logic" {
 
 Describe "Code signing — live verification (requires Invoke-SignToolkit.ps1 to have been run)" {
 
-    It "ir_toolkit.cer exists after signing" -Skip:(-not (Test-Path $Script:CerPath)) {
+    It "ir_toolkit.cer exists after signing" -Skip:(-not ($Script:CerPath -and (Test-Path $Script:CerPath))) {
         Test-Path -LiteralPath $Script:CerPath | Should -Be $true
     }
 
-    It "ir_toolkit.pfx exists on analyst machine" -Skip:(-not (Test-Path $Script:PfxPath)) {
+    It "ir_toolkit.pfx exists on analyst machine" -Skip:(-not ($Script:PfxPath -and (Test-Path $Script:PfxPath))) {
         Test-Path -LiteralPath $Script:PfxPath | Should -Be $true
     }
 
-    It "Invoke-IRCollection.ps1 has a signature block" -Skip:(-not (Test-Path $Script:CerPath)) {
+    It "Invoke-IRCollection.ps1 has a signature block" -Skip:(-not ($Script:CerPath -and (Test-Path $Script:CerPath))) {
         # After Invoke-SignToolkit.ps1, cert is removed from local stores (no trace).
         # Status is 'UnknownError' (chain unverifiable) — NOT 'NotSigned' (no block at all).
         $target = Join-Path $Script:ToolkitRoot 'Invoke-IRCollection.ps1'
@@ -87,13 +87,13 @@ Describe "Code signing — live verification (requires Invoke-SignToolkit.ps1 to
         $sig.SignerCertificate.Subject | Should -Match 'IR Toolkit'
     }
 
-    It "Invoke-PrepareDefender.ps1 has a signature block" -Skip:(-not (Test-Path $Script:CerPath)) {
+    It "Invoke-PrepareDefender.ps1 has a signature block" -Skip:(-not ($Script:CerPath -and (Test-Path $Script:CerPath))) {
         $sig = Get-AuthenticodeSignature -LiteralPath $Script:PrepScript -ErrorAction SilentlyContinue
         $sig.Status | Should -Not -Be 'NotSigned'
         $sig.SignerCertificate.Subject | Should -Match 'IR Toolkit'
     }
 
-    It "All .ps1 files under playbooks\ have a signature block" -Skip:(-not (Test-Path $Script:CerPath)) {
+    It "All .ps1 files under playbooks\ have a signature block" -Skip:(-not ($Script:CerPath -and (Test-Path $Script:CerPath))) {
         $unsigned = Get-ChildItem (Join-Path $Script:ToolkitRoot 'playbooks') -Recurse -Filter '*.ps1' |
             Where-Object {
                 $s = Get-AuthenticodeSignature -LiteralPath $_.FullName -ErrorAction SilentlyContinue

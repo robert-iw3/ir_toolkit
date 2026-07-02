@@ -1,0 +1,8 @@
+{
+  "server_url": "https://api.myapp.example.com/v2",
+  "c2": "tier2",
+  "interval": 30,
+  "retry_count": 3,
+  "name": "myservice",
+  "version": "1.0.0"
+}

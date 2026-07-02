@@ -1,0 +1,5 @@
+# Mail server configuration for outbound notifications
+smtp_host = smtp.office365.com
+smtp_port = 587
+use_tls = true
+# User must provide login via application configuration manager
