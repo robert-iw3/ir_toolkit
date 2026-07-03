@@ -1,0 +1,412 @@
+{
+  "rows": [
+    {
+      "process": "LsaIso.exe",
+      "vector": [
+        2.2516291673878226,
+        0.0,
+        0.36,
+        0.108,
+        0.0
+      ],
+      "source": "Memory_Findings_20260628_121542.json",
+      "reason": "SECURITY-PROC key material"
+    },
+    {
+      "process": "LsaIso.exe",
+      "vector": [
+        2.2516291673878226,
+        0.0,
+        0.37,
+        0.068,
+        0.0
+      ],
+      "source": "Memory_Findings_20260628_175621.json",
+      "reason": "SECURITY-PROC key material"
+    },
+    {
+      "process": "taskhostw.exe",
+      "vector": [
+        2.725480556997868,
+        0.0,
+        0.42,
+        0.936,
+        0.0
+      ],
+      "source": "Memory_Findings_20260628_121542.json",
+      "reason": "Structured system data buffer (task scheduler / COM / audio state): CV=234% (non-uniform), ASCII=42% (printable), AdjAnonExec=False, MZ-remnant=False -- all Module 13 signals are in the benign column"
+    },
+    {
+      "process": "taskhostw.exe",
+      "vector": [
+        2.725480556997868,
+        0.0,
+        0.46,
+        0.792,
+        0.0
+      ],
+      "source": "Memory_Findings_20260628_121542.json",
+      "reason": "Structured system data buffer (task scheduler / COM / audio state): CV=198% (non-uniform), ASCII=46% (printable), AdjAnonExec=False, MZ-remnant=False -- all Module 13 signals are in the benign column"
+    },
+    {
+      "process": "taskhostw.exe",
+      "vector": [
+        2.725480556997868,
+        0.0,
+        0.42,
+        0.76,
+        0.0
+      ],
+      "source": "Memory_Findings_20260628_121542.json",
+      "reason": "Structured system data buffer (task scheduler / COM / audio state): CV=190% (non-uniform), ASCII=42% (printable), AdjAnonExec=False, MZ-remnant=False -- all Module 13 signals are in the benign column"
+    },
+    {
+      "process": "MsMpEng.exe",
+      "vector": [
+        2.521640636343318,
+        0.0,
+        0.44,
+        0.952,
+        0.0
+      ],
+      "source": "Memory_Findings_20260628_121542.json",
+      "reason": "Structured system data buffer (task scheduler / COM / audio state): CV=238% (non-uniform), ASCII=44% (printable), AdjAnonExec=False, MZ-remnant=False -- all Module 13 signals are in the benign column"
+    },
+    {
+      "process": "MsMpEng.exe",
+      "vector": [
+        2.521640636343318,
+        0.0,
+        0.33,
+        0.892,
+        0.0
+      ],
+      "source": "Memory_Findings_20260628_121542.json",
+      "reason": "Structured system data buffer (task scheduler / COM / audio state): CV=223% (non-uniform), ASCII=33% (printable), AdjAnonExec=False, MZ-remnant=False -- all Module 13 signals are in the benign column"
+    },
+    {
+      "process": "MsMpEng.exe",
+      "vector": [
+        2.521640636343318,
+        0.0,
+        0.36,
+        0.76,
+        0.0
+      ],
+      "source": "Memory_Findings_20260628_121542.json",
+      "reason": "Structured system data buffer (task scheduler / COM / audio state): CV=190% (non-uniform), ASCII=36% (printable), AdjAnonExec=False, MZ-remnant=False -- all Module 13 signals are in the benign column"
+    },
+    {
+      "process": "MsMpEng.exe",
+      "vector": [
+        2.521640636343318,
+        0.0,
+        0.28,
+        0.712,
+        0.0
+      ],
+      "source": "Memory_Findings_20260628_121542.json",
+      "reason": "Binary non-ASCII data buffer (PCM audio / index / font data): CV=178% (non-uniform), ASCII=28% (printable), AdjAnonExec=False, MZ-remnant=False -- all Module 13 signals are in the benign column"
+    },
+    {
+      "process": "MsMpEng.exe",
+      "vector": [
+        2.521640636343318,
+        0.0,
+        0.33,
+        0.708,
+        0.0
+      ],
+      "source": "Memory_Findings_20260628_121542.json",
+      "reason": "Structured system data buffer (task scheduler / COM / audio state): CV=177% (non-uniform), ASCII=33% (printable), AdjAnonExec=False, MZ-remnant=False -- all Module 13 signals are in the benign column"
+    },
+    {
+      "process": "MsMpEng.exe",
+      "vector": [
+        2.521640636343318,
+        0.0,
+        0.39,
+        0.884,
+        0.0
+      ],
+      "source": "Memory_Findings_20260628_121542.json",
+      "reason": "Structured system data buffer (task scheduler / COM / audio state): CV=221% (non-uniform), ASCII=39% (printable), AdjAnonExec=False, MZ-remnant=False -- all Module 13 signals are in the benign column"
+    },
+    {
+      "process": "MsMpEng.exe",
+      "vector": [
+        2.521640636343318,
+        0.0,
+        0.57,
+        0.684,
+        0.0
+      ],
+      "source": "Memory_Findings_20260628_121542.json",
+      "reason": "Structured system data buffer (task scheduler / COM / audio state): CV=171% (non-uniform), ASCII=57% (printable), AdjAnonExec=False, MZ-remnant=False -- all Module 13 signals are in the benign column"
+    },
+    {
+      "process": "MsMpEng.exe",
+      "vector": [
+        2.521640636343318,
+        0.0,
+        0.34,
+        0.716,
+        0.0
+      ],
+      "source": "Memory_Findings_20260628_121542.json",
+      "reason": "Structured system data buffer (task scheduler / COM / audio state): CV=179% (non-uniform), ASCII=34% (printable), AdjAnonExec=False, MZ-remnant=False -- all Module 13 signals are in the benign column"
+    },
+    {
+      "process": "MsMpEng.exe",
+      "vector": [
+        2.521640636343318,
+        0.0,
+        0.34,
+        0.712,
+        0.0
+      ],
+      "source": "Memory_Findings_20260628_121542.json",
+      "reason": "Structured system data buffer (task scheduler / COM / audio state): CV=178% (non-uniform), ASCII=34% (printable), AdjAnonExec=False, MZ-remnant=False -- all Module 13 signals are in the benign column"
+    },
+    {
+      "process": "MsMpEng.exe",
+      "vector": [
+        2.521640636343318,
+        0.0,
+        0.32,
+        0.712,
+        0.0
+      ],
+      "source": "Memory_Findings_20260628_121542.json",
+      "reason": "Structured system data buffer (task scheduler / COM / audio state): CV=178% (non-uniform), ASCII=32% (printable), AdjAnonExec=False, MZ-remnant=False -- all Module 13 signals are in the benign column"
+    },
+    {
+      "process": "MsMpEng.exe",
+      "vector": [
+        2.521640636343318,
+        0.0,
+        0.32,
+        0.724,
+        0.0
+      ],
+      "source": "Memory_Findings_20260628_121542.json",
+      "reason": "Structured system data buffer (task scheduler / COM / audio state): CV=181% (non-uniform), ASCII=32% (printable), AdjAnonExec=False, MZ-remnant=False -- all Module 13 signals are in the benign column"
+    },
+    {
+      "process": "MsMpEng.exe",
+      "vector": [
+        2.521640636343318,
+        0.0,
+        0.37,
+        0.716,
+        0.0
+      ],
+      "source": "Memory_Findings_20260628_121542.json",
+      "reason": "Structured system data buffer (task scheduler / COM / audio state): CV=179% (non-uniform), ASCII=37% (printable), AdjAnonExec=False, MZ-remnant=False -- all Module 13 signals are in the benign column"
+    },
+    {
+      "process": "MsMpEng.exe",
+      "vector": [
+        2.521640636343318,
+        0.0,
+        0.57,
+        0.768,
+        0.0
+      ],
+      "source": "Memory_Findings_20260628_121542.json",
+      "reason": "Structured system data buffer (task scheduler / COM / audio state): CV=192% (non-uniform), ASCII=57% (printable), AdjAnonExec=False, MZ-remnant=False -- all Module 13 signals are in the benign column"
+    },
+    {
+      "process": "MsMpEng.exe",
+      "vector": [
+        2.521640636343318,
+        0.0,
+        0.4,
+        0.68,
+        0.0
+      ],
+      "source": "Memory_Findings_20260628_121542.json",
+      "reason": "Structured system data buffer (task scheduler / COM / audio state): CV=170% (non-uniform), ASCII=40% (printable), AdjAnonExec=False, MZ-remnant=False -- all Module 13 signals are in the benign column"
+    },
+    {
+      "process": "MsMpEng.exe",
+      "vector": [
+        2.521640636343318,
+        0.0,
+        0.47,
+        0.848,
+        0.0
+      ],
+      "source": "Memory_Findings_20260628_121542.json",
+      "reason": "Structured system data buffer (task scheduler / COM / audio state): CV=212% (non-uniform), ASCII=47% (printable), AdjAnonExec=False, MZ-remnant=False -- all Module 13 signals are in the benign column"
+    },
+    {
+      "process": "MsMpEng.exe",
+      "vector": [
+        2.521640636343318,
+        0.0,
+        0.42,
+        0.764,
+        0.0
+      ],
+      "source": "Memory_Findings_20260628_121542.json",
+      "reason": "Structured system data buffer (task scheduler / COM / audio state): CV=191% (non-uniform), ASCII=42% (printable), AdjAnonExec=False, MZ-remnant=False -- all Module 13 signals are in the benign column"
+    },
+    {
+      "process": "MsMpEng.exe",
+      "vector": [
+        2.521640636343318,
+        0.0,
+        0.43,
+        0.864,
+        0.0
+      ],
+      "source": "Memory_Findings_20260628_121542.json",
+      "reason": "Structured system data buffer (task scheduler / COM / audio state): CV=216% (non-uniform), ASCII=43% (printable), AdjAnonExec=False, MZ-remnant=False -- all Module 13 signals are in the benign column"
+    },
+    {
+      "process": "MsMpEng.exe",
+      "vector": [
+        2.521640636343318,
+        0.0,
+        0.51,
+        0.612,
+        0.0
+      ],
+      "source": "Memory_Findings_20260628_121542.json",
+      "reason": "Structured system data buffer (task scheduler / COM / audio state): CV=153% (non-uniform), ASCII=51% (printable), AdjAnonExec=False, MZ-remnant=False -- all Module 13 signals are in the benign column"
+    },
+    {
+      "process": "MsMpEng.exe",
+      "vector": [
+        2.521640636343318,
+        0.0,
+        0.53,
+        0.7,
+        0.0
+      ],
+      "source": "Memory_Findings_20260628_121542.json",
+      "reason": "Structured system data buffer (task scheduler / COM / audio state): CV=175% (non-uniform), ASCII=53% (printable), AdjAnonExec=False, MZ-remnant=False -- all Module 13 signals are in the benign column"
+    },
+    {
+      "process": "MsMpEng.exe",
+      "vector": [
+        2.521640636343318,
+        0.0,
+        0.48,
+        0.676,
+        0.0
+      ],
+      "source": "Memory_Findings_20260628_121542.json",
+      "reason": "Structured system data buffer (task scheduler / COM / audio state): CV=169% (non-uniform), ASCII=48% (printable), AdjAnonExec=False, MZ-remnant=False -- all Module 13 signals are in the benign column"
+    },
+    {
+      "process": "MsMpEng.exe",
+      "vector": [
+        2.521640636343318,
+        0.0,
+        0.5,
+        0.844,
+        0.0
+      ],
+      "source": "Memory_Findings_20260628_121542.json",
+      "reason": "Structured system data buffer (task scheduler / COM / audio state): CV=211% (non-uniform), ASCII=50% (printable), AdjAnonExec=False, MZ-remnant=False -- all Module 13 signals are in the benign column"
+    },
+    {
+      "process": "MsMpEng.exe",
+      "vector": [
+        2.521640636343318,
+        0.0,
+        0.56,
+        0.544,
+        0.0
+      ],
+      "source": "Memory_Findings_20260628_121542.json",
+      "reason": "Structured system data buffer (task scheduler / COM / audio state): CV=136% (non-uniform), ASCII=56% (printable), AdjAnonExec=False, MZ-remnant=False -- all Module 13 signals are in the benign column"
+    },
+    {
+      "process": "MsMpEng.exe",
+      "vector": [
+        2.521640636343318,
+        0.0,
+        0.56,
+        0.724,
+        0.0
+      ],
+      "source": "Memory_Findings_20260628_121542.json",
+      "reason": "Structured system data buffer (task scheduler / COM / audio state): CV=181% (non-uniform), ASCII=56% (printable), AdjAnonExec=False, MZ-remnant=False -- all Module 13 signals are in the benign column"
+    },
+    {
+      "process": "MsMpEng.exe",
+      "vector": [
+        2.521640636343318,
+        0.0,
+        0.5,
+        0.896,
+        0.0
+      ],
+      "source": "Memory_Findings_20260628_121542.json",
+      "reason": "Structured system data buffer (task scheduler / COM / audio state): CV=224% (non-uniform), ASCII=50% (printable), AdjAnonExec=False, MZ-remnant=False -- all Module 13 signals are in the benign column"
+    },
+    {
+      "process": "MsMpEng.exe",
+      "vector": [
+        2.521640636343318,
+        0.0,
+        0.59,
+        0.66,
+        0.0
+      ],
+      "source": "Memory_Findings_20260628_121542.json",
+      "reason": "Structured system data buffer (task scheduler / COM / audio state): CV=165% (non-uniform), ASCII=59% (printable), AdjAnonExec=False, MZ-remnant=False -- all Module 13 signals are in the benign column"
+    },
+    {
+      "process": "AsusAppService",
+      "vector": [
+        3.0391486719030705,
+        0.0,
+        0.47,
+        0.408,
+        0.0
+      ],
+      "source": "Memory_Findings_20260628_175621.json",
+      "reason": "Structured system data buffer (task scheduler / COM / audio state): CV=102% (non-uniform), ASCII=47% (printable), AdjAnonExec=False, MZ-remnant=False -- all Module 13 signals are in the benign column"
+    },
+    {
+      "process": "NgcIso.exe",
+      "vector": [
+        2.584962500721156,
+        0.0,
+        0.36,
+        0.064,
+        0.0
+      ],
+      "source": "Memory_Findings_20260628_175621.json",
+      "reason": "SECURITY-PROC key material"
+    },
+    {
+      "process": "NgcIso.exe",
+      "vector": [
+        2.584962500721156,
+        0.0,
+        0.35,
+        0.108,
+        0.0
+      ],
+      "source": "Memory_Findings_20260628_175621.json",
+      "reason": "SECURITY-PROC key material"
+    },
+    {
+      "process": "Sysmon64.exe",
+      "vector": [
+        2.75,
+        0.0,
+        0.45,
+        0.444,
+        0.0
+      ],
+      "source": "Memory_Findings_20260628_175621.json",
+      "reason": "Structured system data buffer (task scheduler / COM / audio state): CV=111% (non-uniform), ASCII=45% (printable), AdjAnonExec=False, MZ-remnant=False -- all Module 13 signals are in the benign column"
+    }
+  ]
+}
