@@ -214,9 +214,15 @@ function Invoke-ProcessHunt {
         $parentName = $parentMap[[int]$wmi.ParentProcessId]
 
         # --- Hidden process detection ---
+        # A name/wildcard match alone does NOT verify identity -- malware naming itself
+        # svchost.exe (or matching Mp*/Asus*/Intel* etc) would pass this check too, same
+        # masquerade class as Invoke-Eradication.ps1's Test-Protected path-verification fix.
+        # So a name match downgrades severity (expected PPL/vendor self-protection is the
+        # common case) rather than fully suppressing the finding -- it must stay visible for
+        # path/signature corroboration downstream, never silently invisible.
         $nameAllowed = ($name -in $coreAllowed) -or
                        ($coreAllowedWildcards | Where-Object { $name -like $_ })
-        if (-not $apiDict.ContainsKey($wmi.ProcessId) -and -not $nameAllowed) {
+        if (-not $apiDict.ContainsKey($wmi.ProcessId)) {
             # Re-verify to kill enumeration-race false positives. The Get-Process and
             # WMI snapshots are taken at slightly different times; any process that
             # STARTED in that window is in WMI but not the API snapshot - that is a
@@ -231,7 +237,11 @@ function Invoke-ProcessHunt {
                 $alive = Get-CimInstance Win32_Process -Filter "ProcessId=$($wmi.ProcessId)" -ErrorAction SilentlyContinue
                 if ($alive) { $stillHidden = $true }   # invisible to API, still alive in WMI = truly hidden
             }
-            if ($stillHidden) {
+            if ($stillHidden -and $nameAllowed) {
+                Add-Finding -Type "Hidden Process" -Target "PID: $($wmi.ProcessId)" `
+                    -Details "Hidden from standard API (re-verified). Name: $name -- matches an expected self-protecting process name (PPL/vendor tooling); a name match is not identity proof, verify on-disk path + signature before treating as a rootkit indicator." `
+                    -Severity "Low" -Mitre $Global:MITRE.HiddenProcess
+            } elseif ($stillHidden) {
                 Add-Finding -Type "Hidden Process" -Target "PID: $($wmi.ProcessId)" `
                     -Details "Hidden from standard API (re-verified). Name: $name" -Severity "High" -Mitre $Global:MITRE.HiddenProcess
             }

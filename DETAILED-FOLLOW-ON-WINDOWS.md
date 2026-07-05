@@ -6,6 +6,37 @@ Generic playbook for pivoting from IR Toolkit output into live-host triage.
 
 ---
 
+## Automation Status (as of 2026-07-05)
+
+What `playbooks/windows/investigation/` (the second-pass ML/correlation engine) currently
+automates from this guide, by section:
+
+- **§5 Shellcode Thread Investigation** and **§26 Module 5 VAD Triage** — `modules/
+  shellcode_thread.py` reproduces the VAD-type severity table exactly (`anon_exec` = High,
+  `image` = Medium, `unmapped` = FP, JIT-consistent noted separately).
+- **§14 Suspicious Parent-Child Chains** — `modules/ppid_orphan.py` + `process_tree.py` +
+  `chain_builder.py` + `ttp_patterns._match_ppid_spoof_with_exec` reconstruct lineage and flag
+  PPID spoofing paired with code execution.
+- **§12/13 Credential Access (LSASS)** — `ttp_patterns._match_lsass_credential_access` flags a
+  thread anomaly in `lsass.exe` corroborated by an independent YARA/MZ signal.
+- **§25 Memory Evasion Triage** — Direct Syscall (Module 20, `modules/direct_syscall.py`) is
+  fully automated, including the per-PID aggregation this section's own FP note describes.
+- **§3 WMI Persistence** and **§18 LOLBin Abuse** — pattern matchers exist
+  (`ttp_patterns._match_wmi_persistence`, `_match_lolbin_loader`) for once event-log data is fed in.
+- **§4 AMSI In-Memory Patch** and **§10 Memory Carve** — the anon-exec-vs-file-backed
+  discrimination and carve-worthiness signal both come from the same VAD classification the
+  modules above already compute.
+- **Quick Reference FP patterns** — the ML noise filter (`models/noise_filter.py`) and the
+  advisory-text-stripping fix in `injected_memory.py`/`shellcode_thread.py` cover several rows
+  (task-scheduler/COM/audio-buffer background noise, "corroborate via..." text no longer
+  read as evidence).
+
+Everything else in this guide (live-host queries — process/service/task/registry/event-log
+triage, sigcheck, ADS, eradication, IOCs.json review) runs outside this offline engine by
+design — it consumes already-collected JSON, it never queries the live host directly.
+
+---
+
 ## How to use this guide
 
 ```

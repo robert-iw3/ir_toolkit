@@ -13,17 +13,25 @@ groups by PID, then for each PID:
      for each finding type (dormant beacon, shellcode thread, ntdll hook, etc.)
      and collects Dimension objects (positive/negative).
 
-  3. Verdict assembly:
-     - 3+ independent positive dimensions -> TRUE_POSITIVE
-     - 0 positive dimensions             -> FALSE_POSITIVE (with documented rationale)
-     - 1-2 positive dimensions           -> UNDETERMINED (more evidence needed)
+  3. Verdict assembly (tiered evidence model -- see planning/CURRENT-STATE-AND-
+     OPEN-ITEMS.md §4 design note for the full rationale):
+     - Tier 0 (INVALID) dimensions excluded before scoring entirely (category error).
+     - Any Tier 1 (DEFINITIVE) positive -> TRUE_POSITIVE immediately (single
+       structurally-unforgeable fact settles it). Pure additive shortcut on top of
+       the rule below -- never removes a case that used to reach TP.
+     - Otherwise, 3+ Tier 1/2 positive dimensions -> TRUE_POSITIVE (Tier 3 positives
+       never count toward this floor, regardless of how many exist).
+     - 0 countable (Tier 1/2) positive dimensions AND no Tier 3 positives either
+       -> FALSE_POSITIVE (with documented rationale).
+     - Otherwise -> UNDETERMINED (more evidence needed; Tier-3-only positives are
+       noted as "capability without demonstrated use", not closed either way).
 """
 from __future__ import annotations
 import re
 from collections import defaultdict
 from typing import Dict, List, Optional, Tuple
 
-from .verdict import Verdict, VerdictLabel, Dimension, TP_DIMENSION_THRESHOLD
+from .verdict import Verdict, VerdictLabel, Dimension, Tier, TP_DIMENSION_THRESHOLD
 from .fp_closure import build_fp_closure, build_noise_closure
 from .models.noise_filter import classify_noise
 from .modules import (
@@ -37,6 +45,7 @@ from .modules import (
     clr_assembly,
     com_vtable,
     direct_syscall,
+    handle_attribution,
 )
 
 # Map finding Type string -> module number for routing
@@ -50,14 +59,16 @@ _TYPE_TO_MODULE: Dict[str, int] = {
     'Injected Memory Cap Reached':             3,
     'Process Hollowing Indicator (Memory)':    3,
     'PPID Orphan (Memory)':                   17,
-    'PEB CommandLine Pointer (Memory)':        15,
-    'CLR Execute-Assembly (Memory)':           16,
-    'COM VTable Hijacking (Memory)':           18,
-    'YARA Hit (Memory)':                       19,
-    'Direct Syscall Execution':                20,
-    'Hidden Process (Memory)':                 99,  # handled inline
-    'Suspicious Command Line (Memory)':        99,
-    'External Network Connection':              4,  # context only
+    'PEB CommandLine Pointer (Memory)':       15,
+    'CLR Execute-Assembly (Memory)':          16,
+    'COM VTable Hijacking (Memory)':          18,
+    'YARA Hit (Memory)':                      19,
+    'Direct Syscall Execution':               20,
+    'Cross-Process Handle (Memory)':          23,
+    'Cross-Process Thread Handle (Memory)':   23,
+    'Hidden Process (Memory)':                99,  # handled inline
+    'Suspicious Command Line (Memory)':       99,
+    'External Network Connection':             4,  # context only
 }
 
 # NOTE: This engine detects STRUCTURAL and BEHAVIORAL anomalies in memory.
@@ -176,6 +187,8 @@ def _investigate_pid(pid: int, pid_findings: List[dict],
     all_dims: List[Dimension] = []
     m13_dims: List[Dimension] = []
     syscall_findings: List[dict] = []
+    uncorroborated_injected: List[dict] = []
+    handle_findings: List[dict] = []
 
     for finding in pid_findings:
         ftype   = finding.get('Type', '')
@@ -197,7 +210,18 @@ def _investigate_pid(pid: int, pid_findings: List[dict],
             all_dims.extend(ekko_sleep.investigate(finding, m13_dims=m13_dims))
 
         elif mod_num == 3:
-            all_dims.extend(injected_memory.investigate(finding, all_findings=all_findings))
+            d = injected_memory.investigate(finding, all_findings=all_findings)
+            if d:
+                all_dims.extend(d)
+            else:
+                # No per-region corroboration (MZ/thread/YARA) -- may still be
+                # shared-section/high-user-space (already fully handled, empty
+                # is correct) or a genuine uncorroborated anon-exec region.
+                # Route true uncorroborated candidates to the per-PID aggregate
+                # below rather than silently dropping them or double-counting.
+                is_candidate, _ = injected_memory.is_uncorroborated(finding)
+                if is_candidate:
+                    uncorroborated_injected.append(finding)
 
         elif mod_num == 17:
             all_dims.extend(ppid_orphan.investigate(finding))
@@ -220,38 +244,95 @@ def _investigate_pid(pid: int, pid_findings: List[dict],
             # pattern; scoring each independently fabricates dimension count.
             syscall_findings.append(finding)
 
+        elif mod_num == 23:
+            # Aggregated per-PID below, not per-finding -- a single holder can touch
+            # dozens of distinct target PIDs (lsass.exe's session bookkeeping alone
+            # is ~30 on a real host); scoring each target independently fabricates
+            # dimension count the same way Module 20's per-region scoring did.
+            handle_findings.append(finding)
+
         elif mod_num == 99:
             all_dims.extend(_investigate_misc(finding))
 
     if syscall_findings:
         all_dims.extend(direct_syscall.investigate_pid(syscall_findings, pid_findings))
 
-    # -------------------------------------------------------------------------
-    # Step 3: Verdict assembly
-    # -------------------------------------------------------------------------
+    if handle_findings:
+        all_dims.extend(handle_attribution.investigate_pid(handle_findings))
+
+    if uncorroborated_injected:
+        all_dims.extend(injected_memory.investigate_uncorroborated_pid(uncorroborated_injected))
+
+    return _assemble_verdict(pid, process, all_dims, pid_findings)
+
+
+def _assemble_verdict(pid: int, process: str, all_dims: List[Dimension],
+                      pid_findings: List[dict]) -> Verdict:
+    """Step 3: Verdict assembly (tiered evidence model). Factored out of
+    _investigate_pid so Step 4 (cross-PID relationship propagation, see
+    _propagate_handle_corroboration) can re-run assembly with an added dimension
+    without duplicating the tiering rules."""
     all_dims = _dedup_dimensions(all_dims)
+    # Tier 0 (INVALID): category error, not a benign-vs-malicious judgment -- excluded
+    # before scoring entirely. No module emits Tier 0 yet (that filtering currently
+    # happens at the data-extraction layer, e.g. memory_enrich.py's beyond-shadow-of-
+    # doubt filters); this is forward-compatible plumbing for when one does.
+    all_dims = [d for d in all_dims if d.tier != Tier.INVALID]
     pos_dims = [d for d in all_dims if d.positive]
     neg_dims = [d for d in all_dims if not d.positive]
-    pos_count = len(pos_dims)
+
+    # Tier 1 (DEFINITIVE): a single structurally-unforgeable positive settles the
+    # question immediately. Pure ADDITIVE shortcut on top of the threshold rule below
+    # -- it can only turn a case that used to be UNDETERMINED (diluted into a dimension
+    # count that never reached 3) into the TRUE_POSITIVE it should have been; it never
+    # removes a verdict that already reached TP via the threshold rule. No module
+    # tags Tier 1 yet either, so this has zero effect until one is migrated to it.
+    tier1_pos = [d for d in pos_dims if d.tier == Tier.DEFINITIVE]
+    if tier1_pos:
+        rationale = (
+            f'TRUE POSITIVE: PID {pid} ({process}) -- Tier 1 (DEFINITIVE) evidence: '
+            f'a single structurally-unforgeable fact settles this.\n\n'
+            + '\n'.join(f'  [TP-TIER1] M{d.source_module} {d.name}: {d.rationale}' for d in tier1_pos)
+        )
+        other_pos = [d for d in pos_dims if d not in tier1_pos]
+        if other_pos:
+            rationale += '\n\nOther positive dimensions:\n' + '\n'.join(
+                f'  [TP] M{d.source_module} {d.name}: {d.rationale}' for d in other_pos)
+        if neg_dims:
+            rationale += '\n\nNegative dimensions (documented):\n' + '\n'.join(
+                f'  [FP] M{d.source_module} {d.name}: {d.rationale}' for d in neg_dims)
+        return Verdict(
+            pid=pid, process=process, label=VerdictLabel.TRUE_POSITIVE,
+            dimensions=all_dims, positive_count=len(pos_dims),
+            negative_count=len(neg_dims), rationale=rationale,
+            findings=pid_findings,
+        )
+
+    # Tier 3 (WEAK/STRUCTURAL): capability without demonstrated use can NEVER alone
+    # reach TP, regardless of count -- excluded from the threshold-3 count below. No
+    # module tags Tier 3 yet, so countable_pos == pos_dims until one is migrated.
+    countable_pos = [d for d in pos_dims if d.tier != Tier.WEAK_STRUCTURAL]
+    tier3_only_pos = [d for d in pos_dims if d.tier == Tier.WEAK_STRUCTURAL]
+    pos_count = len(countable_pos)
 
     if pos_count >= TP_DIMENSION_THRESHOLD:
-        unique_mods = len({d.source_module for d in pos_dims})
+        unique_mods = len({d.source_module for d in countable_pos})
         rationale = (
             f'TRUE POSITIVE: PID {pid} ({process}) -- '
             f'{pos_count} independent positive dimension(s) across {unique_mods} module(s).\n\n'
-            + '\n'.join(f'  [TP] M{d.source_module} {d.name}: {d.rationale}' for d in pos_dims)
+            + '\n'.join(f'  [TP] M{d.source_module} {d.name}: {d.rationale}' for d in countable_pos)
         )
         if neg_dims:
             rationale += '\n\nNegative dimensions (documented):\n'
             rationale += '\n'.join(f'  [FP] M{d.source_module} {d.name}: {d.rationale}' for d in neg_dims)
         return Verdict(
             pid=pid, process=process, label=VerdictLabel.TRUE_POSITIVE,
-            dimensions=all_dims, positive_count=pos_count,
+            dimensions=all_dims, positive_count=len(pos_dims),
             negative_count=len(neg_dims), rationale=rationale,
             findings=pid_findings,
         )
 
-    elif pos_count == 0:
+    elif pos_count == 0 and not tier3_only_pos:
         return build_fp_closure(pid, process, all_dims, pid_findings)
 
     else:
@@ -264,9 +345,15 @@ def _investigate_pid(pid: int, pid_findings: List[dict],
                 for d in all_dims
             )
         )
+        if tier3_only_pos:
+            rationale += (
+                f'\n\n{len(tier3_only_pos)} Tier-3 (weak/structural) positive dimension(s) present -- '
+                'capability without demonstrated use; cannot alone justify TP. Needs more Tier-2 '
+                'evidence (enrichment, handle-walk, repeat capture) to progress.'
+            )
         return Verdict(
             pid=pid, process=process, label=VerdictLabel.UNDETERMINED,
-            dimensions=all_dims, positive_count=pos_count,
+            dimensions=all_dims, positive_count=len(pos_dims),
             negative_count=len(neg_dims), rationale=rationale,
             findings=pid_findings,
         )
@@ -336,10 +423,73 @@ def _investigate_misc(finding: dict) -> List[Dimension]:
     return []
 
 
+_HANDLE_REL_RE = re.compile(r'^PID\s+(\d+)\s+\([^)]+\)\s*->\s*Target PID\s+(\d+)')
+
+
+def _extract_handle_relationships(findings: List[dict]) -> Dict[int, set]:
+    """{holder_pid: {target_pid, ...}} from Module 23's Cross-Process Handle/Thread
+    Handle findings. Read directly from the raw findings (not from Dimension
+    objects, which only carry aggregate counts) so this stays decoupled from
+    handle_attribution.py's internal dimension shape."""
+    rel: Dict[int, set] = {}
+    for f in findings:
+        if f.get('Type') not in ('Cross-Process Handle (Memory)', 'Cross-Process Thread Handle (Memory)'):
+            continue
+        m = _HANDLE_REL_RE.match(f.get('Target', ''))
+        if not m:
+            continue
+        holder_pid, target_pid = int(m.group(1)), int(m.group(2))
+        rel.setdefault(holder_pid, set()).add(target_pid)
+    return rel
+
+
+def _propagate_handle_corroboration(verdicts: List[Verdict], findings: List[dict]) -> List[Verdict]:
+    """Step 4: cross-PID relationship propagation (single pass, not iterated to a
+    fixed point -- bounded and simple to reason about; extend later if cascading
+    turns out to matter). For every holder->target handle relationship (Module 23),
+    if the target's OWN independently-computed verdict is TRUE_POSITIVE, that is
+    new evidence for the holder: a structurally-unforgeable handle relationship
+    into a process ALREADY confirmed compromised is exactly 'tracing a lead to see
+    where it goes' rather than treating each PID's verdict as an island.
+
+    Deliberately does NOT go the other direction (a clean-looking target does not
+    exonerate the holder -- a capability finding into an innocent-looking process
+    is still a capability finding; see detection-design memory Rule 4/4b and the
+    'assume compromise, prove otherwise' directive)."""
+    rel = _extract_handle_relationships(findings)
+    if not rel:
+        return verdicts
+
+    verdict_by_pid = {v.pid: v for v in verdicts}
+    out = []
+    for v in verdicts:
+        targets = rel.get(v.pid)
+        if not targets:
+            out.append(v)
+            continue
+        confirmed_targets = [t for t in sorted(targets)
+                             if t in verdict_by_pid and verdict_by_pid[t].label == VerdictLabel.TRUE_POSITIVE]
+        if not confirmed_targets:
+            out.append(v)
+            continue
+        corroboration = Dimension(
+            name='Module23_CrossPID_TargetCorroboration', positive=True, source_module=23,
+            tier=Tier.STRONG_BEHAVIORAL,
+            rationale=(f'Holds a Module 23 cross-process handle into PID(s) '
+                       f'{", ".join(str(t) for t in confirmed_targets)}, each independently confirmed '
+                       'TRUE_POSITIVE on its own separate evidence -- tracing this structurally-'
+                       'unforgeable relationship to an already-confirmed-compromised target is new '
+                       'corroboration for this holder, not just an isolated capability claim.')
+        )
+        out.append(_assemble_verdict(v.pid, v.process, v.dimensions + [corroboration], v.findings))
+    return out
+
+
 def investigate(findings: List[dict]) -> List[Verdict]:
     """Accept findings from memory_forensic.py, return one Verdict per unique PID."""
     pid_groups = _group_by_pid(findings)
-    return [
+    verdicts = [
         _investigate_pid(pid, pid_findings, findings)
         for pid, pid_findings in sorted(pid_groups.items())
     ]
+    return _propagate_handle_corroboration(verdicts, findings)

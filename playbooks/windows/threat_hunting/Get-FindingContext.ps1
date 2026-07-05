@@ -566,6 +566,54 @@ foreach ($pidKey in $byPid.Keys) {
     }
 }
 
+# -- Prefetch / Autoruns corroboration for confirmed TP-class findings ---------
+# prefetch_listing.csv (Name/CreationTime/LastWriteTime/Length -- no path, no run
+# count; full .pf parsing is a separate, larger effort) and autoruns_all.csv (has
+# Image Path) are collected by 00_Collect-Forensics.ps1 but were never cross-
+# referenced against anything. Deliberately scoped to ALREADY-confirmed True
+# Positive / Likely True Positive subjects only -- this corroborates a first-
+# execution timeline and autorun-persistence confirmation for things already
+# known-bad, rather than independently asserting a verdict from name matching
+# alone (a LOLBin name in Prefetch, with no path context, is normal Windows
+# background noise on its own -- see the coreAllowed/LISTENER_ALLOWLIST class of
+# mistake this toolkit has repeatedly had to unlearn).
+$prefetchRows = if ($Data.ContainsKey('prefetch_listing')) { $Data['prefetch_listing'] } else { @() }
+$autorunsRows = if ($Data.ContainsKey('autoruns_all'))     { $Data['autoruns_all'] }     else { @() }
+if ($prefetchRows.Count -or $autorunsRows.Count) {
+    foreach ($r in $results) {
+        if ($r.Verdict -notin @('True Positive','Likely True Positive')) { continue }
+        $subjectPath = [string]$r.SubjectPath
+        $baseName = if ($subjectPath) { Split-Path -Leaf $subjectPath } else { $null }
+        if (-not $baseName) {
+            $fm = [regex]::Match(($r.Target + ' ' + $r.Details), '(?i)\b([\w.\-]+\.exe)\b')
+            if ($fm.Success) { $baseName = $fm.Groups[1].Value }
+        }
+        if (-not $baseName) { continue }
+        # Prefetch filenames are '<ORIGINAL_FILENAME_INCL_EXTENSION>-<8-hex-hash>.pf'
+        # (e.g. 'EVIL.EXE-A1B2C3D4.pf') -- match against the full base name (with its
+        # own extension), not the extension-stripped stem, or a real .exe name never
+        # matches its own prefetch entry at all.
+        if ($prefetchRows.Count) {
+            try {
+                $pfHits = @($prefetchRows | Where-Object { $_.Name -match "(?i)^$([regex]::Escape($baseName))-" })
+                if ($pfHits.Count) {
+                    $earliest = ($pfHits | Sort-Object { [datetime]$_.CreationTime } | Select-Object -First 1).CreationTime
+                    $latest   = ($pfHits | Sort-Object { [datetime]$_.LastWriteTime } -Descending | Select-Object -First 1).LastWriteTime
+                    $note = "PREFETCH: first execution $earliest, most recent run $latest ($($pfHits.Count) prefetch entr$(if($pfHits.Count -eq 1){'y'}else{'ies'}))"
+                    if ($r.Notes) { $r.Notes = "$($r.Notes); $note" } else { $r.Notes = $note }
+                }
+            } catch {}
+        }
+        if ($autorunsRows.Count -and $subjectPath) {
+            $arHits = @($autorunsRows | Where-Object { $_.'Image Path' -and $_.'Image Path'.Trim().ToLower() -eq $subjectPath.Trim().ToLower() })
+            foreach ($ar in $arHits) {
+                $note = "AUTORUNS: persists via $($ar.'Entry Location') [$($ar.Category)]$(if($ar.Enabled -eq 'disabled'){' (currently disabled)'})"
+                if ($r.Notes) { $r.Notes = "$($r.Notes); $note" } else { $r.Notes = $note }
+            }
+        }
+    }
+}
+
 # -- Outputs into the host folder ----------------------------------------------
 $order   = @{ 'True Positive'=0; 'Likely True Positive'=1; 'Indeterminate'=2; 'Likely False Positive'=3; 'False Positive'=4 }
 $stamp   = Get-Date -Format 'yyyyMMdd_HHmmss'

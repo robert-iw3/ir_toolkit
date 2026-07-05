@@ -28,6 +28,24 @@ Detection modules:
   17. PPID orphan / spoof      -- missing parent or parent created after child
   18. COM VTable hijacking     -- image-backed data pointer into anonymous exec region
   19. YARA memory scan         -- staged rule sets per-process, crash-isolated worker
+  23. Cross-process handle/thread attribution -- handle-table walk correlates
+      va-object against every other process's EPROCESS/ETHREAD address; a
+      structurally unforgeable Tier-1 evidence source (cannot be spoofed by name
+      or path the way a cmdline or file path can)
+  24. DLL sideloading         -- module loaded from non-system path whose name
+      collides with a well-known system DLL (T1574.002)
+  25. Heaven's Gate           -- WOW64 process far-transition to CS=0x33 (64-bit)
+      from anonymous exec memory
+
+Documented, not automated by this engine (see log output at end of run):
+  TTP-006 Dr7 hardware breakpoint hooks, TTP-007 call-stack spoofing -- no
+      vmmpyc or Volatility 3 API surface exists for either; custom plugin
+      development would be required regardless of capture format.
+  TTP-015 token theft/privilege escalation, TTP-016 kernel notify callback /
+      pool-tag anomalies -- covered via Volatility 3 (windows.privileges /
+      windows.callbacks / windows.poolscanner) but only against a full
+      .raw/.mem/.dmp capture through Analyze-Memory.ps1; this live/AFF4 engine
+      has no equivalent API.
 """
 
 import sys, os, re, json, math, struct, threading
@@ -246,6 +264,99 @@ _T1218_LOLBINS = frozenset({'msbuild', 'regasm', 'regsvcs', 'installutil'})
 _PEB_PROC_PARAMS_OFF = 0x20   # PEB->ProcessParameters
 _RTLUP_CMDLINE_OFF   = 0x70   # ProcessParameters->CommandLine (UNICODE_STRING)
 _UNICODE_BUF_OFF     = 0x08   # UNICODE_STRING.Buffer (after Length+MaxLength)
+
+
+def _build_ssn_table(procs):
+    """Derive a {SSN: syscall_name} table LIVE from this image's own ntdll.dll export
+    table -- self-consistent for whatever Windows build is actually in the image, no
+    hardcoded per-build reference data to go stale (SSNs are not ABI-stable across
+    Windows releases). Walks ntdll's clean 'mov r10,rcx; mov eax,SSN' stubs (same
+    prefix Module 12 already parses for hook detection) at each exported Nt*
+    function's address, extracting the SSN embedded at that exact address in THIS
+    image. Built once per run (ntdll's content is identical across every process that
+    has it mapped) and reused for every Direct Syscall Execution finding.
+
+    Confirmed live on a real Windows 11 24H2 image: the syscall instruction is NOT
+    immediately after 'mov eax,SSN' -- modern ntdll inserts a syscall-vs-int-2Eh
+    compatibility check ('test byte [SharedUserData+0x308],1; jnz +N', ~10 bytes) in
+    between. Scan FORWARD in a bounded window after the mov-eax instruction for the
+    syscall opcode instead of assuming a fixed offset, so this stays correct whether
+    that check is present (modern builds) or absent (older/simpler stub shapes)."""
+    _EPILOGUE_WINDOW = 24   # bytes to scan after mov-eax for the syscall opcode
+    for p in procs:
+        try:
+            mods = p.module_list()
+        except Exception:
+            continue
+        ntdll_mod = next((m for m in mods if (getattr(m, 'name', '') or '').lower() == 'ntdll.dll'), None)
+        if not ntdll_mod:
+            continue
+        try:
+            ntdll_bytes = p.memory.read(ntdll_mod.base, ntdll_mod.image_size)
+            eat = ntdll_mod.maps.eat()
+        except Exception:
+            continue
+        if not ntdll_bytes or not eat:
+            continue
+        table = {}
+        for entry in eat.get('e', []):
+            name = entry.get('fn') or ''
+            if not name.startswith('Nt'):
+                continue   # skip Zw* aliases (same address as the Nt* twin) and Rtl*/other exports
+            rva = entry.get('va', 0) - ntdll_mod.base
+            if rva < 0 or rva + 8 + _EPILOGUE_WINDOW > len(ntdll_bytes):
+                continue
+            if ntdll_bytes[rva: rva + 3] != _CLEAN_PREFIX:
+                continue   # hooked or not a syscall stub at all -- don't guess
+            if ntdll_bytes[rva + 3] != _MOV_EAX:
+                continue
+            epilogue = ntdll_bytes[rva + 8: rva + 8 + _EPILOGUE_WINDOW]
+            if _SYSCALL_BYTES not in epilogue:
+                continue   # no syscall reachable within a plausible stub -- don't guess
+            ssn = int.from_bytes(ntdll_bytes[rva + 4: rva + 6], 'little')
+            table.setdefault(ssn, name)
+        if table:
+            return table
+    return {}
+
+
+def _decode_syscall_at(data: bytes, syscall_off: int, ssn_table: dict):
+    """Decode the SSN (and, if a self-pseudo-handle is visible, the target) for ONE
+    syscall instruction at syscall_off within data. Returns
+    (name_or_None, ssn_or_None, target) where target is 'self', 'undetermined', or
+    None (no decodable SSN at all). Only the well-defined -1 pseudo-handle case is
+    treated as confirmed 'self' -- anything else (variable-sourced, or no immediate
+    load visible in the preceding bytes) stays honestly 'undetermined' rather than
+    guessing self vs cross-process from static bytes alone."""
+    # mov r10,rcx (3) + mov eax,imm32 (5) immediately before the syscall (2) = 10 bytes,
+    # matching the exact clean-stub layout Module 12 already validates.
+    mov_eax_pos = syscall_off - 5   # position of the 0xB8 opcode byte
+    stub_start  = mov_eax_pos - 3   # position of the mov-r10,rcx prefix (true stub start)
+    if stub_start < 0:
+        return None, None, None
+    if data[mov_eax_pos] != _MOV_EAX:
+        return None, None, None
+    ssn = int.from_bytes(data[mov_eax_pos + 1: mov_eax_pos + 3], 'little')
+    name = ssn_table.get(ssn)
+
+    target = 'undetermined'
+    # Look for an immediate RCX load (the first syscall argument) in a short window
+    # before the stub -- mov rcx,imm32 (48 C7 C1 + 4 bytes) or mov rcx,imm64
+    # (48 B9 + 8 bytes). -1 in either width is GetCurrentProcess()'s documented
+    # pseudo-handle -- a genuinely confirmed self-target, not a guess.
+    window_start = max(0, stub_start - 32)
+    window = data[window_start: stub_start]
+    imm32 = window.rfind(bytes([0x48, 0xC7, 0xC1]))
+    imm64 = window.rfind(bytes([0x48, 0xB9]))
+    if imm32 != -1 and imm32 + 7 <= len(window):
+        val = int.from_bytes(window[imm32 + 3: imm32 + 7], 'little', signed=True)
+        if val == -1:
+            target = 'self'
+    elif imm64 != -1 and imm64 + 10 <= len(window):
+        val = int.from_bytes(window[imm64 + 2: imm64 + 10], 'little', signed=True)
+        if val == -1:
+            target = 'self'
+    return name, ssn, target
 
 
 def _find_patched_stubs(ntdll_bytes: bytes) -> list:
@@ -703,11 +814,22 @@ try:
         if src_ip.startswith('127.'): continue
         pid_n  = conn.get('pid', 0)
         pname  = (pid_map.get(pid_n, type('', (), {'name': 'unknown'})()).name or '').lower()
-        if any(a in pname for a in LISTENER_ALLOWLIST): continue
-        add('Medium', 'Suspicious Network Listener (Memory)',
-            f'PID {pid_n} ({pname})',
-            f'User process listening on {src_ip}:{src_port} -- potential bind shell.',
-            'T1071 (Application Layer Protocol), T1571 (Non-Standard Port)')
+        # A name-substring match is not identity proof -- malware naming itself svchost.exe or
+        # msedge.exe would pass this too (same masquerade class as the coreAllowed fix in
+        # 01_Process_And_Injection.ps1). Downgrade rather than skip: stay visible so path/
+        # signature/parent-process corroboration downstream can still confirm or refute it.
+        allowlisted = any(a in pname for a in LISTENER_ALLOWLIST)
+        if allowlisted:
+            add('Low', 'Suspicious Network Listener (Memory)',
+                f'PID {pid_n} ({pname})',
+                f'User process listening on {src_ip}:{src_port} -- potential bind shell. Name matches '
+                f'an expected process (allowlisted by name only); verify on-disk path + signature before ruling out.',
+                'T1071 (Application Layer Protocol), T1571 (Non-Standard Port)')
+        else:
+            add('Medium', 'Suspicious Network Listener (Memory)',
+                f'PID {pid_n} ({pname})',
+                f'User process listening on {src_ip}:{src_port} -- potential bind shell.',
+                'T1071 (Application Layer Protocol), T1571 (Non-Standard Port)')
         n += 1
 except Exception as e: log(f'  Listener check error: {e}', 'WARN')
 log(f'  Suspicious listeners: {n}')
@@ -1345,23 +1467,47 @@ else:
 #     Shellcode that bypasses user-mode API hooks issues the 'syscall' opcode
 #     (0x0F 0x05) directly from anonymous private executable memory. Legitimate
 #     code in user space never emits raw syscall instructions outside ntdll.dll.
+#
+#     JIT hosts (.NET CLR, V8, etc.) legitimately emit 'syscall' opcodes in
+#     JIT-compiled stubs -- but a process-name skip here would be a collection-
+#     time blind spot: if an attacker injects into an actual chrome.exe or
+#     pwsh.exe, the finding would never even reach Memory_Findings.json, never
+#     mind downstream correlation. Never skip. Instead: tag JIT-heavy hosts the
+#     same way Module 3 already does (JIT-consistent annotation + a higher
+#     per-process cap with an explicit "cap reached" marker so volume never
+#     silently truncates evidence), and let the correlation layer -- which can
+#     cross-reference this JIT tag against actual cross-process/YARA/MZ
+#     corroboration -- make the call instead of a name check made blind here.
 # ==============================================================================
 log('=== 20. Direct syscall detection ===')
 n_syscall = 0
 _NTDLL_NAME = 'ntdll.dll'
+_SYSCALL_PER_PROC_CAP     = 10
+_SYSCALL_JIT_PER_PROC_CAP = 50
+_SSN_DECODE_LIMIT = 5   # decode at most the first few occurrences per region (bounded work)
+_ssn_table = _build_ssn_table(procs)
+log(f'  SSN table: {len(_ssn_table)} syscall(s) resolved live from this image\'s ntdll.dll')
 for p in procs:
     if is_system_proc(p): continue
-    # JIT hosts (.NET CLR, V8, etc.) legitimately emit 'syscall' opcodes in JIT-compiled stubs.
-    # Scanning them produces hundreds of FPs per process -- skip entirely for Module 20.
-    if p.name.lower().split('.')[0] in JIT_HEAVY_PROCS: continue
     try: vads = p.maps.vad()
     except: continue
     try: mods = p.module_list()
     except: mods = []
+    proc_stem20  = p.name.lower().split('.')[0]
+    is_jit_proc20 = proc_stem20 in JIT_HEAVY_PROCS
+    per_proc_cap20 = _SYSCALL_JIT_PER_PROC_CAP if is_jit_proc20 else _SYSCALL_PER_PROC_CAP
+    proc_syscall = 0
     # Build set of (start, end) ranges for ntdll -- syscalls there are expected.
     ntdll_ranges = {(m.base, m.base + m.image_size) for m in mods
                     if _NTDLL_NAME in (getattr(m, 'name', '') or '').lower()}
     for v in vads:
+        if proc_syscall >= per_proc_cap20:
+            add('Medium', 'Direct Syscall Cap Reached',
+                f'PID {p.pid} ({p.name})',
+                f'Direct syscall region cap ({per_proc_cap20}) reached for this process -- '
+                'additional regions not reported. Re-run with a raised cap if this PID is a confirmed TP.',
+                'T1055.004')
+            break
         prot = _vad_prot(v)
         typ  = _vad_type(v)
         addr = v.get('start', 0)
@@ -1376,13 +1522,44 @@ for p in procs:
             if not data: continue
             count = data.count(_SYSCALL_BYTES)
             if count >= 3:   # threshold: at least 3 syscall opcodes in private exec region
+                # Decode SSN (-> syscall name, resolved live from THIS image's own ntdll,
+                # never a hardcoded per-build table) and target (only the well-defined -1
+                # self-pseudo-handle case is confirmed; anything else stays honestly
+                # 'undetermined' rather than guessing self vs cross-process from static
+                # bytes alone -- see _decode_syscall_at). Bounded to the first few
+                # occurrences per region so decoding never becomes the new volume problem.
+                decoded = []
+                off = -1
+                while len(decoded) < _SSN_DECODE_LIMIT:
+                    off = data.find(_SYSCALL_BYTES, off + 1)
+                    if off == -1:
+                        break
+                    name, ssn, target = _decode_syscall_at(data, off, _ssn_table)
+                    if ssn is not None:
+                        decoded.append((name, ssn, target))
+                decode_note = ''
+                if decoded:
+                    parts = []
+                    for name, ssn, target in decoded:
+                        label = name if name else f'SSN={ssn:#x} (unresolved)'
+                        parts.append(f'{label} [{target}]')
+                    decode_note = f' Decoded: {", ".join(parts)}.'
+                if is_jit_proc20:
+                    note = (f'{count} raw syscall (0x0F 0x05) opcodes in private executable region '
+                            f'outside ntdll.dll. JIT-consistent (known JIT/managed-code host) -- '
+                            f'corroborate via cross-process thread creation or YARA match before '
+                            f'treating as Hell\'s Gate / SysWhispers evasion.{decode_note} '
+                            f'Region size={size:#x} protection={prot}')
+                else:
+                    note = (f'{count} raw syscall (0x0F 0x05) opcodes in private executable region '
+                            f'outside ntdll.dll -- Hell\'s Gate / SysWhispers pattern.{decode_note} '
+                            f'Region size={size:#x} protection={prot}')
                 add('High', 'Direct Syscall Execution',
                     f'PID {p.pid} ({p.name}) @ {addr:#x}',
-                    f'{count} raw syscall (0x0F 0x05) opcodes in private executable region '
-                    f'outside ntdll.dll -- Hell\'s Gate / SysWhispers pattern. '
-                    f'Region size={size:#x} protection={prot}',
+                    note,
                     'T1055.004 (Asynchronous Procedure Call), T1562.001')
                 n_syscall += 1
+                proc_syscall += 1
         except Exception:
             continue
 log(f'  Direct syscall candidates: {n_syscall}')
@@ -1459,6 +1636,283 @@ try:
     log(f'  ETW-TI provider: {"ACTIVE" if etw_ok else "DISABLED -- Critical finding added"}')
 except Exception as e:
     log(f'  ETW-TI check skipped -- API unavailable in this vmmpyc build ({e})', 'WARN')
+
+# ==============================================================================
+# 23. Cross-process handle & thread-creator attribution
+#     A handle-table entry's va-object is the kernel address of the object the
+#     handle refers to. If that address equals ANOTHER process's EPROCESS (or
+#     another thread's ETHREAD), the holding process has an open handle into it --
+#     a structurally unforgeable fact (cannot be spoofed by name or path the way a
+#     cmdline or file path can). This is the Tier-1 evidence source the tiered
+#     model design depends on.
+# ==============================================================================
+log('=== 23. Cross-process handle & thread-creator attribution ===')
+_PROCESS_VM_OPERATION = 0x0008
+_PROCESS_VM_WRITE     = 0x0020
+_PROCESS_CREATE_THREAD = 0x0002
+_PROCESS_ALL_ACCESS   = 0x1FFFFF
+_THREAD_SET_CONTEXT   = 0x0010
+_THREAD_ALL_ACCESS    = 0x1FFFFF
+
+# Windows session/process-management subsystems structurally hold ALL_ACCESS handles
+# into every process on the system as a matter of OS architecture (csrss.exe is the
+# client/server runtime subsystem tracking every process/thread in its session;
+# services.exe is the Service Control Manager; winlogon/smss/wininit manage session
+# lifecycle). Verified against real captured data: these accounted for the
+# overwhelming majority of all cross-process handles on a real host. A name match is
+# not identity proof though (same masquerade class as coreAllowed/LISTENER_ALLOWLIST)
+# -- downgrade to Low with path verification, never fully exclude. 'system' is the
+# one true kernel pseudo-process with no fixed on-disk path to verify against.
+_HANDLE_OS_SESSION_MGMT = {'csrss.exe', 'services.exe', 'winlogon.exe', 'smss.exe', 'wininit.exe'}
+
+def _proc_full_path(p):
+    try:    pu = str(p.pathuser or '')
+    except Exception: pu = ''
+    try:    pk = str(p.pathkernel or '')
+    except Exception: pk = ''
+    raw  = pu if pu else pk
+    full = re.sub(r'\\Device\\HarddiskVolume\d+', 'C:', raw)
+    full = re.sub(r'^\\\?\?\\', '', full)
+    full = full.replace('\\SystemRoot\\', 'C:\\Windows\\')
+    return full
+
+def _holder_severity_and_note(name_l, p):
+    """A holder name matching a known OS session-management process downgrades to
+    Low IF the on-disk path also verifies (or it's the pathless kernel pseudo-process
+    'system'). Otherwise (unknown name, or name matches but path doesn't -- masquerade)
+    the finding stays at full severity."""
+    if name_l == 'system':
+        return 'Low', ' -- kernel pseudo-process (no fixed on-disk path); structurally holds access into every process'
+    if name_l in _HANDLE_OS_SESSION_MGMT:
+        full = _proc_full_path(p)
+        if SYS_PATHS.match(full):
+            return 'Low', ' -- OS session-management subsystem on its expected path; structurally holds broad access into every process'
+    return 'High', ''
+
+n_handle_proc, n_handle_thread = 0, 0
+try:
+    eproc_map, ethread_map = {}, {}
+    for p in procs:
+        try:
+            if isinstance(p.eprocess, int): eproc_map[p.eprocess] = p.pid
+        except Exception: pass
+        try:
+            for t in (p.maps.thread() or []):
+                va = t.get('va-ethread')
+                if va: ethread_map[va] = (p.pid, t.get('tid'))
+        except Exception: pass
+
+    for p in procs:
+        name_l = (p.name or '').lower()
+        try:
+            handles = p.maps.handle()
+        except Exception:
+            continue
+        for h in (handles or []):
+            vaobj  = h.get('va-object')
+            access = h.get('access') or 0
+            if vaobj in eproc_map and eproc_map[vaobj] != p.pid:
+                dangerous = (access & _PROCESS_ALL_ACCESS) == _PROCESS_ALL_ACCESS or \
+                            (access & (_PROCESS_VM_OPERATION | _PROCESS_VM_WRITE)) == (_PROCESS_VM_OPERATION | _PROCESS_VM_WRITE)
+                if not dangerous: continue
+                target_pid = eproc_map[vaobj]
+                severity, note = _holder_severity_and_note(name_l, p)
+                has_create_thread = bool(access & _PROCESS_CREATE_THREAD)
+                # Target follows the same 'PID <n> (<name>) ...' convention every other
+                # module uses (engine.py's _parse_pid_process regex requires this exact
+                # shape to group the finding under the HOLDER's pid, not the target's --
+                # otherwise this finding is silently invisible to the investigation engine).
+                # Details carries the same "Name: X" tag Invoke-ProcessHunt's Hidden Process
+                # finding uses -- Invoke-Eradication.ps1's universal Test-Protected guard
+                # extracts identity via `$f.Details -replace '.*Name:\s*',''` for every
+                # finding type before any type-specific action.
+                add(severity, 'Cross-Process Handle (Memory)',
+                    f'PID {p.pid} ({p.name}) -> Target PID {target_pid}',
+                    f'Name: {p.name} holds a PROCESS handle (access={access:#x}) into PID {target_pid}'
+                    f'{" including PROCESS_CREATE_THREAD" if has_create_thread else ""}.{note}',
+                    'T1055 (Process Injection)')
+                n_handle_proc += 1
+            elif vaobj in ethread_map and ethread_map[vaobj][0] != p.pid:
+                dangerous = (access & _THREAD_ALL_ACCESS) == _THREAD_ALL_ACCESS or \
+                            (access & _THREAD_SET_CONTEXT) == _THREAD_SET_CONTEXT
+                if not dangerous: continue
+                target_pid, target_tid = ethread_map[vaobj]
+                severity, note = _holder_severity_and_note(name_l, p)
+                # Correlate the TARGET thread's start address against the TARGET process's own
+                # VAD map (not the holder's) -- a foreign handle into a thread that starts in an
+                # anonymous-executable region is far stronger corroboration (shellcode/implant
+                # execution, not just capability) than the handle alone. The holder PID is the
+                # plausible creator/controller of this thread; vmmpyc/ETHREAD carries no separate
+                # "who called CreateRemoteThread" field, so the handle relationship itself is the
+                # attribution -- this is exactly the Tier-1 fact the tiered evidence model needs.
+                start_vad = 'unknown'
+                target_proc = pid_map.get(target_pid)
+                if target_proc is not None:
+                    win32start = 0
+                    for t in (target_proc.maps.thread() or []):
+                        if t.get('tid') == target_tid:
+                            win32start = t.get('va-win32start', 0) or 0
+                            break
+                    if win32start:
+                        start_vad = _vad_type_at(target_proc, win32start)
+                shellcode_note = ''
+                if start_vad == 'anon_exec':
+                    shellcode_note = ' Target thread starts in an anonymous executable region (shellcode-consistent).'
+                elif start_vad == 'unmapped':
+                    shellcode_note = ' Target thread start address is unmapped (module unloaded post-creation, or spoofed).'
+                add(severity, 'Cross-Process Thread Handle (Memory)',
+                    f'PID {p.pid} ({p.name}) -> Target PID {target_pid} TID {target_tid}',
+                    f'Name: {p.name} holds a THREAD handle (access={access:#x}) into PID {target_pid} '
+                    f'TID {target_tid} -- the remote-thread-hijack/context-manipulation primitive.'
+                    f'{shellcode_note}{note}',
+                    'T1055.003 (Thread Execution Hijacking)')
+                n_handle_thread += 1
+except Exception as e:
+    log(f'  Handle attribution error: {e}', 'WARN')
+log(f'  Cross-process handle attributions: {n_handle_proc} process, {n_handle_thread} thread')
+
+# ==============================================================================
+# 24. DLL sideloading -- module loaded from a non-system path whose name
+#     collides with a well-known Windows API DLL (T1574.002)
+#     Windows resolves a bare DLL name via search order; if an attacker's
+#     directory precedes System32 in that order, a same-named malicious copy
+#     loads instead of the real one. The name collision with a real system DLL
+#     is not incidental -- it IS the mechanism (search order only hijacks a
+#     name the loader is already looking for), so checking against this fixed
+#     set of frequently-sideloaded names is justified under Rule 3 the same
+#     way the accessibility-binary list is: there is no behavior-only proxy
+#     for "this exact name is what the loader would have resolved from
+#     System32." Non-exhaustive by design -- corroborate with YARA/hollowing/
+#     handle-attribution findings on the same PID before treating as a TP.
+# ==============================================================================
+log('=== 24. DLL sideloading detection ===')
+_SIDELOAD_NAMES = re.compile(
+    r'(?i)^(version|dbghelp|dbgcore|wbemcomn|winmm|cryptbase|profapi|secur32|'
+    r'ualapi|wtsapi32|uxtheme|dwmapi|msimg32|imageres|propsys|ntmarta|'
+    r'wbemprox|cscapi|mfplat|mfreadwrite|dwrite|d3d11|d2d1|windowscodecs|'
+    r'xmllite)\.dll$')
+_SUSP_DLL_DIR = re.compile(r'(?i)\\(temp|tmp|appdata|public|downloads)\\')
+n_sideload = 0
+for p in procs:
+    if is_system_proc(p): continue
+    try:
+        exe_path = str(p.pathuser or '')
+    except Exception:
+        exe_path = ''
+    if not exe_path: continue
+    exe_dir = str(Path(exe_path).parent).lower()
+    try:
+        mods = p.module_list()
+    except Exception:
+        continue
+    for m in mods:
+        dll_path = str(getattr(m, 'fullname', '') or '').lower()
+        if not dll_path or SYS_PATHS.match(dll_path): continue
+        dll_name = Path(dll_path).name
+        if not _SIDELOAD_NAMES.match(dll_name): continue
+        in_exe_dir  = bool(exe_dir) and dll_path.startswith(exe_dir)
+        susp_dir    = _SUSP_DLL_DIR.search(dll_path)
+        if not (in_exe_dir or susp_dir): continue
+        sev = 'High' if susp_dir else 'Medium'
+        add(sev, 'DLL Sideloading Candidate (Memory)',
+            f'PID {p.pid} ({p.name})',
+            f'Module {dll_name} loaded from non-system path {dll_path} -- name collides with '
+            f'a well-known Windows DLL normally resolved from System32. EXE={exe_path}. '
+            f'Corroborate before treating as TP: apps that legitimately ship this DLL alongside '
+            f'the EXE also match this signal.',
+            'T1574.002 (DLL Side-Loading), T1574.001 (DLL Search Order Hijacking)')
+        n_sideload += 1
+log(f'  DLL sideloading candidates: {n_sideload}')
+
+# ==============================================================================
+# 25. Heaven's Gate -- WOW64 (32-bit) process making a far transition to the
+#     64-bit code segment (selector 0x33) from anonymous memory (T1055/T1027)
+#     Malware running as a 32-bit process under WOW64 uses this to call
+#     64-bit ntdll directly, bypassing 32-bit-only API hooks/EDR userland
+#     hooks entirely. Legitimate WOW64 transitions happen inside
+#     wow64cpu.dll/wow64.dll/ntdll32's own Wow64Transition thunk (image-backed
+#     modules); the same far-jump/far-call/push-retf idiom appearing in
+#     anonymous (private) executable memory has no legitimate justification --
+#     the selector value 0x33 IS the mechanism (it is the only GDT entry that
+#     performs this exact mode switch), so matching it exactly is a Rule-3
+#     justified fixed check, not a payload-name heuristic.
+# ==============================================================================
+log("=== 25. Heaven's Gate (WOW64 far transition) ===")
+_HG_FAR_JMP    = re.compile(rb'\xEA....\x33\x00', re.DOTALL)
+_HG_FAR_CALL   = re.compile(rb'\x9A....\x33\x00', re.DOTALL)
+_HG_PUSH_SEL   = b'\x6A\x33'          # push 0x33
+_HG_RETF       = b'\xCB'              # retf
+_HG_PER_PROC_CAP = 20
+n_heavensgate = 0
+for p in procs:
+    if is_system_proc(p): continue
+    try:
+        if not p.is_wow64: continue
+    except Exception:
+        continue
+    try: vads = p.maps.vad()
+    except Exception: continue
+    proc_hg = 0
+    for v in vads:
+        if proc_hg >= _HG_PER_PROC_CAP: break
+        prot = _vad_prot(v)
+        typ  = _vad_type(v)
+        addr = v.get('start', 0)
+        size = _vad_size(v)
+        if 'X' not in prot: continue
+        if typ and typ != 'private': continue        # anonymous exec only -- legit thunks are image-backed
+        if not size or size > 4 * 1024 * 1024: continue
+        try:
+            data = p.memory.read(addr, min(size, 65536))
+            if not data: continue
+        except Exception:
+            continue
+        hit = None
+        m1 = _HG_FAR_JMP.search(data)
+        m2 = _HG_FAR_CALL.search(data)
+        if m1: hit = ('far jmp 0x33:xxxx', m1.start())
+        elif m2: hit = ('far call 0x33:xxxx', m2.start())
+        else:
+            push_off = data.find(_HG_PUSH_SEL)
+            if push_off != -1:
+                retf_off = data.find(_HG_RETF, push_off + 2, push_off + 32)
+                if retf_off != -1:
+                    hit = ('push 0x33 / retf', push_off)
+        if not hit:
+            continue
+        label, off = hit
+        add('High', "Heaven's Gate (WOW64 Mode Transition)",
+            f'PID {p.pid} ({p.name}) @ {addr + off:#x}',
+            f'Anonymous executable region in a WOW64 (32-bit) process contains a {label} '
+            f'sequence targeting the 64-bit code segment selector -- consistent with '
+            f'direct 64-bit ntdll invocation bypassing 32-bit userland API hooks.',
+            'T1055 (Process Injection), T1027 (Obfuscated Files or Information)')
+        n_heavensgate += 1
+        proc_hg += 1
+log(f"  Heaven's Gate candidates: {n_heavensgate}")
+
+# ==============================================================================
+# Documented coverage gaps -- not automated by this engine
+#     TTP-006 (Dr7 hardware breakpoint hooks) and TTP-007 (call-stack spoofing)
+#     have no available signal in this vmmpyc build (no debug-register or
+#     call-stack field in the thread dict) NOR any stock Volatility 3 plugin --
+#     both would require bespoke plugin/API development, not a capture-format
+#     change. TTP-015 (token theft/privilege escalation) and TTP-016 (kernel
+#     notify callback / pool-tag carving) ARE covered today, but only via the
+#     Volatility 3 route (windows.privileges / windows.callbacks /
+#     windows.poolscanner in Analyze-Memory.ps1) against a full .raw/.mem/.dmp
+#     capture -- this live vmmpyc/AFF4 engine has no equivalent API surface.
+# ==============================================================================
+log('=== Documented coverage gaps (not automated in this engine) ===')
+log('  TTP-006 (Dr7 hardware breakpoint hooks): no vmmpyc or Volatility 3 API surface exists -- '
+    'requires custom plugin development, not automatable today.', 'WARN')
+log('  TTP-007 (call-stack spoofing): no vmmpyc or Volatility 3 API surface exists -- '
+    'requires custom plugin development, not automatable today.', 'WARN')
+log('  TTP-015 (token theft / privilege escalation): not available via this live/AFF4 engine -- '
+    'capture a full .raw/.mem/.dmp image and run Analyze-Memory.ps1 (windows.privileges plugin).', 'WARN')
+log('  TTP-016 (kernel callback / pool-tag anomalies): not available via this live/AFF4 engine -- '
+    'capture a full .raw/.mem/.dmp image and run Analyze-Memory.ps1 (windows.callbacks / '
+    'windows.poolscanner plugins).', 'WARN')
 
 # ==============================================================================
 # Summary

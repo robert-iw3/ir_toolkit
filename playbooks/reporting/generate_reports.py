@@ -344,7 +344,17 @@ def correlate_yara_pivots(findings):
             score += 3; reasons.append(f"co-occurs with injection evidence ({', '.join(inj_signals)})")
         if other_strong:
             score += 1; reasons.append(f"co-occurs with {', '.join(other_strong)}")
-        tp = score >= 3                                 # true-positive-class threshold
+        # The adjudicator (Get-FindingContext.ps1 -Live) checks things this pivot doesn't --
+        # code-signing chain validity, on-disk path verification, known-vendor context. If it
+        # already cleared EVERY YARA hit driving this pivot as a False Positive, don't let raw
+        # signal-convergence override that verdict and promote the PID's IOCs into eradication
+        # scope anyway (YARA_Pivot_TP.json -> memory_enrich.py -> IOCs.json).
+        verdicts = [get(f, "Verdict") for f in yara if get(f, "Verdict")]
+        adjudicated_fp = bool(verdicts) and all(v in ("False Positive", "Likely False Positive") for v in verdicts)
+        tp = (score >= 3) and not adjudicated_fp         # true-positive-class threshold
+        if adjudicated_fp and score >= 3:
+            reasons.append("adjudicator cleared all underlying YARA hit(s) as False Positive -- "
+                           "overrides this pivot's own signal-convergence score")
         sev = min((get(f, "Severity", default="High") for f in group),
                   key=lambda s: _SEV_RANK.get(s, 1))
         pivots.append({

@@ -10,14 +10,14 @@
 #
 from .engine import investigate
 from .correlator import correlate, CorrelationVerdict, CrossSourceSignal
-from .verdict import Verdict, VerdictLabel, Dimension
+from .verdict import Verdict, VerdictLabel, Dimension, Tier
 from .process_tree import ProcessNode
 from .chain_builder import build_chains, AttackChain, ChainEvent
 from .ttp_patterns import match_patterns, TTPMatch
 
 __all__ = [
     'investigate', 'correlate',
-    'Verdict', 'VerdictLabel', 'Dimension',
+    'Verdict', 'VerdictLabel', 'Dimension', 'Tier',
     'CorrelationVerdict', 'CrossSourceSignal',
     'ProcessNode', 'build_chains', 'AttackChain', 'ChainEvent',
     'match_patterns', 'TTPMatch',

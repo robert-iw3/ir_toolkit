@@ -227,3 +227,76 @@ def test_merge_idempotent_adversary_not_duplicated():
             f"'evil-c2.ru' appears {hosts.count('evil-c2.ru')} times — "
             "merge must be idempotent"
         )
+
+
+# ---------------------------------------------------------------------------
+# Phase 1D — own-module-namespace domain filter + mwcp hex-junk mutex filter
+#
+# Discovered via live validation on a fresh host (FLUSH): a legitimate .NET
+# MSIX app's memory yielded 'system.io', 'system.net', 'microsoft.windows.sdk.net'
+# as structurally-valid-looking "domains" (real TLD, valid RFC-1035 labels) --
+# purely because .NET namespace strings coincidentally share domain syntax.
+# Shape alone can't distinguish these from real domains; cross-referencing
+# against the process's OWN loaded module list (ground truth already collected
+# for that exact process) can. Separately, mwcp's mutex parser over the same
+# process's memory returned 'fffffff', '0123456789abcdef', '110101' tagged
+# "CONFIRMED malware-created" -- the existing _HEX_TOKEN shape check already
+# used to gate handle-based mutex classification was never applied to mwcp's
+# own results, which bypassed that gate on the assumption family-specific
+# parsing is always reliable. It is not.
+# ---------------------------------------------------------------------------
+
+def test_module_namespace_basenames_strips_path_and_extension():
+    mod_ranges = [
+        (0x1000, 0x2000, r"C:\Program Files\WindowsApps\Foo\System.Runtime.dll"),
+        (0x2000, 0x3000, r"C:\Program Files\WindowsApps\Foo\Newtonsoft.Json.dll"),
+        (0x3000, 0x4000, ""),  # missing fullname must not crash
+    ]
+    names = me._module_namespace_basenames(mod_ranges)
+    assert "system.runtime" in names
+    assert "newtonsoft.json" in names
+
+
+def test_own_module_namespace_exact_match():
+    basenames = {"system.runtime", "newtonsoft.json"}
+    assert me._is_own_module_namespace("system.runtime", basenames)
+    assert me._is_own_module_namespace("System.Runtime", basenames)  # case-insensitive
+
+
+def test_own_module_namespace_prefix_match():
+    """Domain scraping can stop early at a coincidental TLD-shaped segment --
+    'system.io' inside 'System.IO.Abstractions.Wrappers.dll' -- so a prefix
+    match against the fuller module name must also be caught."""
+    basenames = {"testableio.system.io.abstractions.wrappers"}
+    assert me._is_own_module_namespace("testableio.system.io", basenames)
+
+
+def test_own_module_namespace_rejects_real_external_domain():
+    """A real external domain that happens to share no relation to any loaded
+    module must NOT be filtered -- this is not a blanket 'looks like a namespace'
+    heuristic, it is a direct match against this process's own modules only."""
+    basenames = {"system.runtime", "newtonsoft.json", "microsoft.winui"}
+    assert not me._is_own_module_namespace("evil-c2-panel.example.net", basenames)
+    assert not me._is_own_module_namespace("easyauth.edgebrowser.microsoft-falcon.io", basenames)
+
+
+def test_own_module_namespace_empty_basenames_never_matches():
+    assert not me._is_own_module_namespace("system.io", set())
+    assert not me._is_own_module_namespace("", {"system.io"})
+
+
+def test_hex_token_matches_confirmed_live_junk_mutexes():
+    """The exact strings mwcp reported as 'CONFIRMED malware-created' on a live
+    host with zero other corroboration -- all must match the existing hex-shape
+    gate that was bypassed for mwcp results specifically."""
+    for junk in ("fffffff", "ffffff", "0123456789abcdef", "110101", "Cd7C41a"):
+        assert me._HEX_TOKEN.match(junk), (
+            f"{junk!r} must match the hex-junk shape -- this is the exact string "
+            "recovered live and wrongly tagged CONFIRMED"
+        )
+
+
+def test_hex_token_does_not_match_plausible_real_mutex():
+    for name in ("Global\\WmiSync_7d3f", "MyAppSingleInstanceMutex", "WilStaging_02"):
+        assert not me._HEX_TOKEN.match(name), \
+            f"A plausible real mutex name {name!r} must not be caught by the hex-junk gate"

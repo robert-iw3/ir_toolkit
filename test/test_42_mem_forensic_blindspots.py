@@ -131,3 +131,129 @@ def test_module13_high_ent_proc_finding_gets_low_severity():
         "No 'SECURITY-PROC' annotation text found -- HIGH_ENT_PROC findings must "
         "carry a note explaining the expected high-entropy source"
     )
+
+
+# ---------------------------------------------------------------------------
+# Module 9 -- LISTENER_ALLOWLIST annotated not skipped (Batch 1 item 4)
+# ---------------------------------------------------------------------------
+
+def test_module9_listener_allowlist_does_not_skip():
+    """Module 9 (suspicious network listeners) must NOT use a bare 'continue' after
+    the LISTENER_ALLOWLIST substring check. A name match is not identity proof --
+    malware naming itself svchost.exe/msedge.exe would pass this check too; skipping
+    it made a bind shell under a common name invisible."""
+    src = _src()
+    bad = re.search(
+        r'any\(a in pname for a in LISTENER_ALLOWLIST\)[\s\S]{0,40}?\bcontinue\b',
+        src, re.MULTILINE
+    )
+    assert bad is None, (
+        "Module 9 still skips LISTENER_ALLOWLIST matches with 'continue' -- replace "
+        "with an annotated Low-severity finding instead of full suppression"
+    )
+
+
+def test_module9_listener_allowlist_still_emits_finding():
+    """An allowlisted-name listener match must still call add() (stay visible for
+    path/signature corroboration), just at reduced severity."""
+    src = _src()
+    m9 = re.search(r'=== 9\..*?=== 10\.', src, re.DOTALL)
+    assert m9, "Module 9 block not found"
+    text = m9.group(0)
+    assert "allowlisted" in text, (
+        "Module 9 has no 'allowlisted' branch variable -- LISTENER_ALLOWLIST matches "
+        "must be tagged and downgraded, not silently dropped"
+    )
+    assert "add('Low'" in text or 'add("Low"' in text, (
+        "Module 9 does not emit a Low-severity finding for allowlisted-name listeners"
+    )
+
+
+def test_module9_non_allowlisted_listener_stays_medium():
+    """A listener on a process NOT matching LISTENER_ALLOWLIST must still be Medium
+    severity (this fix must not weaken detection of genuinely unexpected listeners)."""
+    src = _src()
+    m9 = re.search(r'=== 9\..*?=== 10\.', src, re.DOTALL)
+    assert m9, "Module 9 block not found"
+    text = m9.group(0)
+    assert "add('Medium'" in text or 'add("Medium"' in text, (
+        "Module 9 no longer emits a Medium-severity finding for the non-allowlisted case"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Module 23 -- cross-process handle & thread-creator attribution (Batch 2 item 5)
+# ---------------------------------------------------------------------------
+
+def _module23_block():
+    src = _src()
+    m = re.search(r'=== 23\..*', src, re.DOTALL)
+    assert m, "Module 23 block not found"
+    return m.group(0)
+
+
+def test_module23_dangerous_process_access_requires_vm_write_and_operation():
+    """A cross-process handle must require VM_OPERATION+VM_WRITE together (or full
+    ALL_ACCESS) to be flagged -- a lone weaker right (e.g. QUERY_INFORMATION only)
+    is not injection capability and must not be scored."""
+    text = _module23_block()
+    assert '_PROCESS_VM_OPERATION' in text
+    assert '_PROCESS_VM_WRITE' in text
+    assert '_PROCESS_ALL_ACCESS' in text
+
+
+def test_module23_dangerous_thread_access_requires_set_context_or_all_access():
+    text = _module23_block()
+    assert '_THREAD_SET_CONTEXT' in text
+    assert '_THREAD_ALL_ACCESS' in text
+
+
+def test_module23_os_session_mgmt_downgrade_requires_path_verification():
+    """A name match on csrss/services/winlogon/smss/wininit alone must NOT be enough
+    to downgrade severity -- same masquerade class as coreAllowed/LISTENER_ALLOWLIST.
+    Only 'system' (the pathless kernel pseudo-process) gets a name-only fallback."""
+    text = _module23_block()
+    assert 'SYS_PATHS.match' in text, (
+        "OS session-management holder downgrade must verify the on-disk path, "
+        "not just the process name"
+    )
+    for name in ('csrss.exe', 'services.exe', 'winlogon.exe', 'smss.exe', 'wininit.exe'):
+        assert name in text, f"'{name}' missing from the OS session-management set"
+
+
+def test_module23_lsass_not_special_cased_as_holder():
+    """Explicit design decision: lsass.exe is NOT excluded/downgraded as a handle
+    HOLDER (unlike csrss/services/winlogon) -- it is scored like any other process."""
+    text = _module23_block()
+    assert "'lsass" not in text.lower() and '"lsass' not in text.lower(), (
+        "lsass.exe must not be special-cased as a cross-process handle holder"
+    )
+
+
+def test_module23_target_format_matches_engine_pid_convention():
+    """Target must be 'PID <n> (<name>) ...' -- the convention every other module
+    uses. engine.py's _parse_pid_process regex (r'PID\\s+(\\d+)\\s+\\(([^)]+)\\)')
+    requires this exact shape to group the finding under the holder's pid; any other
+    format makes the finding invisible to the investigation engine's PID grouping."""
+    text = _module23_block()
+    assert "f'PID {p.pid} ({p.name})" in text, (
+        "Module 23 Target format must start with 'PID {p.pid} ({p.name})' so "
+        "engine.py's _group_by_pid can parse and attribute it to the holder"
+    )
+
+
+def test_module23_details_carries_name_tag_for_test_protected():
+    """Details must carry 'Name: X' -- Invoke-Eradication.ps1's universal
+    Test-Protected guard extracts identity via `.Details -replace '.*Name:\\s*',''`
+    for every finding type before any type-specific action."""
+    text = _module23_block()
+    assert "Name: {p.name}" in text
+
+
+def test_module23_thread_finding_correlates_shellcode_vad():
+    """Thread-handle findings must classify the target thread's start address via
+    _vad_type_at against the TARGET process (not the holder) for shellcode-consistent
+    corroboration."""
+    text = _module23_block()
+    assert '_vad_type_at(target_proc, win32start)' in text
+    assert 'anon_exec' in text

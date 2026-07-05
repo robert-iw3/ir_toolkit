@@ -57,11 +57,20 @@ try {
 } catch { Write-CollectLog "FORENSICS: Process hash error: $_" }
 
 # -- Process command lines + parent (Win32_Process; Get-Process lacks these) ---
+# Also written as ProcessTree_<IncidentId>.json directly under $OutputDir (NOT $WorkDir --
+# that folder gets zipped and removed below) so playbooks/windows/investigation's
+# process_tree.py / live_runner.py find it at the report root, exactly the same location
+# as Adjudication_*.json / Memory_Findings_*.json. Before this, process_tree.py had a
+# dedicated loader (load_from_snapshot) and README-documented preference for this file,
+# but nothing ever produced it -- lineage silently fell back to the partial, adjudication-
+# only path (ParentPid/ParentName present only for adjudicated targets, not every process).
 try {
-    Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+    $procSnapshot = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
         Select-Object ProcessId, Name, ParentProcessId, CommandLine, ExecutablePath,
-            @{N='CreationDate';E={$_.CreationDate}} |
-        Export-Csv "$WorkDir\process_commandlines.csv" -NoTypeInformation -Encoding UTF8
+            @{N='CreationDate';E={$_.CreationDate}}
+    $procSnapshot | Export-Csv "$WorkDir\process_commandlines.csv" -NoTypeInformation -Encoding UTF8
+    $procTreePath = Join-Path $OutputDir "ProcessTree_$IncidentId.json"
+    @($procSnapshot) | ConvertTo-Json -Depth 4 | Out-File -FilePath $procTreePath -Encoding UTF8
 } catch { Write-CollectLog "FORENSICS: Process command-line error: $_" }
 
 # -- Network connections -------------------------------------------------------
@@ -157,8 +166,12 @@ $SearchPaths | ForEach-Object {
 
 # -- Event log snapshot --------------------------------------------------------
 # Security: process creation (4688), logon (4624/4625/4648), task creation (4698/4702),
-#           account creation (4720), log cleared (1102), type-9 logon - PtH indicator
-@(4688, 4624, 4625, 4648, 4698, 4702, 4720, 1102) | ForEach-Object {
+#           account creation (4720), log cleared (1102), type-9 logon - PtH indicator,
+#           object/handle access (4656/4663) - LSASS credential-theft detector.
+# 4656/4663 only fire if Object Access auditing + a SACL on the LSASS process object are
+# configured (auditpol /set /subcategory:"Kernel Object" /success:enable) - not a default
+# Windows setting. Invoke-EventLogAnalysis.ps1 already has the detection logic.
+@(4688, 4624, 4625, 4648, 4698, 4702, 4720, 1102, 4656, 4663) | ForEach-Object {
     $eid = $_
     try {
         Get-WinEvent -FilterHashtable @{LogName='Security'; Id=$eid} -MaxEvents 100 -ErrorAction SilentlyContinue |
@@ -188,6 +201,19 @@ try {
         Select-Object TimeCreated, Id, Message |
         Export-Csv "$WorkDir\events_rdp.csv" -NoTypeInformation -Encoding UTF8
 } catch {}
+
+# -- Named pipe inventory (names only, never opened) ---------------------------
+# [System.IO.Directory]::GetFiles on the pipe namespace uses FindFirstFile/FindNextFile
+# to list names WITHOUT opening or connecting to any pipe. This is deliberately NOT
+# Get-ChildItem, whose provider can stat/open each pipe -- on 2026-06-26 that pattern
+# in 06_Network.ps1's live hunt module is the leading suspect for wedging this host's
+# entire network stack (core networking-service RPC pipes got disturbed). Same proven-
+# safe primitive reused here for the forensics snapshot's read-only inventory.
+try {
+    [System.IO.Directory]::GetFiles('\\.\pipe\') |
+        ForEach-Object { [PSCustomObject]@{ PipeName = (Split-Path -Leaf $_) } } |
+        Export-Csv "$WorkDir\named_pipes.csv" -NoTypeInformation -Encoding UTF8
+} catch { Write-CollectLog "FORENSICS: Named pipe inventory error: $_" }
 
 # -- Current network shares ----------------------------------------------------
 Get-SmbShare 2>$null | Out-File "$WorkDir\smb_shares.txt" -Encoding UTF8

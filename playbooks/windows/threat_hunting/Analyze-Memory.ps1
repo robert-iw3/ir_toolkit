@@ -27,6 +27,8 @@
       windows.svcscan                  - rogue services not in the SCM
       windows.ldrmodules               - unlinked DLLs (process injection)
       windows.vadyarascan              - YARA scan of process memory (staged rules)
+      windows.privileges                - runtime-enabled dangerous token privileges (TTP-015)
+      windows.callbacks                - kernel notify callbacks unbacked by a loaded driver (TTP-016)
 
     Output: Memory_Findings_<stamp>.json in -OutputDir (defaults to image parent folder).
     Integrate with the main pipeline: add Memory_Findings_*.json to Combined_Findings and
@@ -776,6 +778,78 @@ if ('yara' -notin $skipSet -and 'vadyarascan' -notin $skipSet) {
         }
         $n = @($script:Findings | Where-Object { $_.Type -eq 'YARA Match (Memory)' }).Count
         Write-Log "  YARA matches: $n" 'Yellow'
+    }
+}
+
+# -- 9. Token privilege escalation (windows.privileges) [TTP-015] --------------
+# Signal: a high-impact privilege (SeDebugPrivilege, SeTcbPrivilege, etc.) that
+# is Enabled but was NOT EnabledByDefault at token creation -- i.e. something
+# called AdjustTokenPrivileges at runtime to turn it on. This is a structural
+# token-state fact, not a process-identity check (Rule 4/[[detection-design-principles]]):
+# it fires the same way regardless of what the process is named or claims to be.
+# Every SYSTEM service legitimately carries these privileges EnabledByDefault --
+# that is expected baseline OS behavior, not evidence, so it is deliberately
+# excluded rather than downgraded (nothing was actively enabled there to flag).
+if ('privileges' -notin $skipSet) {
+    Write-Log '=== Token Privilege Escalation (windows.privileges) ===' 'Cyan'
+    $privData = Invoke-VolPlugin 'windows.privileges'
+    if ($privData) {
+        $dangerousPrivs = @(
+            'SeDebugPrivilege', 'SeTcbPrivilege', 'SeAssignPrimaryTokenPrivilege',
+            'SeLoadDriverPrivilege', 'SeImpersonatePrivilege', 'SeTakeOwnershipPrivilege',
+            'SeCreateTokenPrivilege', 'SeBackupPrivilege', 'SeRestorePrivilege'
+        )
+        foreach ($row in @($privData)) {
+            $priv = [string](Get-Prop $row @('Privilege') '')
+            if ($priv -notin $dangerousPrivs) { continue }
+            $attrs = [string](Get-Prop $row @('Attributes') '')
+            $isEnabled   = $attrs -match '(?i)\benabled\b'
+            $isByDefault = $attrs -match '(?i)default'
+            if (-not $isEnabled -or $isByDefault) { continue }   # only runtime-enabled, non-default
+            $procId = Get-Prop $row @('PID','Pid') '?'
+            $proc   = [string](Get-Prop $row @('Process') 'unknown')
+            $details = "$priv is Enabled but NOT EnabledByDefault -- AdjustTokenPrivileges was " + `
+                "called at runtime to turn on this high-impact privilege (Attributes=$attrs). " + `
+                'Consistent with token theft / privilege escalation staging before credential ' + `
+                'access or driver load.'
+            Add-Finding 'High' 'Token Privilege Runtime-Enabled (Memory)' `
+                "PID $procId ($proc)" `
+                $details `
+                'T1134 (Access Token Manipulation), T1548 (Abuse Elevation Control Mechanism)'
+        }
+        $n = @($script:Findings | Where-Object { $_.Type -eq 'Token Privilege Runtime-Enabled (Memory)' }).Count
+        Write-Log "  Runtime-enabled dangerous privileges: $n" 'Yellow'
+    }
+}
+
+# -- 10. Kernel callback anomalies (windows.callbacks) [TTP-016] ---------------
+# Signal: a kernel notify routine (process/thread/image-load creation, registry,
+# bugcheck, shutdown) whose registered callback address does not resolve to any
+# loaded driver module. Legitimate callbacks always point into a loaded driver's
+# code section; an unresolved/unbacked address is either a DKOM-unlinked
+# malicious driver or a directly-injected kernel hook -- a structural fact about
+# the address, independent of any process or driver name (Rule 4).
+if ('callbacks' -notin $skipSet) {
+    Write-Log '=== Kernel Callback Anomalies (windows.callbacks) ===' 'Cyan'
+    $cbData = Invoke-VolPlugin 'windows.callbacks'
+    if ($cbData) {
+        foreach ($row in @($cbData)) {
+            $module = [string](Get-Prop $row @('Module') '')
+            $type   = [string](Get-Prop $row @('Type') 'unknown')
+            $cbAddr = [string](Get-Prop $row @('Callback') '')
+            $unresolved = (-not $module) -or ($module -match '(?i)^(unknown|n/?a|-)$')
+            if (-not $unresolved) { continue }
+            $details = "Kernel notify callback of type '$type' does not resolve to any loaded " + `
+                "driver module. Legitimate callbacks always point into a loaded driver's code -- " + `
+                'an unbacked address is consistent with a DKOM-unlinked driver or a directly ' + `
+                'injected kernel hook (EDR-killer / rootkit class).'
+            Add-Finding 'Critical' 'Unbacked Kernel Callback (Memory)' `
+                "$type @ $cbAddr" `
+                $details `
+                'T1014 (Rootkit), T1547 (Boot or Logon Autostart Execution)'
+        }
+        $n = @($script:Findings | Where-Object { $_.Type -eq 'Unbacked Kernel Callback (Memory)' }).Count
+        Write-Log "  Unbacked kernel callbacks: $n" 'Yellow'
     }
 }
 

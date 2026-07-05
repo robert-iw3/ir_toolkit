@@ -17,10 +17,20 @@ syscall-region findings; naive per-finding scoring pushed weight to 286 and
 false-positived both PowerShell instances AND CrossDeviceService (a
 legitimate Windows Nearby Sharing component), none of which involved evasion.
 
+memory_forensic.py never skips collection based on process name (a name-based
+skip would be a collection-time blind spot -- if an attacker injects into an
+actual chrome.exe or pwsh.exe, the finding must still reach Memory_Findings.json
+for this module to ever see it). Instead it tags JIT-heavy hosts' findings
+in-place with a JIT-consistent annotation, on both Injected Memory Region AND
+Direct Syscall Execution findings directly, and the determination of whether
+that tag actually explains the pattern happens here, from evidence, not at
+collection time from a name.
+
 Corroboration, in priority order:
-  1. This PID has ANY JIT-consistent Injected Memory Region finding -- managed-
-     code hosts are common and expected background noise for this pattern.
-     Not scored, regardless of how many syscall regions exist.
+  1. This PID has ANY JIT-consistent finding (Injected Memory Region or Direct
+     Syscall Execution itself) -- managed-code hosts are common and expected
+     background noise for this pattern. Not scored, regardless of how many
+     syscall regions exist.
   2. No JIT-consistent evidence anywhere for this PID -- the process is not a
      known managed-code host, and a cluster of raw-syscall regions outside
      ntdll is exactly the Hell's Gate/SysWhispers shape. One dimension for the
@@ -39,8 +49,16 @@ def _parse_address(target: str) -> str:
 
 
 def _any_jit_consistent(pid_findings: List[dict]) -> bool:
+    """True if any Injected Memory Region OR Direct Syscall Execution finding
+    for this PID carries the JIT-consistent tag. memory_forensic.py annotates
+    both finding types directly (never skips collection by process name) --
+    check the syscall findings' own text too, not just cross-referenced
+    Injected Memory Region findings, since a PID can have syscall findings
+    with no corresponding Injected Memory Region entry at all.
+    """
     for f in pid_findings:
-        if 'Injected Memory' not in f.get('Type', ''):
+        ftype = f.get('Type', '')
+        if 'Injected Memory' not in ftype and 'Direct Syscall' not in ftype:
             continue
         if re.search(r'JIT.consistent', f.get('Details', ''), re.IGNORECASE):
             return True

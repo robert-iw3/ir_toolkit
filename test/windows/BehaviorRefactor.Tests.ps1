@@ -11,6 +11,7 @@
       03_  BITS: behavior-only, no name/CDN allowlists (T1197)
       06_  Network outbound: trusted-proc downgrade not skip (T1071)
       06_  Named pipe: GUID structural detection alongside name patterns (T1559.001)
+      01_  Hidden process: coreAllowed/coreAllowedWildcards downgrade not skip (T1055/T1014)
 #>
 
 BeforeAll {
@@ -305,5 +306,82 @@ Describe "Fix-4b Named pipe: GUID-format pipe detection (structural, not name-ba
         Invoke-NetworkHunt
         ($script:Findings | Where-Object { $_.Type -eq 'Suspicious Named Pipe' }) |
             Should -HaveCount 0
+    }
+}
+
+# ===========================================================================
+# Fix 5: Hidden process — coreAllowed/coreAllowedWildcards downgrade not skip
+# ===========================================================================
+Describe "Fix-5 Hidden process: coreAllowed name match downgrades, does not exclude" {
+
+    BeforeEach {
+        $script:Findings = @()
+        $script:Quiet    = $true
+        Set-RefactorBaseline
+    }
+
+    It "Should fire Hidden Process at Low severity when name matches coreAllowed exactly" {
+        # svchost.exe is in $coreAllowed -- a genuinely hidden process (confirmed via
+        # re-verify, so this is NOT an enumeration-race false positive) using this name
+        # must still be visible, just downgraded. A name match is not identity proof --
+        # malware naming itself svchost.exe would pass this check too.
+        Mock Get-CimInstance {
+            @(Make-RefProc -ProcId 9010 -Name 'svchost.exe')
+        } -ParameterFilter { $ClassName -eq 'Win32_Process' -and -not $Filter }
+        Mock Get-Process { throw 'not found' } -ParameterFilter { $Id -eq 9010 }
+        Mock Get-CimInstance {
+            @([PSCustomObject]@{ ProcessId = 9010 })
+        } -ParameterFilter { $Filter -match 'ProcessId=9010' }
+
+        Invoke-ProcessHunt
+
+        $f = $script:Findings | Where-Object { $_.Type -eq 'Hidden Process' -and $_.Target -match '9010' }
+        $f | Should -Not -BeNullOrEmpty -Because "a genuinely hidden process must never be silently invisible, even if the name matches an expected list"
+        $f[0].Severity | Should -Be 'Low' -Because "name match alone is not identity proof -- downgrade, don't exclude"
+    }
+
+    It "Should fire Hidden Process at Low severity when name matches a coreAllowedWildcards prefix" {
+        Mock Get-CimInstance {
+            @(Make-RefProc -ProcId 9011 -Name 'IntelAudioService.exe')
+        } -ParameterFilter { $ClassName -eq 'Win32_Process' -and -not $Filter }
+        Mock Get-Process { throw 'not found' } -ParameterFilter { $Id -eq 9011 }
+        Mock Get-CimInstance {
+            @([PSCustomObject]@{ ProcessId = 9011 })
+        } -ParameterFilter { $Filter -match 'ProcessId=9011' }
+
+        Invoke-ProcessHunt
+
+        $f = $script:Findings | Where-Object { $_.Type -eq 'Hidden Process' -and $_.Target -match '9011' }
+        $f | Should -Not -BeNullOrEmpty -Because "Intel* wildcard match must still surface a genuinely hidden process"
+        $f[0].Severity | Should -Be 'Low'
+    }
+
+    It "Should fire Hidden Process at High severity when name does NOT match any allowlist entry" {
+        Mock Get-CimInstance {
+            @(Make-RefProc -ProcId 9012 -Name 'totallyrandom.exe')
+        } -ParameterFilter { $ClassName -eq 'Win32_Process' -and -not $Filter }
+        Mock Get-Process { throw 'not found' } -ParameterFilter { $Id -eq 9012 }
+        Mock Get-CimInstance {
+            @([PSCustomObject]@{ ProcessId = 9012 })
+        } -ParameterFilter { $Filter -match 'ProcessId=9012' }
+
+        Invoke-ProcessHunt
+
+        $f = $script:Findings | Where-Object { $_.Type -eq 'Hidden Process' -and $_.Target -match '9012' }
+        $f | Should -Not -BeNullOrEmpty
+        $f[0].Severity | Should -Be 'High' -Because "an unnamed/unexpected hidden process is still full severity"
+    }
+
+    It "Should NOT fire when the process is a timing-race artifact (visible in Get-Process re-verify)" {
+        Mock Get-CimInstance {
+            @(Make-RefProc -ProcId 9013 -Name 'svchost.exe')
+        } -ParameterFilter { $ClassName -eq 'Win32_Process' -and -not $Filter }
+        # Re-verify succeeds this time -> not actually hidden, just a snapshot-timing race.
+        Mock Get-Process { [PSCustomObject]@{ Id = 9013 } } -ParameterFilter { $Id -eq 9013 }
+
+        Invoke-ProcessHunt
+
+        ($script:Findings | Where-Object { $_.Type -eq 'Hidden Process' -and $_.Target -match '9013' }) |
+            Should -HaveCount 0 -Because "re-verify confirmed this was an enumeration race, not a real hidden process"
     }
 }

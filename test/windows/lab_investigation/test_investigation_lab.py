@@ -26,7 +26,9 @@ _REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..'
 if _REPO not in sys.path:
     sys.path.insert(0, _REPO)
 
-from playbooks.windows.investigation import investigate, correlate, VerdictLabel
+from unittest.mock import patch
+
+from playbooks.windows.investigation import investigate, correlate, VerdictLabel, Dimension, Tier
 from playbooks.windows.investigation.correlator import CorrelationVerdict
 from playbooks.windows.investigation.process_tree import (
     ProcessNode, load_from_snapshot, load_from_adjudication, ancestors, descendants,
@@ -43,6 +45,7 @@ from playbooks.windows.investigation.modules import (
     dormant_beacon, shellcode_thread, ntdll_hook,
     ekko_sleep, injected_memory, ppid_orphan,
     clr_assembly, com_vtable, direct_syscall,
+    handle_attribution,
 )
 
 from .scenarios import (
@@ -570,7 +573,9 @@ class TestModule3:
         """JIT-consistent region with no real corroboration must not be a blind positive.
 
         .NET/CLR JIT compilation legitimately produces anonymous exec regions --
-        the same reasoning already applied to Module5_JIT_Unconfirmed.
+        the same reasoning already applied to Module5_JIT_Unconfirmed. The
+        uncorroborated fallback is now scored per-PID (investigate_uncorroborated_pid),
+        not per-finding -- see test_uncorroborated_pid_aggregation below.
         """
         f = {'Type': 'Injected Memory Region',
              'Target': 'PID 3012 (pwsh.exe) @ 0x23a02e10000',
@@ -578,11 +583,49 @@ class TestModule3:
                         'JIT-consistent (known JIT/managed-code host) -- corroborate via '
                         'YARA match or shellcode thread start in same address range.')}
         dims = injected_memory.investigate(f)
-        pos = [d for d in dims if d.positive]
-        neg = [d for d in dims if not d.positive]
-        assert pos == [], f'JIT-consistent uncorroborated region must have zero positive dims. Got: {[d.name for d in pos]}'
-        assert any('JIT_Unconfirmed' in d.name for d in neg), \
-            f'Must produce Module3_JIT_Unconfirmed. Got: {[d.name for d in dims]}'
+        assert dims == [], \
+            f'Per-finding investigate() must defer uncorroborated regions to the PID aggregate. Got: {dims}'
+        is_candidate, is_jit = injected_memory.is_uncorroborated(f)
+        assert is_candidate and is_jit
+
+        agg = injected_memory.investigate_uncorroborated_pid([f])
+        assert len(agg) == 1
+        assert not agg[0].positive
+        assert 'JIT_Unconfirmed' in agg[0].name
+
+    def test_uncorroborated_pid_aggregation_one_dim_regardless_of_region_count(self):
+        """N distinct uncorroborated anon-exec regions in one PID must produce
+        exactly ONE dimension, not N -- the exact bug found live on FLUSH
+        (MsMpEng.exe: 5 regions, PhoneExperienceHost.exe: 4 regions, both zero
+        other corroboration, both crossed the TP threshold on region count alone).
+        """
+        findings = [
+            {'Type': 'Injected Memory Region',
+             'Target': f'PID 4188 (MsMpEng.exe) @ 0x{i:x}0000',
+             'Details': 'Executable private VAD (no backing file). Protection=P-RWX-'}
+            for i in range(5)
+        ]
+        agg = injected_memory.investigate_uncorroborated_pid(findings)
+        assert len(agg) == 1, f'Must collapse to exactly one dimension, got {len(agg)}'
+        assert agg[0].positive
+        assert 'Uncorroborated' in agg[0].name
+        assert '5 private anonymous executable VAD region' in agg[0].rationale
+
+    def test_uncorroborated_pid_bug_no_longer_reaches_tp_via_engine(self):
+        """End-to-end: 5 uncorroborated regions in one PID must NOT reach TP
+        through engine.investigate() -- confirms the fix at the orchestration level."""
+        findings = [
+            {'Severity': 'High', 'Type': 'Injected Memory Region',
+             'Target': f'PID 4188 (MsMpEng.exe) @ 0x{i:x}0000',
+             'Details': 'Executable private VAD (no backing file). Protection=P-RWX-',
+             'MITRE': 'T1055'}
+            for i in range(5)
+        ]
+        v = _run({'pid': 4188, 'findings': findings, 'description': 'uncorroborated region volume'})
+        assert not v.is_tp, (
+            f'5 uncorroborated regions must not reach TP via count alone. '
+            f'Got: {v.label}\n{v.rationale}'
+        )
 
     def test_real_yara_and_thread_corroboration_still_positive(self):
         """Genuine corroboration (not advisory text) must still count."""
@@ -661,6 +704,439 @@ class TestModule20DirectSyscall:
             f'40 syscall regions in a JIT-consistent process must NOT reach TP via volume alone. '
             f'Got: {v.label}\n{v.rationale}'
         )
+
+    def test_jit_tag_on_syscall_finding_itself_is_recognized(self):
+        """memory_forensic.py no longer skips collection for JIT-heavy process names
+        (chrome/pwsh/dotnet/java/etc.) -- it tags the Direct Syscall Execution finding
+        directly with the JIT-consistent annotation instead, the same way Module 3
+        already does for Injected Memory Region. This must be recognized even with
+        NO corresponding Injected Memory Region finding for the same PID.
+        """
+        syscalls = [{
+            'Type': 'Direct Syscall Execution',
+            'Target': 'PID 5200 (chrome.exe) @ 0x30000000',
+            'Details': ('12 raw syscall (0x0F 0x05) opcodes in private executable region '
+                       'outside ntdll.dll. JIT-consistent (known JIT/managed-code host) -- '
+                       'corroborate via cross-process thread creation or YARA match before '
+                       'treating as Hell\'s Gate / SysWhispers evasion. '
+                       'Region size=0x10000 protection=--RWX-'),
+        }]
+        dims = direct_syscall.investigate_pid(syscalls, syscalls)
+        assert len(dims) == 1
+        assert not dims[0].positive, \
+            f'JIT tag on the syscall finding itself (no Injected Memory Region present) must be recognized. Got: {dims}'
+        assert 'JIT_Host' in dims[0].name
+
+
+# ============================================================================
+# SECTION 7c: MODULE 23 (CROSS-PROCESS HANDLE & THREAD-CREATOR ATTRIBUTION)
+# ============================================================================
+
+class TestModule23HandleAttribution:
+    """Module 23 scores PER HOLDER PID (investigate_pid), not per target. A single
+    holder can legitimately (or maliciously) touch dozens of distinct target PIDs
+    (lsass.exe's session/credential bookkeeping touches ~30 processes on a real
+    host) -- scoring each target independently would fabricate dimension count the
+    same way Module 20's per-region scoring did before its investigate_pid fix.
+    """
+
+    def _proc_finding(self, holder_pid=6666, holder='evil.exe', target_pid=1234,
+                      severity='High', note='', create_thread=True):
+        ct = ' including PROCESS_CREATE_THREAD' if create_thread else ''
+        return {'Type': 'Cross-Process Handle (Memory)', 'Severity': severity,
+                'Target': f'PID {holder_pid} ({holder}) -> Target PID {target_pid}',
+                'Details': (f'Name: {holder} holds a PROCESS handle (access=0x1478) '
+                            f'into PID {target_pid}{ct}.{note}'),
+                'MITRE': 'T1055 (Process Injection)'}
+
+    def _thread_finding(self, holder_pid=9001, holder='svchost.exe', target_pid=4321,
+                        tid=9999, severity='High', shellcode=False, note=''):
+        sc = ' Target thread starts in an anonymous executable region (shellcode-consistent).' if shellcode else ''
+        return {'Type': 'Cross-Process Thread Handle (Memory)', 'Severity': severity,
+                'Target': f'PID {holder_pid} ({holder}) -> Target PID {target_pid} TID {tid}',
+                'Details': (f'Name: {holder} holds a THREAD handle (access=0x1fffff) into '
+                            f'PID {target_pid} TID {tid} -- the remote-thread-hijack/'
+                            f'context-manipulation primitive.{sc}{note}'),
+                'MITRE': 'T1055.003 (Thread Execution Hijacking)'}
+
+    def test_many_targets_one_positive_dimension_not_many(self):
+        """A holder touching 30 distinct target PIDs must collapse to ONE dimension,
+        not thirty (mirrors direct_syscall's region-volume fix)."""
+        findings = [self._proc_finding(target_pid=1000 + i) for i in range(30)]
+        dims = handle_attribution.investigate_pid(findings)
+        assert len(dims) == 1, f'Must produce exactly one dimension, got {len(dims)}'
+        assert dims[0].positive
+        assert 'CrossProcessHandle' in dims[0].name
+
+    def test_many_targets_mixed_create_thread_splits_into_two_scoped_dimensions(self):
+        """Real live-data bug caught before shipping: a holder can have MANY plain
+        VM_WRITE+VM_OPERATION handles and exactly one with the full CREATE_THREAD
+        mask (confirmed on a real host: svchost.exe with 20 ordinary targets and a
+        single CREATE_THREAD handle into winlogon.exe). The one strong handle must
+        NOT promote the entire 20-target aggregate to Tier 1 -- each subset gets its
+        own dimension, scoped only to the targets that justify it."""
+        findings = [self._proc_finding(target_pid=1000 + i, create_thread=False) for i in range(20)]
+        findings.append(self._proc_finding(target_pid=328, create_thread=True))
+        dims = handle_attribution.investigate_pid(findings)
+        assert len(dims) == 2, f'Must split into exactly 2 dimensions, got {len(dims)}'
+        by_name = {d.name: d for d in dims}
+        assert 'Module23_CrossProcessHandle_FullInjectionMask' in by_name
+        assert by_name['Module23_CrossProcessHandle_FullInjectionMask'].tier == Tier.DEFINITIVE
+        assert 'Module23_CrossProcessHandle_Holder' in by_name
+        assert by_name['Module23_CrossProcessHandle_Holder'].tier == Tier.STRONG_BEHAVIORAL
+
+    def test_os_session_mgmt_downgraded_produces_one_negative_dimension(self):
+        """A path-verified OS session-management holder (Low severity from
+        memory_forensic.py) must produce a documented NEGATIVE dimension, not a
+        positive one -- structurally expected OS behavior, not injection."""
+        findings = [self._proc_finding(holder_pid=840, holder='csrss.exe', target_pid=1000 + i,
+                                        severity='Low',
+                                        note=' -- OS session-management subsystem on its expected path')
+                    for i in range(10)]
+        dims = handle_attribution.investigate_pid(findings)
+        assert len(dims) == 1
+        assert not dims[0].positive
+        assert 'OSSessionMgmt' in dims[0].name
+
+    def test_thread_handle_shellcode_correlation_gets_distinct_dimension(self):
+        """A thread-handle finding corroborated by the target thread starting in an
+        anonymous executable region (shellcode-consistent) must be distinguished
+        from a bare handle with no such corroboration."""
+        findings = [self._thread_finding(shellcode=True)]
+        dims = handle_attribution.investigate_pid(findings)
+        assert len(dims) == 1
+        assert dims[0].positive
+        assert 'ShellcodeTarget' in dims[0].name
+
+    def test_thread_handle_without_shellcode_correlation_is_generic_positive(self):
+        findings = [self._thread_finding(shellcode=False)]
+        dims = handle_attribution.investigate_pid(findings)
+        assert len(dims) == 1
+        assert dims[0].positive
+        assert 'ShellcodeTarget' not in dims[0].name
+        assert 'Holder' in dims[0].name
+
+    # -- Batch 4 tier migration: Module 23 is the design note's own worked Tier-1 example --
+
+    def test_process_handle_with_create_thread_is_tier1(self):
+        """Full VM_WRITE+VM_OPERATION+CREATE_THREAD is the canonical remote-injection
+        access mask -- essentially no legitimate reason for a non-security-tool
+        process to hold it. Tier 1 (DEFINITIVE): single item settles it."""
+        findings = [self._proc_finding(create_thread=True)]
+        dims = handle_attribution.investigate_pid(findings)
+        assert len(dims) == 1
+        assert dims[0].tier == Tier.DEFINITIVE
+
+    def test_process_handle_without_create_thread_stays_tier2(self):
+        """VM_WRITE+VM_OPERATION WITHOUT CREATE_THREAD has too many legitimate
+        explanations (session/config data, IPC) to be 'single item settles it' --
+        this is EXACTLY lsass.exe's real access mask on a live host (confirmed via
+        vmmpyc introspection before this module was written: access=0x1478, no
+        CREATE_THREAD bit), which must stay UNDETERMINED, not become an instant TP."""
+        findings = [self._proc_finding(create_thread=False)]
+        dims = handle_attribution.investigate_pid(findings)
+        assert len(dims) == 1
+        assert dims[0].tier == Tier.STRONG_BEHAVIORAL
+
+    def test_thread_handle_shellcode_correlation_is_tier1(self):
+        """Two independent structurally-unforgeable facts converge (foreign handle +
+        confirmed anon-exec execution target) -- the strongest case this module can
+        produce. Tier 1 (DEFINITIVE)."""
+        findings = [self._thread_finding(shellcode=True)]
+        dims = handle_attribution.investigate_pid(findings)
+        assert len(dims) == 1
+        assert dims[0].tier == Tier.DEFINITIVE
+
+    def test_thread_handle_without_shellcode_correlation_stays_tier2(self):
+        """A real capability (SET_CONTEXT/ALL_ACCESS into a foreign thread) but not
+        yet confirmed use -- stays at the Tier 2 default, needs corroboration."""
+        findings = [self._thread_finding(shellcode=False)]
+        dims = handle_attribution.investigate_pid(findings)
+        assert len(dims) == 1
+        assert dims[0].tier == Tier.STRONG_BEHAVIORAL
+
+    def test_engine_end_to_end_lsass_like_pattern_stays_undetermined_not_tp(self):
+        """End-to-end regression guard mirroring the real live FLUSH data: lsass.exe
+        holding VM_WRITE (no CREATE_THREAD) into many processes must NOT become an
+        instant TRUE_POSITIVE now that Tier 1 is wired in -- it must still require
+        independent corroboration, exactly as it did before this migration."""
+        findings = [self._proc_finding(holder_pid=680, holder='lsass.exe', target_pid=1000 + i,
+                                        create_thread=False)
+                    for i in range(30)]
+        v = _run({'pid': 680, 'findings': findings, 'description': 'lsass.exe VM_WRITE, no CREATE_THREAD'})
+        assert v.label == VerdictLabel.UNDETERMINED, (
+            f"lsass.exe's real access-mask pattern must stay UNDETERMINED after the Tier 1 "
+            f"migration, not become an instant TRUE_POSITIVE. Got: {v.label}"
+        )
+
+    def test_engine_end_to_end_full_injection_mask_is_instant_tp(self):
+        """End-to-end: a holder with the FULL VM_WRITE+VM_OPERATION+CREATE_THREAD
+        combination must reach TRUE_POSITIVE immediately via the Tier 1 shortcut,
+        even with zero other corroborating dimensions."""
+        findings = [self._proc_finding(holder_pid=6666, holder='evil.exe', target_pid=1234,
+                                        create_thread=True)]
+        v = _run({'pid': 6666, 'findings': findings, 'description': 'full injection access mask'})
+        assert v.label == VerdictLabel.TRUE_POSITIVE
+        assert 'TIER1' in v.rationale
+
+    def test_process_and_thread_findings_produce_separate_dimensions(self):
+        """Process-level and thread-level handle capability are qualitatively
+        different (whole-process control vs one-thread control) -- both must be
+        visible, as separate dimensions, when a holder has both."""
+        findings = [self._proc_finding(create_thread=False), self._thread_finding()]
+        dims = handle_attribution.investigate_pid(findings)
+        names = {d.name for d in dims}
+        assert 'Module23_CrossProcessHandle_Holder' in names
+        assert 'Module23_CrossProcessThreadHandle_Holder' in names
+        assert len(dims) == 2
+
+    def test_empty_input_produces_no_dims(self):
+        assert handle_attribution.investigate_pid([]) == []
+
+    def test_engine_groups_by_holder_pid_not_target_pid(self):
+        """End-to-end: engine.py's _group_by_pid must attribute the finding to the
+        HOLDER (Target starts with 'PID <holder> (<name>)'), never the target/victim
+        PID embedded later in the Target string."""
+        findings = [self._proc_finding(holder_pid=6666, target_pid=1234)]
+        verdicts = investigate(findings)
+        pids = {v.pid for v in verdicts}
+        assert 6666 in pids, 'Finding must be grouped under the HOLDER pid'
+        assert 1234 not in pids, 'Finding must NOT be grouped under the target/victim pid'
+
+    def test_engine_end_to_end_os_session_mgmt_closes_false_positive(self):
+        """A path-verified OS session-management holder with only Module 23 evidence
+        must close as FALSE_POSITIVE (0 positive dimensions), not linger UNDETERMINED."""
+        findings = [self._proc_finding(holder_pid=840, holder='csrss.exe', target_pid=1000 + i,
+                                        severity='Low',
+                                        note=' -- OS session-management subsystem on its expected path')
+                    for i in range(5)]
+        v = _run({'pid': 840, 'findings': findings, 'description': 'csrss.exe OS session mgmt'})
+        assert v.label == VerdictLabel.FALSE_POSITIVE
+        assert v.positive_count == 0
+
+
+# ============================================================================
+# SECTION 7d: TIERED EVIDENCE MODEL (Batch 4) -- verdict-assembly mechanics
+#
+# planning/CURRENT-STATE-AND-OPEN-ITEMS.md §4 design note. No module tags Tier 0/1/3
+# yet (everything defaults to Tier 2 -- STRONG_BEHAVIORAL), so these tests monkeypatch
+# an already-wired module's investigate() to inject Dimensions at a controlled tier,
+# proving the engine's assembly rules directly rather than waiting for a real module
+# migration. The explicit design constraint validated here: the existing threshold=3
+# floor is UNCHANGED for anything at the Tier 2 default -- Tier 1 is a pure additive
+# shortcut, Tier 3 can never alone reach TP, Tier 0 is excluded before scoring.
+# ============================================================================
+
+class TestTieredEvidenceModel:
+
+    def _beacon_finding(self, pid=7001, proc='evil.exe'):
+        return {'Type': 'Dormant Beacon Candidate (Memory)',
+                'Target': f'PID {pid} ({proc})',
+                'Details': 'placeholder'}
+
+    def test_two_tier2_positives_stay_undetermined_threshold_unchanged(self):
+        """Baseline: with everything at the Tier 2 default, 2 positive dimensions must
+        still be UNDETERMINED, not TP -- confirms the existing threshold=3 floor is
+        untouched by the tiered-model addition (the exact ambiguity resolved by asking
+        the user before implementation: Tier 2 does NOT drop to a 2-dimension bar for
+        un-migrated modules)."""
+        dims = [
+            Dimension(name='Fake_A', positive=True, rationale='r1', source_module=0),
+            Dimension(name='Fake_B', positive=True, rationale='r2', source_module=0),
+        ]
+        with patch('playbooks.windows.investigation.engine.dormant_beacon.investigate', return_value=dims):
+            v = _run({'pid': 7001, 'findings': [self._beacon_finding()], 'description': 'two Tier-2 positives'})
+        assert v.label == VerdictLabel.UNDETERMINED
+        assert v.positive_count == 2
+
+    def test_single_tier1_positive_is_instant_true_positive(self):
+        """A single Tier 1 (DEFINITIVE) positive settles the question immediately,
+        even with zero other corroborating dimensions -- the additive shortcut."""
+        dims = [
+            Dimension(name='Fake_Definitive', positive=True, rationale='structurally unforgeable',
+                       source_module=0, tier=Tier.DEFINITIVE),
+        ]
+        with patch('playbooks.windows.investigation.engine.dormant_beacon.investigate', return_value=dims):
+            v = _run({'pid': 7002, 'findings': [self._beacon_finding(pid=7002)], 'description': 'single Tier-1 positive'})
+        assert v.label == VerdictLabel.TRUE_POSITIVE
+        assert 'TIER1' in v.rationale
+
+    def test_tier1_shortcut_does_not_suppress_other_positive_dimensions_in_rationale(self):
+        """The Tier-1 shortcut must still surface OTHER positive dimensions present,
+        not silently discard them from the record."""
+        dims = [
+            Dimension(name='Fake_Definitive', positive=True, rationale='structurally unforgeable',
+                       source_module=0, tier=Tier.DEFINITIVE),
+            Dimension(name='Fake_Extra', positive=True, rationale='extra corroboration', source_module=0),
+        ]
+        with patch('playbooks.windows.investigation.engine.dormant_beacon.investigate', return_value=dims):
+            v = _run({'pid': 7003, 'findings': [self._beacon_finding(pid=7003)], 'description': 'Tier-1 plus extra'})
+        assert v.label == VerdictLabel.TRUE_POSITIVE
+        assert 'Fake_Extra' in v.rationale
+
+    def test_tier3_positives_never_reach_tp_regardless_of_count(self):
+        """Even 5 Tier 3 (WEAK/STRUCTURAL) positives must NOT reach TP -- capability
+        without demonstrated use can never alone justify it, no matter how many."""
+        dims = [
+            Dimension(name=f'Fake_Weak_{i}', positive=True, rationale=f'r{i}',
+                       source_module=0, tier=Tier.WEAK_STRUCTURAL)
+            for i in range(5)
+        ]
+        with patch('playbooks.windows.investigation.engine.dormant_beacon.investigate', return_value=dims):
+            v = _run({'pid': 7004, 'findings': [self._beacon_finding(pid=7004)], 'description': 'five Tier-3 positives'})
+        assert v.label != VerdictLabel.TRUE_POSITIVE
+
+    def test_tier3_only_positives_stay_undetermined_not_false_positive(self):
+        """Tier-3-only positive evidence is NOT proof of innocence either -- must stay
+        UNDETERMINED (flagging 'needs more Tier-2 evidence'), not close as FALSE_POSITIVE."""
+        dims = [
+            Dimension(name='Fake_Weak', positive=True, rationale='capability only',
+                       source_module=0, tier=Tier.WEAK_STRUCTURAL),
+        ]
+        with patch('playbooks.windows.investigation.engine.dormant_beacon.investigate', return_value=dims):
+            v = _run({'pid': 7005, 'findings': [self._beacon_finding(pid=7005)], 'description': 'Tier-3 only'})
+        assert v.label == VerdictLabel.UNDETERMINED
+        assert 'Tier-3' in v.rationale
+
+    def test_tier0_invalid_dimensions_excluded_before_scoring(self):
+        """A Tier 0 (INVALID -- category error) dimension must be excluded entirely,
+        even if marked positive -- it must not count toward anything."""
+        dims = [
+            Dimension(name='Fake_Invalid', positive=True, rationale='category error',
+                       source_module=0, tier=Tier.INVALID),
+        ]
+        with patch('playbooks.windows.investigation.engine.dormant_beacon.investigate', return_value=dims):
+            v = _run({'pid': 7006, 'findings': [self._beacon_finding(pid=7006)], 'description': 'Tier-0 only'})
+        assert v.label == VerdictLabel.FALSE_POSITIVE
+        assert v.positive_count == 0
+
+    def test_three_tier2_positives_still_reach_tp_unchanged(self):
+        """Regression guard: the original 3-dimension TP path must still work exactly
+        as before for ordinary Tier-2-default dimensions."""
+        dims = [
+            Dimension(name=f'Fake_{i}', positive=True, rationale=f'r{i}', source_module=0)
+            for i in range(3)
+        ]
+        with patch('playbooks.windows.investigation.engine.dormant_beacon.investigate', return_value=dims):
+            v = _run({'pid': 7007, 'findings': [self._beacon_finding(pid=7007)], 'description': 'three Tier-2 positives'})
+        assert v.label == VerdictLabel.TRUE_POSITIVE
+        assert v.positive_count == 3
+
+
+# ============================================================================
+# SECTION 7e: CROSS-PID RELATIONSHIP PROPAGATION (Step 4 -- "tracing a lead")
+#
+# chain_builder.py only ever DISPLAYS each PID's independently-computed verdict;
+# it never uses one PID's finding to re-examine another or revise a verdict. This
+# is the actual propagation: if PID A holds a Module 23 handle into PID B, and B's
+# OWN independent verdict is TRUE_POSITIVE, that is new corroborating evidence for
+# A -- a structurally-unforgeable relationship into an already-confirmed-
+# compromised process. Explicitly one-directional: a CLEAN-looking target must
+# NOT exonerate the holder (a capability finding into an innocent-looking process
+# is still a capability finding -- "assume compromise, prove otherwise").
+# ============================================================================
+
+class TestCrossPidPropagation:
+
+    def _handle_finding(self, holder_pid, target_pid, severity='High'):
+        return {'Type': 'Cross-Process Handle (Memory)', 'Severity': severity,
+                'Target': f'PID {holder_pid} (evil.exe) -> Target PID {target_pid}',
+                'Details': f'Name: evil.exe holds a PROCESS handle (access=0x1478) into PID {target_pid}.',
+                'MITRE': 'T1055 (Process Injection)'}
+
+    def _three_tier2_positives_finding(self, pid, proc='confirmed.exe'):
+        return {'Type': 'Dormant Beacon Candidate (Memory)',
+                'Target': f'PID {pid} ({proc})', 'Details': 'placeholder'}
+
+    def test_holder_gains_corroboration_from_confirmed_tp_target(self):
+        """Target PID reaches TRUE_POSITIVE independently (3 Tier-2 dims); the holder
+        (1 fake dim + 1 real Module23 dim from its own handle finding = 2, otherwise
+        UNDETERMINED) must pick up a corroborating dimension and escalate to
+        TRUE_POSITIVE via the threshold rule."""
+        target_dims = [Dimension(name=f'Fake_{i}', positive=True, rationale=f'r{i}', source_module=0)
+                       for i in range(3)]
+        holder_dims = [Dimension(name='Holder_0', positive=True, rationale='h0', source_module=0)]
+
+        def fake_investigate(finding):
+            target = self._three_tier2_positives_finding(9002)
+            if finding.get('Target') == target['Target']:
+                return target_dims
+            return holder_dims
+
+        findings = [
+            self._three_tier2_positives_finding(9002),
+            self._beacon_finding_for_propagation(9001),
+            self._handle_finding(holder_pid=9001, target_pid=9002),
+        ]
+        with patch('playbooks.windows.investigation.engine.dormant_beacon.investigate', side_effect=fake_investigate):
+            verdicts = investigate(findings)
+        by_pid = {v.pid: v for v in verdicts}
+        assert by_pid[9002].label == VerdictLabel.TRUE_POSITIVE, "target must independently reach TP"
+        assert by_pid[9001].label == VerdictLabel.TRUE_POSITIVE, (
+            "holder must escalate via cross-PID corroboration from the confirmed-TP target"
+        )
+        assert 'TargetCorroboration' in by_pid[9001].rationale
+
+    def _beacon_finding_for_propagation(self, pid, proc='holder.exe'):
+        return {'Type': 'Dormant Beacon Candidate (Memory)',
+                'Target': f'PID {pid} ({proc})', 'Details': 'placeholder-holder'}
+
+    def test_holder_not_corroborated_when_target_only_undetermined(self):
+        """The target must be CONFIRMED TRUE_POSITIVE, not merely UNDETERMINED --
+        partial/ambiguous target evidence must not propagate as corroboration."""
+        target_dims = [Dimension(name='Fake_Weak', positive=True, rationale='r', source_module=0)]  # only 1, stays UNDETERMINED
+        holder_dims = [Dimension(name='Holder_0', positive=True, rationale='h0', source_module=0)]
+
+        def fake_investigate(finding):
+            target = self._three_tier2_positives_finding(9012)
+            if finding.get('Target') == target['Target']:
+                return target_dims
+            return holder_dims
+
+        findings = [
+            self._three_tier2_positives_finding(9012),
+            self._beacon_finding_for_propagation(9011),
+            self._handle_finding(holder_pid=9011, target_pid=9012),
+        ]
+        with patch('playbooks.windows.investigation.engine.dormant_beacon.investigate', side_effect=fake_investigate):
+            verdicts = investigate(findings)
+        by_pid = {v.pid: v for v in verdicts}
+        assert by_pid[9012].label == VerdictLabel.UNDETERMINED
+        assert by_pid[9011].label == VerdictLabel.UNDETERMINED, (
+            "holder must NOT escalate from a target that is only UNDETERMINED, not confirmed TP"
+        )
+        assert 'TargetCorroboration' not in by_pid[9011].rationale
+
+    def test_clean_target_does_not_exonerate_holder(self):
+        """A FALSE_POSITIVE (clean) target must NOT clear the holder -- a capability
+        finding into an innocent-looking process is still a capability finding."""
+        holder_dims = [Dimension(name='Holder_0', positive=True, rationale='h0', source_module=0)]
+
+        def fake_investigate(finding):
+            target = self._three_tier2_positives_finding(9022)
+            if finding.get('Target') == target['Target']:
+                return []   # zero dims -> target closes FALSE_POSITIVE
+            return holder_dims
+
+        findings = [
+            self._three_tier2_positives_finding(9022),
+            self._beacon_finding_for_propagation(9021),
+            self._handle_finding(holder_pid=9021, target_pid=9022),
+        ]
+        with patch('playbooks.windows.investigation.engine.dormant_beacon.investigate', side_effect=fake_investigate):
+            verdicts = investigate(findings)
+        by_pid = {v.pid: v for v in verdicts}
+        assert by_pid[9022].label == VerdictLabel.FALSE_POSITIVE
+        assert by_pid[9021].label == VerdictLabel.UNDETERMINED, (
+            "holder's own 2-dimension UNDETERMINED verdict must be unchanged by a clean target"
+        )
+
+    def test_no_relationship_data_leaves_verdicts_unchanged(self):
+        """With zero Cross-Process Handle findings, propagation must be a no-op."""
+        findings = [self._beacon_finding_for_propagation(9031)]
+        verdicts = investigate(findings)
+        assert len(verdicts) == 1
+        assert 'TargetCorroboration' not in verdicts[0].rationale
 
 
 # ============================================================================
@@ -784,6 +1260,15 @@ class TestMultiSourceCorrelation:
                 'ServiceName': 'UpdateHelper',
                 'ServiceFileName': path,
                 'SubjectUserName': 'SYSTEM'}
+
+    def _make_edr_msix_unsigned_dll(self, pid, process, dll):
+        return {'pid': pid, 'process': process, 'z_score': 1.0,
+                'isolation_score': 0.65, 'velocity': 0.0, 'entropy': 0.0,
+                'event_type': 'Suspicious Injected DLL', 'confidence': 80.0,
+                'alert_reason': 'EDR: Suspicious Injected DLL',
+                'details': (f'Unsigned DLL outside Windows paths. Sig=NotSigned '
+                           f'Path=C:\\Program Files\\WindowsApps\\Microsoft.YourPhone_1.0.0.0_x64__8wekyb3d8bbwe\\{dll} '
+                           '(MSIX/Store package-signed path - per-file Authenticode not meaningful)')}
 
     def test_clean_memory_but_edr_anomaly_elevates_undetermined(self):
         """Memory looks borderline but EDR anomaly adds enough weight to elevate verdict."""

@@ -30,10 +30,10 @@ New to the toolkit? Read Parts 1 and 2 top to bottom. Returning for a specific f
 ```mermaid
 flowchart TD
     A1["Build-OfflineToolkit.ps1
-    -IncludeMemory -IncludeYaraRules
-    -IncludeVolatility -IncludeMemProcFS"]:::prep
-    A1 --> A2[/"tools/ staged: go-winpmem · yara64 · vol.exe
-    MemProcFS · Python 3.12 · Sysinternals"/]:::artifact
+    -IncludeMemory -IncludeYaraRules -IncludeMemProcFS
+    -IncludeCapa -IncludeFloss -IncludeMWCP -IncludeGeoIP"]:::prep
+    A1 --> A2[/"tools/ staged: go-winpmem · yara64 · MemProcFS
+    capa · FLOSS · mwcp · geoip · Python 3.12 · Sysinternals"/]:::artifact
 
     A2 --> B0(["TARGET HOST - Administrator"]):::phase
     B0 --> B1["Invoke-IRCollection.ps1
@@ -59,17 +59,29 @@ flowchart TD
     RAW/DMP → Volatility 3 (vadyarascan)"]:::tool
     C1 --> C2[/"Memory_Findings.json
     injection · hidden procs · C2 · LOLBin
-    BYOVD · Run keys · YARA (trust-verified)"/]:::artifact
+    BYOVD · direct syscalls · YARA (trust-verified)"/]:::artifact
     C2 --> C3["Merge → Combined_Findings → adjudicate
-    → regenerate ALL reports (rollup)"]:::step
+    → regenerate ALL reports → stamp tp_count"]:::step
+    C3 --> C4{"MemProcFS/AFF4 image
+    AND YARA_Pivot_TP.json non-empty?"}:::decision
+    C4 -->|yes, automatic| C5["Phase 3b: memory_enrich.py per TP PID
+    capa · FLOSS · mwcp · GeoIP · carve"]:::step
+    C4 -->|no - Volatility image| C6
+    C5 --> C6[/"Memory_Enrichment.md
+    mwcp_scan_log.txt · eradication IOCs"/]:::artifact
 
-    C3 --> D0(["TARGET HOST - Administrator"]):::phase
+    C6 --> D0(["TARGET HOST - Administrator"]):::phase
     D0 --> D1["Invoke-Eradication.ps1 -Apply
     dry-run by default"]:::tool
     D1 --> D2["Kill · quarantine · unregister
-    Disable accounts · block C2 egress"]:::step
+    Disable accounts (Principals.json)
+    Block C2 egress (IOCs.json)"]:::step
     D2 --> D3[/"Firewall: known-good minus C2
-    sha256-verified restore"/]:::artifact
+    sha256-verified restore
+    Eradication_rollback_*.jsonl"/]:::artifact
+    D3 -.->|optional, deferred| D4["Watch-Egress.ps1 or
+    Start-EgressMonitor.ps1 (advanced:
+    beacon classify + carve + mwcp + auto-block)"]:::step
 
     classDef prep  fill:#1e3a5f,stroke:#3b82f6,color:#e2e8f0
     classDef phase fill:#1e3a5f,stroke:#60a5fa,color:#e2e8f0,rx:20
@@ -106,9 +118,30 @@ staged tools** - these only add optional depth (memory capture, YARA, memory ana
 .\Build-OfflineToolkit.ps1 -IncludeMemProcFS
 .\Build-OfflineToolkit.ps1 -IncludeVolatility        # add -StageSymbols if the analyst box is air-gapped
 
+# + Phase 3b enrichment tools (capability detection, string deobfuscation, config extraction, offline GeoIP)
+.\Build-OfflineToolkit.ps1 -IncludeCapa -IncludeFloss -IncludeMWCP -IncludeGeoIP
+
 # Everything at once - recommended before any USB deployment
-.\Build-OfflineToolkit.ps1 -IncludeMemory -IncludeYaraRules -IncludeMemProcFS
+.\Build-OfflineToolkit.ps1 -IncludeMemory -IncludeYaraRules -IncludeMemProcFS `
+    -IncludeCapa -IncludeFloss -IncludeMWCP -IncludeGeoIP -IncludeSysmon
 ```
+
+Every `-Include*` flag, what it stages, and where it is used later in the workflow:
+
+| Flag | Stages | Used by |
+|---|---|---|
+| `-IncludeMemory` | go-winpmem / winpmem + ProcDump | Phase 1 `-CaptureMemory` |
+| `-IncludeFTKImager` | Prints manual staging steps (paid tool - Exterro) | Phase 1 `-CaptureMemory -MemoryTool ftk` |
+| `-IncludeMagnet` | Prints manual staging steps (free, registration required - Magnet Forensics) | Phase 1 `-CaptureMemory -MemoryTool magnet` |
+| `-IncludeSysmon` | Sysinternals Sysmon | Optional deeper event-log telemetry if you deploy Sysmon to the target ahead of an incident |
+| `-IncludeYaraRules` | 1,773 rules (Elastic, ReversingLabs, Neo23x0/Florian Roth) | Phase 1 `-ScanYara`; Phase 3 memory YARA scan |
+| `-IncludeMemProcFS` | MemProcFS + vmmpyc (default AFF4 engine) | Phase 3 `Analyze-Memory.ps1` (`.aff4` images), Phase 3b `memory_enrich.py` |
+| `-IncludeVolatility` | Volatility 3 standalone (`vol.exe`); add `-StageSymbols` if air-gapped | Phase 3 `Analyze-Memory.ps1` (`.raw`/`.mem`/`.dmp` fallback only) |
+| `-IncludeCapa` | capa standalone (capability detection: injection, C2, anti-analysis, persistence) | Phase 3b `memory_enrich.py` per-PID enrichment |
+| `-IncludeFloss` | FLOSS standalone (deobfuscated/stacked/decoded string extraction) | Phase 3b `memory_enrich.py` per-PID enrichment |
+| `-IncludeMWCP` | DC3-MWCP + IR Toolkit parser set (`tools\mwcp\lib\`) | Phase 3b `memory_enrich.py` - config-extraction verification layer, auto-invoked on every carved region |
+| `-IncludeGeoIP` | db-ip.com Country Lite CSV (offline IP→country, no DNS/whois/API call) | Phase 3b `memory_enrich.py` - ties recovered C2 IPs to a real country with zero network calls |
+| `-IncludeEgressMonitor` | Self-contained Python bundle (requires `-IncludeMemProcFS -IncludeMWCP` first) | Phase 4 advanced `Start-EgressMonitor.ps1` (see below) |
 
 Do **not** run this on the target host - it requires internet.
 
@@ -184,8 +217,23 @@ Process:             IR_Toolkit\tools\winpmem.exe
 Process:             IR_Toolkit\tools\procdump64.exe
 Process:             IR_Toolkit\tools\sigcheck64.exe
 Process:             IR_Toolkit\tools\strings64.exe
+Process:             IR_Toolkit\tools\capa\capa.exe                  (Phase 3b enrichment)
+Process:             IR_Toolkit\tools\floss\floss.exe                (Phase 3b enrichment)
+Process:             IR_Toolkit\tools\memprocfs\python\python.exe    (memory_forensic.py / memory_enrich.py -- bundled interpreter)
 Script:              IR_Toolkit\playbooks\windows\*.ps1  (Script Protection / AMSI)
 ```
+
+> **Confirmed live**: capa.exe, floss.exe, AND the bundled MemProcFS Python interpreter
+> (`tools\memprocfs\python\python.exe`) all get blocked by Defender's real-time
+> protection -- the folder-level exclusion above does not reliably cover behavioral/
+> process monitoring of executables launched from within it; each needs its own
+> process exclusion. This affects Phase 3 (`Analyze-Memory.ps1`, which runs
+> `memory_forensic.py` through this same interpreter) as well as Phase 3b enrichment.
+> If either hangs with no matching `_MemProcFS_*.log` / `_MemEnrich_*.log` output,
+> this is almost certainly why. Add the process exclusions above (elevated
+> PowerShell: `Add-MpPreference -ExclusionProcess "<path>"`, or
+> `.\Invoke-PrepareDefender.ps1` if Tamper Protection blocks direct `Set-MpPreference`
+> calls) before re-running.
 
 For behavioral-monitoring products (CrowdStrike, SentinelOne, Carbon Black), also add a
 **process execution exclusion** for `powershell.exe` when launched from the `IR_Toolkit\`
@@ -282,7 +330,13 @@ rules, audit policy, Defender detection history.
 **Event-log analysis** (`Invoke-EventLogAnalysis.ps1`) - 4688 process creation → LOLBin + obfuscation
 combos; 4625 failed-logon burst → brute-force; 4648 explicit credential use → pass-the-hash;
 4698/4702 suspicious task created/modified; 4720 new account; 1102/104 log cleared; 7045 new service
-in unusual path; 4104 PowerShell script block → encoded commands, Mimikatz, AMSI bypass, shellcode APIs.
+in unusual path; 4104 PowerShell script block → encoded commands, Mimikatz, AMSI bypass, shellcode APIs;
+4656/4663 LSASS handle-open/object-access → credential theft (T1003.001). **4656/4663 require an
+audit-policy prerequisite most hosts don't have by default**: Object Access auditing plus a SACL on
+the LSASS process object (`auditpol /set /subcategory:"Kernel Object" /success:enable` + a SACL,
+e.g. via `New-LsassAuditSacl`-style tooling). Without it, `00_Collect-Forensics.ps1` still collects
+cleanly (empty CSV, no error) - it's simply that these events don't exist on the host, not a
+collection failure.
 
 **Memory capture** (go-winpmem / FTK Imager / Magnet RAM Capture) - full physical memory image for
 Phase 3. AFF4 sparse format (go-winpmem) captures only actual RAM pages. FAT32 output volumes
@@ -432,8 +486,9 @@ to the analyst machine and run `Analyze-Memory.ps1`.
 4. **(optional) `-Carve`** - any YARA hit in a **Private + executable (injected) region** is dumped as
    raw `.bin` + a JSON sidecar to `tools\binja\data\<stamp>\` for offline Binary Ninja RE (see below).
 5. **(optional) `-Adjudicate`** - the payoff switch. It runs the **whole pivot→enrich chain
-   automatically** (see the next subsection): merge → adjudicate → rank the YARA hits → enrich the true
-   positives → roll up the eradication IOCs. Without it you get only `Memory_Findings_<stamp>.json`.
+   automatically** (detailed in its own subsection below): merge → adjudicate → regenerate all
+   reports → rank the YARA hits → enrich the true positives (capa/FLOSS/mwcp/GeoIP) → roll up the
+   eradication IOCs. Without it you get only `Memory_Findings_<stamp>.json`.
 
 ### `Analyze-Memory.ps1` parameters
 
@@ -468,6 +523,34 @@ sidecar, then re-analyze (the staged plugins - obfuscation_detection, binaryninj
 binary_ninja_mcp - assist). **Treat `injected:true` regions as live malware** - analyze them only
 inside the isolated container.
 
+### `-Adjudicate` → the full pivot-to-enrich chain (what actually runs)
+
+Passing `-Adjudicate` is not just "re-run adjudication" - it chains five steps automatically, in this
+order, and every step's output feeds the next:
+
+1. **Merge** - the new `Memory_Findings_<stamp>.json` is merged into the newest
+   `Combined_Findings_<stamp>.json` (stale memory-type findings from a prior run are dropped first, so
+   re-running never double-counts). Writes a new `Combined_Findings_<stamp>.json`.
+2. **Adjudicate** - `Get-FindingContext.ps1 -Live -HostFolder <dir> -ReportPath <merged file>` re-runs
+   the full verdict ladder (see Phase 2) over the merged set, now including every memory-only finding
+   type (injected regions, shellcode threads, dormant beacons, direct syscalls, CLR execute-assembly,
+   COM VTable hijacks, etc.).
+3. **Regenerate all reports** - `playbooks\reporting\generate_reports.ps1` re-runs, so
+   `Incident_Report.md`, `Attack_Graph.md`, `IOCs.json`, `Principals.json`, and
+   `attck_navigator_layer.json` all reflect the memory findings, not just the live-host hunt. This step
+   is also where `YARA_Pivot_TP.json` (the ranked TP-class PID list) is written.
+4. **Stamp `_status.json`** - `tp_count` is overwritten with the post-memory-adjudication count (the
+   collection phase writes `tp_count=0` before memory analysis ever runs; skipping `-Adjudicate` leaves
+   that stale `0` in place even though `Memory_Findings_<stamp>.json` may contain real TPs).
+5. **Enrich every YARA true positive** - for each PID in `YARA_Pivot_TP.json`, `memory_enrich.py` is
+   invoked automatically (**MemProcFS/AFF4 images only** - skipped for a Volatility-only image, since
+   enrichment needs a live `vmm` handle, not a one-shot plugin run). This is Phase 3b, and it runs
+   without any separate command from you. See "Phase 3b" below for what it produces and how to read it.
+
+If any of steps 1-4 fail (script missing, parse error), the log says so and the chain stops at that
+step - it never silently skips ahead. Re-running `-Adjudicate` is always safe; it re-derives everything
+from the newest files in `-OutputDir`, it does not accumulate state.
+
 ### Run it
 
 ```powershell
@@ -495,7 +578,15 @@ inside the isolated container.
 
 ### Phase 3b - Verify every flagged PID (the enriched follow-up - do NOT skip)
 
-A YARA verdict is **earned, not assumed.** `-Adjudicate` produces two things you must read **together**:
+> **If you ran `Analyze-Memory.ps1 -Adjudicate` against an AFF4 image, this phase already happened.**
+> Step 5 of the `-Adjudicate` chain (above) calls `memory_enrich.py` automatically for every PID in
+> `YARA_Pivot_TP.json` and `Memory_Enrichment_<stamp>.json` / `Memory_Enrichment.md` already exist. The
+> manual command below is for: a Volatility-only image (auto-enrich is skipped - needs a live `vmm`
+> handle), re-running with additional/different PIDs, or enriching PIDs the toolkit's own
+> [ML investigation engine](playbooks/windows/investigation/README.md) flagged as a **Potential
+> Miss** or an **Unconfirmed Prior TP** that fell outside `YARA_Pivot_TP.json`.
+
+A YARA verdict is **earned, not assumed.** You must read two things **together**:
 
 - **`YARA_Pivot_Report.md`** - ranks every hit PID. The ones marked **"true-positive-class - review/
   eradicate first"** are **open leads**, not confirmed threats.
@@ -511,7 +602,7 @@ For **every** TP-class PID, gather the facts with the enriched scan, then decide
 # 1) See which PIDs the pivot flagged:
 Get-Content .\reports\HOSTNAME\YARA_Pivot_TP.json | ConvertFrom-Json | Format-Table pid, name, rules
 
-# 2) Enrich EVERY flagged PID - handles, injected regions, recovered C2/strings, capa/FLOSS, first-seen.
+# 2) Enrich EVERY flagged PID - handles, injected regions, recovered C2/strings, capa/FLOSS/mwcp, first-seen.
 #    Pass the REAL image path even if it lives outside the reports folder (e.g. C:\captures):
 .\tools\memprocfs\python\python.exe `
     .\playbooks\windows\threat_hunting\memory_enrich.py `
@@ -521,15 +612,48 @@ Get-Content .\reports\HOSTNAME\YARA_Pivot_TP.json | ConvertFrom-Json | Format-Ta
 Get-Content .\reports\HOSTNAME\Memory_Enrichment.md
 ```
 
+**What enrichment adds per PID** (each auto-detected if staged in Part 1 - `[*] capa:`/`[*] floss:`/
+`[*] mwcp:` print what was found at the top of the enrichment log; "not staged" means the corresponding
+`-Include*` flag was skipped when building the toolkit):
+
+| Tool | What it adds to the dossier | If not staged |
+|---|---|---|
+| **capa** | Capability tags (process injection, C2 communication, anti-analysis, persistence) matched against the carved region's code, independent of any YARA rule name | Dossier has no `capa` section; rely on YARA + structural findings only |
+| **FLOSS** | Decoded/stacked/tight strings - defeats simple string obfuscation (stack strings, XOR-encoded C2 config) that a plain `strings` pass misses | Dossier falls back to raw string extraction only |
+| **DC3-MWCP** | Config-extraction **verification layer**, run automatically against every carved region: `mwcp_verified_iocs` (an address/mutex/domain the IOC sweep already found, now confirmed by binary parsing - upgrade confidence) vs `mwcp_new_iocs` (something the sweep missed - a new lead). Audit trail: `mwcp_scan_log.txt` in `-OutputDir`, one `[MATCH]`/`[CLEAN]` line per scanned region. | Dossier's IOC list is sweep-only (regex/string-based), no binary-parse confirmation |
+| **GeoIP** (db-ip Country Lite) | Ties every recovered C2 IP to a country **offline** - no DNS/whois/API call that would tip off the adversary or leak the investigation | Recovered IPs show with no country context; do the OSINT lookup manually (see Hand-off below) |
+
+> **mwcp's generic parsers are noisy over managed-code memory.** Scanning a `.NET`/PowerShell-hosted
+> region routinely produces `[MATCH]` entries that are CLR namespace strings (`System.IO`) or
+> WinAPI import names misreported as "mutex" - not real C2 config. Read `mwcp_new_iocs` as *candidates
+> requiring confirmation*, the same as any other sweep lead; do not treat a raw mwcp `[MATCH]` line as
+> proof by itself. (The ML investigation engine applies this same skepticism automatically when it
+> ingests `mwcp_scan_log.txt` - see its README.)
+
 **How to read each PID's enrichment (the verdict table):**
 
 | What enrichment shows for the PID | Verdict |
 |---|---|
-| Injected exec region(s) **and** recovered C2/miner/wallet resolving to **real adversary infra** | **CONFIRMED** - eradicate; its footprint *is* the eradication scope |
+| Injected exec region(s) **and** recovered C2/miner/wallet resolving to **real adversary infra**, especially with an `mwcp_verified_iocs` confirmation | **CONFIRMED** - eradicate; its footprint *is* the eradication scope |
 | Recovered domains are all the vendor's own SaaS (e.g. `*.adobe.com`), **0** injected regions/handles | **benign FP** - record why, clear it |
 | "Shellcode threads" but **0** injected regions and **0** IOCs | usually **benign JIT** (Acrobat/.NET/browsers) - confirm the thread starts are JIT stubs, not a payload |
 | Region is **file-backed** on a signed system DLL (the `LOLBin_*` cluster) | **benign** - the rule grazed a loaded library (verify its signature) |
 | Recovered "IOCs" trace to **files this analyst session handled** (case reports, test fixtures) | **self-reference** - not a host indicator |
+| mwcp `[MATCH]` is a CLR namespace string (`System.IO`, `Json.Net`) or a Microsoft telemetry domain (`aka.ms`) found scanning a PowerShell/.NET region | **parser noise** - not evidence; see the mwcp caveat above |
+
+**USB ↔ RAM first-seen correlation (`--correlate`)** - if USB history was collected **after** the
+initial run that produced `Memory_Enrichment_<stamp>.json`, re-join the two timelines without
+re-opening the (possibly huge) memory image:
+
+```powershell
+.\tools\memprocfs\python\python.exe `
+    .\playbooks\windows\threat_hunting\memory_enrich.py `
+    --correlate ".\reports\HOSTNAME"
+```
+
+This answers "was the removable device present **before** the implant first ran" (entry-vector
+candidate) vs "**after**" (introduced post-infection, not the source) by comparing each implant
+process's create time against each USB device's first-connect time on one UTC timeline.
 
 > **Watch for analysis-tooling and agent processes.** The memory-capture tool (`go-winpmem.exe`,
 > `winpmem.exe`) buffers a slice of **physical RAM**, so *its* process memory holds **ambient strings
@@ -545,6 +669,36 @@ Get-Content .\reports\HOSTNAME\Memory_Enrichment.md
 > *why*) so the next responder can trust it.
 
 For the YARA hit-to-verdict decision logic this phase uses, see **[WORKFLOW-YARA.md](WORKFLOW-YARA.md)**.
+
+### Phase 3c - Second-pass ML/correlation investigation (automated QA pass)
+
+**What it does.** A second, independent read over everything Phases 2/3/3b already collected
+(`Memory_Findings`, `Combined_Findings`, `EDR_Report`, `Adjudication`, `YARA_Pivot_TP`,
+`Persistence_Findings`, `mwcp_scan_log.txt`). It re-scores every PID from scratch against a
+stricter bar - 3+ independent structural/behavioral dimensions before calling something a True
+Positive - and deliberately looks for disagreements with the primary adjudication in **both**
+directions: things closed too early (**Potential Miss**) and things called TP that memory
+evidence alone can't yet independently support (**Unconfirmed Prior TP**). It also reconstructs
+process lineage and a kill-chain-tagged timeline per PID, and flags named technique shapes
+(Cobalt-Strike-style beacon, Ekko/Foliage sleep obfuscation, WMI persistence-to-execution,
+LOLBin-as-loader, PPID spoofing paired with execution, LSASS credential access) independent of
+the generic TP/FP threshold.
+
+```powershell
+# Run against everything already collected in reports\HOSTNAME\ -- no live image handle needed
+.\tools\memprocfs\python\python.exe -m playbooks.windows.investigation.live_runner ".\reports\HOSTNAME"
+```
+
+**Output:** `ML_Correlation_HOSTNAME_<stamp>.json/.md/.csv` alongside the existing reports.
+
+**Read the `.md` for:**
+- Per-PID verdict plus the dimensions that drove it (auditable, not a bare label)
+- **Potential Misses** - ML says suspicious, primary adjudication says closed; second-look candidates the primary workflow may have closed too early
+- **Unconfirmed Prior TPs** - primary adjudication says True Positive, but memory evidence alone doesn't independently confirm it (not necessarily wrong - may rest on EDR/event-log evidence outside memory)
+- Named TTP pattern matches, independent of the generic threshold
+
+See **[playbooks/windows/investigation/README.md](playbooks/windows/investigation/README.md)**
+for the full module list, known gaps, and design rationale.
 
 ### Hand-off to the analyst
 
@@ -564,12 +718,48 @@ IBM X-Force / Shodan) is its own cross-platform guide:
 persistence (tasks, COM, WMI, services), disables/revokes implicated accounts, and blocks C2 egress
 via firewall. **Every action is dry-run by default** and written to a rollback journal.
 
+**What it acts on, by finding type:**
+
+| Finding type | Action |
+|---|---|
+| Hidden Process / malicious process | Terminate PID + quarantine the binary (sha256-hashed into `Quarantine\`) |
+| COM Hijacking | Back up + remove the CLSID server registration |
+| Suspicious Scheduled Task | Disable + unregister the task |
+| Suspicious BITS Job | Remove the BITS transfer |
+
+**Hard safety rails (cannot be overridden by any flag):** never touches a validly-signed binary; never
+touches Microsoft Defender / core OS processes; never touches `\Windows\System32`, `\WinSxS`, or
+`\Program Files\WindowsApps`.
+
 ### Run it
 
 ```powershell
 .\Invoke-Eradication.ps1 -HostFolder .\reports\<HOSTNAME> -MinVerdict "Likely True Positive"          # dry-run
 .\Invoke-Eradication.ps1 -HostFolder .\reports\<HOSTNAME> -MinVerdict "Likely True Positive" -Apply   # apply
+
+# Restrict to specific findings only (skip firewall restore and credential revoke for a narrow test)
+.\Invoke-Eradication.ps1 -HostFolder .\reports\<HOSTNAME> -Apply `
+    -OnlyTargets "PID 4488 (msdtc.exe)" -NoFirewallRestore -NoCredentialRevoke
 ```
+
+### `Invoke-Eradication.ps1` - full parameters
+
+| Parameter | Type | Default | What it does |
+|---|---|---|---|
+| `-HostFolder` | string | current directory | Per-host collection folder (`reports\<HOSTNAME>`). |
+| `-AdjudicationPath` | string | newest `Adjudication_*.json` in `-HostFolder` | Explicit adjudication file to act on. |
+| `-MinVerdict` | `'True Positive'` \| `'Likely True Positive'` | `'True Positive'` | Minimum verdict to act on. |
+| `-Apply` | switch | off | Actually perform eradication. Without it, prints the plan and changes nothing. |
+| `-OnlyTargets` | string[] | `@()` (all) | Restrict eradication to specific finding `Target` strings - use to eradicate one confirmed implant while leaving other TP-class findings for further review. |
+| `-NoFirewallRestore` | switch | off | Skip restoring the pre-incident firewall (`.wfw` from Phase 0 lockdown). Default behavior restores known-good rules **except** IOCs.json's known-bad C2, which stay blocked. |
+| `-FirewallBackup` | string | from `_firewall_state.json` | Explicit `.wfw` file to restore, overriding the auto-detected one. |
+| `-IocPath` | string | newest `IOCs.json` in `-HostFolder` | Explicit IOC file for the post-restore C2 re-block. |
+| `-NoCredentialRevoke` | switch | off | Skip disabling implicated local accounts / purging Kerberos tickets / logging off their sessions (from `Principals.json`). A confirmed hands-on intrusion means those accounts are exposed - only skip this if you have a specific reason (e.g. the account is also needed for an active remediation task). |
+| `-PrincipalsPath` | string | `Principals.json` in `-HostFolder` | Explicit principals file for credential revocation. |
+
+Every change (process kill, quarantine, registry backup, task removal, firewall change, account
+disable) is written to `Eradication_rollback_<stamp>.jsonl` - reversible, and re-verified after
+execution. Output: `Eradication_<stamp>.json` / `.md` in the host folder.
 
 ### Egress observation (OPTIONAL, deferred - extends past the analyst's visit)
 
@@ -594,6 +784,56 @@ closes (default **24h**) a one-shot task **auto-blackholes egress**
 > unique destinations) and bundle it as evidence, and (2) confirm the blackhole fired (`-Status` →
 > `blackhole: done`). Tune with `-WindowHours` / `-IntervalMin`; `-Blackhole` cuts egress
 > immediately, `-Stop` tears the sensor down without blackholing.
+
+### Advanced egress observation - `Start-EgressMonitor.ps1` (optional, replaces `Watch-Egress.ps1`)
+
+`Watch-Egress.ps1` above just **logs** connections and blackholes on a timer. If you staged
+`-IncludeMemProcFS -IncludeMWCP -IncludeEgressMonitor` in Part 1, a materially more capable daemon is
+available at `playbooks\windows\threat_hunting\egress_monitor\Start-EgressMonitor.ps1`:
+
+- Polls live connections via **MemProcFS** (falls back to `Get-NetTCPConnection` if the live driver is
+  unavailable) instead of a once-a-minute snapshot.
+- **Classifies** each connection as `CONFIRMED_BEACON` / `SUSPECTED_BEACON` / `MONITOR` using
+  multi-layer scoring: process context + periodicity + family hints - not just "external IP present."
+- On beacon confirmation: **carves the suspect PID's VAD regions and runs mwcp** (CobaltStrikeConfig,
+  GenericC2, PowerShellDecoder parsers) to extract the actual C2 config, and hunts persistence
+  (registry, scheduled tasks, named pipes) tied to that PID.
+- Once a config is extracted and the beacon is confirmed, **blackholes that specific C2 IP
+  immediately** (not just at window-close) via a Windows Firewall outbound block -
+  `-NoBlackhole` for observe-only mode.
+- Deploys itself as a **self-contained bundle** (Python daemon + MemProcFS + mwcp, no source tree
+  dependency) - safe to run from a copy on the target with nothing else present.
+
+```powershell
+# Start (24h window default, 5s poll):
+.\playbooks\windows\threat_hunting\egress_monitor\Start-EgressMonitor.ps1 -Start `
+    -IncidentId <HOSTNAME> -FlaggedPid "<pid1>,<pid2>"   # PIDs from enrichment (Phase 3b) get Layer-0 priority
+
+# Check status / read evidence / stop:
+.\playbooks\windows\threat_hunting\egress_monitor\Start-EgressMonitor.ps1 -Status
+.\playbooks\windows\threat_hunting\egress_monitor\Start-EgressMonitor.ps1 -Collect
+.\playbooks\windows\threat_hunting\egress_monitor\Start-EgressMonitor.ps1 -Stop
+```
+
+| Parameter | Default | What it does |
+|---|---|---|
+| `-Start` / `-Status` / `-Collect` / `-Blackhole` / `-Stop` | `-Status` | Mode - mutually exclusive parameter sets. |
+| `-WindowHours` | 24 (1-72, 0=indefinite) | Monitoring duration. |
+| `-PollSec` | 5 | Connection poll interval. |
+| `-IncidentId` | `'egress'` | Used in task names and output paths. |
+| `-MgmtIP` | - | CSV of IPs to exclude from external classification (your own management access). |
+| `-FlaggedPid` | - | CSV of PIDs pre-flagged by Phase 3b enrichment (anonymous exec VAD, ETW-TI) - any external connection from these triggers an immediate carve, skipping the normal beacon-scoring wait. |
+| `-BlackholeOnConfirm` | on | Auto-block confirmed C2 IPs after carve + config extraction. |
+| `-NoBlackhole` | off | Disable auto-blackholing (observe-only). |
+
+Output: `$StateDir\egress_evidence.jsonl` (append-only audit trail), `egress_report.json` (live
+summary), `egress_monitor.log` (daemon log), `carved_<proc>_<pid>\` (carved regions + mwcp output per
+confirmed beacon).
+
+> **Choose one, not both.** `Watch-Egress.ps1` is the default (`-NoEgressMonitor` skips it) and needs no
+> extra staging. `Start-EgressMonitor.ps1` is the deliberate opt-in upgrade for cases where you need
+> config extraction and faster, targeted blackholing rather than a 24h wait-and-block. Running both
+> against the same host would double-count connections and could race on the firewall block.
 
 ---
 
@@ -634,10 +874,23 @@ The reports are intentionally split: the three **final reports** show only beyon
 | `findings_amcache_<stamp>.json` | ShimCache / Amcache historical-execution findings. |
 | `Evidence\<finding>\` | Per-finding evidence bundle (copied binary, hashes, signature, modules, network) for TP-class findings. |
 | `Memory_Findings_<stamp>.json` | Memory-analysis findings (Phase 3, only if a memory image was analyzed). |
+| `YARA_Pivot_TP.json` / `YARA_Pivot_Report.md` | Ranked YARA hit PIDs from `-Adjudicate`'s report-regeneration step (Phase 3) - the input list for Phase 3b enrichment. |
+| `Memory_Enrichment_<stamp>.json` / `Memory_Enrichment.md` | Phase 3b per-PID dossiers (handles, injected regions, capa/FLOSS/mwcp results, recovered IOCs, first-seen timeline) + rolled-up eradication IOC bundle. Only produced for MemProcFS/AFF4 images. |
+| `mwcp_scan_log.txt` | Phase 3b audit trail - one `[MATCH]`/`[CLEAN]` line per carved region DC3-MWCP scanned. Only produced if `-IncludeMWCP` was staged. |
+| `Quarantine\` | Sha256-hashed copies of binaries eradication terminated and quarantined (Phase 4). |
+| `Eradication_<stamp>.json` / `.md` | Phase 4 eradication plan/results - what was (or would be, in dry-run) done per finding. |
+| `Eradication_backup_<stamp>\` | Pre-eradication backups (registry exports, task XML) for anything eradication modified. |
+| `Eradication_rollback_<stamp>.jsonl` | Append-only rollback journal - every eradication action, reversible. |
 | `_clock.json` | Host clock context (timezone, UTC offset, NTP sync state, skew). |
 | `_custody_<stamp>.json` + `_custody_log.jsonl` | Chain-of-custody seal - SHA256 manifest + HMAC-SHA256 signature. |
 | `forensics-<stamp>.zip` | Raw collected artifacts (event-log CSVs, process/network/persistence snapshots, ShimCache/Amcache exports). |
 | `_<Phase>_<stamp>.log` / `_runtime_<stamp>.log` | Per-phase and overall runtime logs. |
+
+> **Egress observation artifacts live outside `reports\<HOSTNAME>\`** (they run on the target after the
+> analyst leaves): `Watch-Egress.ps1` writes to `C:\ProgramData\IRToolkit\egress-<id>\`;
+> `Start-EgressMonitor.ps1` writes `egress_evidence.jsonl` / `egress_report.json` /
+> `egress_monitor.log` / `carved_<proc>_<pid>\` to its own `$StateDir`. Collect both back into the
+> case folder as evidence when you return (see Phase 4).
 
 ## Invoke-IRCollection.ps1 - full parameters
 

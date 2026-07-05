@@ -244,6 +244,86 @@ def test_rollup_iocs_aggregates_footprint():
     assert set(b["implicated_pids"]) == {1204, 9000, 13680}
 
 
+def test_rollup_iocs_adds_high_severity_handle_holder_to_implicated_pids():
+    """A PID that holds a High-severity Module 23 cross-process handle INTO this
+    confirmed-TP process is a strong candidate for the actual injecting/controlling
+    process -- must be added to implicated_pids for eradication scope."""
+    dossiers = [{
+        "pid": 13680, "handles": [], "lineage": {}, "network": [], "threat_iocs": {},
+        "cross_process_handles": {
+            "handles_held_by": [{"holder_pid": 6666, "severity": "High",
+                                  "type": "Cross-Process Handle (Memory)", "details": "..."}],
+            "holds_handles_into": [],
+        },
+    }]
+    b = me.rollup_iocs(dossiers)
+    assert 6666 in b["implicated_pids"]
+
+
+def test_rollup_iocs_excludes_low_severity_handle_holder():
+    """A Low-severity holder (memory_forensic.py's OS-session-management downgrade) must
+    NOT be added to implicated_pids -- that's structurally expected OS behavior, and
+    every process on the box would otherwise pull in csrss.exe/services.exe/etc."""
+    dossiers = [{
+        "pid": 13680, "handles": [], "lineage": {}, "network": [], "threat_iocs": {},
+        "cross_process_handles": {
+            "handles_held_by": [{"holder_pid": 840, "severity": "Low",
+                                  "type": "Cross-Process Handle (Memory)", "details": "..."}],
+            "holds_handles_into": [],
+        },
+    }]
+    b = me.rollup_iocs(dossiers)
+    assert 840 not in b["implicated_pids"]
+
+
+def test_rollup_iocs_does_not_implicate_targets_this_pid_reaches_into():
+    """'holds_handles_into' (this TP process reaching into some OTHER process) must NOT
+    by itself implicate that other process -- e.g. a TP process touching lsass.exe doesn't
+    mean lsass.exe needs eradication."""
+    dossiers = [{
+        "pid": 13680, "handles": [], "lineage": {}, "network": [], "threat_iocs": {},
+        "cross_process_handles": {
+            "handles_held_by": [],
+            "holds_handles_into": [{"target_pid": 680, "severity": "High",
+                                    "type": "Cross-Process Handle (Memory)", "details": "..."}],
+        },
+    }]
+    b = me.rollup_iocs(dossiers)
+    assert 680 not in b["implicated_pids"]
+
+
+def test_load_handle_attributions_indexes_by_holder_and_target(tmp_path):
+    findings = [
+        {"Type": "Cross-Process Handle (Memory)", "Severity": "High",
+         "Target": "PID 6666 (evil.exe) -> Target PID 13680",
+         "Details": "Name: evil.exe holds a PROCESS handle into PID 13680."},
+        {"Type": "Cross-Process Thread Handle (Memory)", "Severity": "Low",
+         "Target": "PID 840 (csrss.exe) -> Target PID 13680 TID 999",
+         "Details": "Name: csrss.exe holds a THREAD handle into PID 13680 TID 999."},
+        {"Type": "YARA Match (Memory)", "Severity": "High",
+         "Target": "PID 13680 (evil.exe)", "Details": "unrelated finding type"},
+    ]
+    (tmp_path / "Memory_Findings_1.json").write_text(json.dumps(findings))
+    by_holder, by_target = me.load_handle_attributions(str(tmp_path))
+    assert len(by_holder[6666]) == 1
+    assert len(by_holder[840]) == 1
+    assert len(by_target[13680]) == 2
+    assert 13680 not in by_holder, "PID 13680 is only ever a target here, never a holder"
+
+
+def test_load_handle_attributions_ignores_unrelated_finding_types(tmp_path):
+    findings = [{"Type": "YARA Match (Memory)", "Severity": "High",
+                 "Target": "PID 13680 (evil.exe)", "Details": "unrelated"}]
+    (tmp_path / "Memory_Findings_1.json").write_text(json.dumps(findings))
+    by_holder, by_target = me.load_handle_attributions(str(tmp_path))
+    assert by_holder == {} and by_target == {}
+
+
+def test_load_handle_attributions_no_file_returns_empty(tmp_path):
+    by_holder, by_target = me.load_handle_attributions(str(tmp_path))
+    assert by_holder == {} and by_target == {}
+
+
 def test_merge_into_iocs_feeds_eradication(tmp_path):
     """Recovered C2 folds into c2_endpoints (so the firewall keeps it blocked) and the
     files/keys/mutexes land in a memory_eradication block. Eradication is gated elsewhere."""
@@ -453,6 +533,38 @@ def test_load_usb_devices_flattens_and_sorts():
     devs = me.load_usb_devices(bundle)
     assert [d["vendor"] for d in devs] == ["VENDORC", "SAMSUNG"]     # earliest first
     assert all(d["first_connect"] is not None for d in devs)
+
+
+def test_load_usb_devices_single_device_powershell_collapse_does_not_crash():
+    """PowerShell's ConvertTo-Json collapses a single-element array to a bare object -- a real
+    USB_Forensics_*.json with exactly one device serializes usb_devices as a flat dict, not a
+    list-of-one. This must be normalized rather than crash with
+    AttributeError: 'str' object has no attribute 'get' (iterating a dict yields its keys)."""
+    bundle = {"usb_devices": {"Vendor": "SAMSUNG", "Product": "FLASH_DRIVE", "Serial": "S1",
+                              "FirstConnect": "/Date(1770307252478)/"}}
+    devs = me.load_usb_devices(bundle)
+    assert len(devs) == 1
+    assert devs[0]["vendor"] == "SAMSUNG"
+    assert devs[0]["product"] == "FLASH_DRIVE"
+
+
+def test_load_usb_devices_skips_malformed_non_dict_entries():
+    """A malformed/string record inside an otherwise-real list must be skipped, not crash the
+    whole enrichment run over one bad entry."""
+    bundle = {"usb_devices": [
+        {"Vendor": "VENDORC", "Product": "CODE", "Serial": "S1", "FirstConnect": "/Date(1770307252478)/"},
+        "not-a-device-record",
+        123,
+        None,
+    ]}
+    devs = me.load_usb_devices(bundle)
+    assert len(devs) == 1
+    assert devs[0]["vendor"] == "VENDORC"
+
+
+def test_load_usb_devices_missing_key_returns_empty():
+    assert me.load_usb_devices({}) == []
+    assert me.load_usb_devices({"usb_devices": None}) == []
 
 
 def test_correlate_first_seen_entry_vector_candidate():

@@ -247,6 +247,57 @@ def test_yara_pivot_report_absent_without_hits(tmp_path):
     assert not os.path.isfile(os.path.join(str(folder), "YARA_Pivot_Report.md"))
 
 
+def test_yara_pivot_suppressed_when_adjudicator_cleared_every_hit_as_fp(tmp_path):
+    """A generic rule firing on 2 distinct rule names would normally clear the score>=3 TP
+    threshold on hit-count alone -- but if the adjudicator (Get-FindingContext.ps1 -Live) already
+    cleared BOTH underlying YARA hits as False Positive (e.g. signed binary, known-vendor path),
+    that verdict must win: the PID must NOT be promoted to true-positive-class, and therefore must
+    NOT reach YARA_Pivot_TP.json / memory_enrich.py / IOCs.json eradication scope."""
+    findings = [
+        {"Type": "YARA Match (Memory)", "Target": "PID 4520 (IntelAudioServ)",
+         "Details": "Rule: LOLBin_BITS_Drop | 1 match(es)", "MITRE": "T1197", "Verdict": "False Positive"},
+        {"Type": "YARA Match (Memory)", "Target": "PID 4520 (IntelAudioServ)",
+         "Details": "Rule: Suspicious_PowerShell_WebDownload_1 | 1 match(es)", "MITRE": "T1027",
+         "Verdict": "Likely False Positive"},
+    ]
+    folder = _pivot_folder(tmp_path, findings, name="FPCLEARED")
+    res = gr.generate(str(folder), incident_id="FPCLEARED_t")
+    md = open(res["yara_pivot"], encoding="utf-8").read()
+    assert "0 true-positive-class" in md
+    assert "Likely True Positive" not in md
+    assert not os.path.isfile(os.path.join(str(folder), "YARA_Pivot_TP.json"))
+
+
+def test_yara_pivot_not_suppressed_when_only_some_hits_cleared_fp(tmp_path):
+    """If the adjudicator cleared ONE YARA hit as FP but left another (a named malware/APT
+    signature, alone worth the TP threshold) True Positive, the pivot's own signal-convergence
+    score must still stand -- partial clearance is not blanket clearance."""
+    findings = [
+        {"Type": "YARA Match (Memory)", "Target": "PID 777 (evil.exe)",
+         "Details": "Rule: LOLBin_BITS_Drop | 1 match(es)", "MITRE": "T1197", "Verdict": "False Positive"},
+        {"Type": "YARA Match (Memory)", "Target": "PID 777 (evil.exe)",
+         "Details": "Rule: REDLEAVES_CoreImplant_UniqueStrings | 1 match(es)", "MITRE": "T1055",
+         "Verdict": "True Positive"},
+    ]
+    folder = _pivot_folder(tmp_path, findings, name="PARTIALFP")
+    res = gr.generate(str(folder), incident_id="PARTIALFP_t")
+    md = open(res["yara_pivot"], encoding="utf-8").read()
+    assert "1 true-positive-class" in md
+    assert "Likely True Positive" in md
+
+
+def test_correlate_yara_pivots_unadjudicated_findings_not_gated(tmp_path):
+    """Findings with no Verdict field at all (came from Combined_Findings, not Adjudication_*.json
+    -- i.e. the adjudicator never ran) must NOT be treated as adjudicated-FP; there is no verdict
+    to defer to, so the pivot's own signal-convergence score is authoritative."""
+    findings = [
+        {"Type": "YARA Match (Memory)", "Target": "PID 42 (a.exe)",
+         "Details": "Rule: REDLEAVES_CoreImplant_UniqueStrings | 1 match(es)"},
+    ]
+    cp = {p["pid"]: p for p in gr.correlate_yara_pivots(findings)}
+    assert cp["42"]["true_positive"] is True
+
+
 def test_correlate_yara_pivots_confidence_unit():
     """Unit-level: TP confidence is driven by hit quality — named signature confirms, lone generic
     does not, and a path-spoof alone does not rescue a generic hit (FP-prone)."""

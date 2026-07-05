@@ -538,6 +538,17 @@ def rollup_iocs(dossiers):
                 ([d["lineage"]["parent"]] if d.get("lineage", {}).get("parent") else []):
             if rel.get("pid"):
                 pids.add(rel["pid"])
+        # Module 23 attribution: a PID that holds a HIGH-severity cross-process handle INTO
+        # this confirmed-TP process is a strong candidate for being the actual injecting/
+        # controlling process -- add it to eradication scope. Only the "handles_held_by"
+        # (target) direction is used here, not "holds_handles_into" -- this TP process
+        # reaching into some OTHER process doesn't by itself implicate that other process
+        # (e.g. a TP process touching lsass.exe doesn't mean lsass.exe needs eradication).
+        # Low-severity (OS session-management, already downgraded by memory_forensic.py) is
+        # excluded -- that's structurally expected OS behavior, not attribution.
+        for h in d.get("cross_process_handles", {}).get("handles_held_by", []):
+            if h.get("severity") == "High" and h.get("holder_pid"):
+                pids.add(h["holder_pid"])
         ti = d.get("threat_iocs", {})
         for c in _THREAT_CATS:
             agg[c].update(ti.get(c, []))
@@ -802,9 +813,20 @@ def earliest_thread_create(threads):
 
 def load_usb_devices(usb_bundle):
     """Flatten a USB_Forensics_*.json bundle into [{vendor, product, serial, first_connect(dt),
-    suspicion, verdict}], earliest first. Tolerant of missing fields."""
+    suspicion, verdict}], earliest first. Tolerant of missing fields.
+
+    PowerShell's ConvertTo-Json collapses a single-element array to a bare object, so with
+    exactly one USB device usb_devices is a dict, not a list -- iterating it directly yields its
+    string keys ('Vendor', 'Product', ...) and d.get(...) on those blows up with
+    AttributeError: 'str' object has no attribute 'get'. Normalize the single-object case, and
+    skip any other non-dict entry defensively."""
     out = []
-    for d in (usb_bundle.get("usb_devices") or []):
+    devices = usb_bundle.get("usb_devices") or []
+    if isinstance(devices, dict):
+        devices = [devices]
+    for d in devices:
+        if not isinstance(d, dict):
+            continue
         out.append({
             "vendor": d.get("Vendor", ""), "product": d.get("Product", ""),
             "serial": d.get("Serial", ""), "suspicion": d.get("Suspicion", ""),
@@ -926,6 +948,41 @@ def _safe(fn, default):
         return default
 
 
+def _module_namespace_basenames(mod_ranges):
+    """Loaded-module basenames for THIS process, dotted form, extension stripped,
+    lowercased -- e.g. 'C:\\...\\System.Runtime.dll' -> 'system.runtime'.
+    Ground truth already collected for this exact process at this exact time --
+    used to filter recovered 'domain' candidates that are actually a .NET/CLR
+    namespace or assembly name, not network infrastructure. Confirmed live: a
+    Phone Link process's memory yielded 'system.io', 'system.net', and
+    'microsoft.windows.sdk.net' as structurally-valid-looking domains (real TLD,
+    valid RFC-1035 labels) purely because .NET namespace strings coincidentally
+    share domain syntax. Shape alone can't tell these apart; cross-referencing
+    against the process's own loaded modules can.
+    """
+    names = set()
+    for _, _, fullname in mod_ranges:
+        base = str(fullname or '').replace('\\', '/').rsplit('/', 1)[-1]
+        if '.' in base:
+            base = base.rsplit('.', 1)[0]   # strip .dll/.exe
+        if base:
+            names.add(base.lower())
+    return names
+
+
+def _is_own_module_namespace(host, module_basenames):
+    """True if a recovered domain-shaped string is a prefix of (or exactly) one
+    of this process's own loaded module basenames, dot-for-dot. Domain scraping
+    can stop early at a coincidental TLD-shaped segment (e.g. 'system.io' inside
+    'System.IO.Abstractions.Wrappers.dll'), so this checks prefix, not just
+    exact match.
+    """
+    h = str(host or '').strip().rstrip('.').lower()
+    if not h:
+        return False
+    return any(m == h or m.startswith(h + '.') for m in module_basenames)
+
+
 def enrich_pid(vmm, p, pid_map, nets_by_pid, carve_dir, size_cap=16 * 1024 * 1024,
                capa_exe=None, floss_exe=None, mwcp_py=None, mwcp_lib=None, out_dir=None):
     """Build one PID's full memory footprint and carve its injected exec regions."""
@@ -936,6 +993,7 @@ def enrich_pid(vmm, p, pid_map, nets_by_pid, carve_dir, size_cap=16 * 1024 * 102
         b, sz = _safe(lambda: m.base, 0), _safe(lambda: m.image_size, 0)
         if b:
             mod_ranges.append((b, b + sz, _safe(lambda: m.fullname, "") or _safe(lambda: m.name, "")))
+    module_basenames = _module_namespace_basenames(mod_ranges)
 
     # handles -> categorised footprint
     handles = []
@@ -1076,10 +1134,32 @@ def enrich_pid(vmm, p, pid_map, nets_by_pid, carve_dir, size_cap=16 * 1024 * 102
     lineage = {"parent": {"pid": parent.pid, "name": parent.name} if parent else None,
                "children": children}
 
+    # Beyond-shadow-of-a-doubt filters, applied once at the end (not per-region, so
+    # a namespace fragment recovered from one region is still caught even if the
+    # module list was only fully populated after that region was read):
+    #
+    # 1. A "domain" that is provably this process's own loaded module namespace,
+    #    not network infrastructure -- structurally indistinguishable from a real
+    #    domain by shape alone, but a direct match against this process's own
+    #    module list (ground truth already collected) is unambiguous.
+    filtered_out_domains = [d for d in threat["domains"] if _is_own_module_namespace(d, module_basenames)]
+    if filtered_out_domains:
+        threat["domains"] = sorted(set(threat["domains"]) - set(filtered_out_domains))
+    #
+    # 2. mwcp's mutex parser over managed-code memory extracts hex-padding/heap
+    #    noise, not real mutex names -- the SAME _HEX_TOKEN shape already used to
+    #    gate handle-based mutex classification above, but mwcp results bypassed
+    #    that gate entirely on the assumption family-specific parsing is always
+    #    reliable. Confirmed live: 'fffffff', '0123456789abcdef', '110101' all
+    #    came back tagged "CONFIRMED malware-created" from a clean process.
+    #    A string this shape cannot be distinguished from padding regardless of
+    #    which parser reported it -- this is a shape fact, not a threat judgment.
+    mwcp_mutexes = [mx for mx in mwcp_mutexes if not _HEX_TOKEN.match(str(mx))]
+
     network = nets_by_pid.get(pid, [])
     return {
         "pid": pid, "name": name, "cmdline": _safe(lambda: p.cmdline or "", ""),
-        "create_time": create_time,                 # process create (host start for an injected implant)
+        "create_time": create_time,                          # process create (host start for an injected implant)
         "injected_thread_first_seen": injected_first_seen,   # injected-thread create = implant first ran
         "handles": handles, "modules_loaded": len(mod_ranges),
         "injected_regions": regions, "shellcode_threads": threads,
@@ -1088,7 +1168,7 @@ def enrich_pid(vmm, p, pid_map, nets_by_pid, carve_dir, size_cap=16 * 1024 * 102
         "lineage": lineage, "network": network,
         "c2": {"ips": threat["ips"], "domains": threat["domains"], "urls": threat["urls"]},
         "threat_iocs": threat,
-        "mwcp_mutexes": mwcp_mutexes,   # DC3-MWCP confirmed malware-created mutex names
+        "mwcp_mutexes": mwcp_mutexes,                        # DC3-MWCP confirmed malware-created mutex names
     }
 
 
@@ -1358,6 +1438,37 @@ def _load_json(path):
         return None
 
 
+_HANDLE_TYPES = ("Cross-Process Handle (Memory)", "Cross-Process Thread Handle (Memory)")
+
+
+def load_handle_attributions(out_dir):
+    """Index memory_forensic.py's Module 23 findings (already on disk in
+    Memory_Findings_*.json by the time enrichment runs) by holder and by target PID,
+    so a TP PID's dossier can show BOTH directions: what it reaches into (holder) and
+    who reaches into it (target -- often the more interesting direction for a
+    confirmed-TP process, since it can attribute the injecting/controlling PID).
+    Returns (by_holder: {pid: [summary,...]}, by_target: {pid: [summary,...]})."""
+    mf = _load_json(_newest(out_dir, "Memory_Findings_*.json")) or []
+    by_holder, by_target = {}, {}
+    for f in mf:
+        ftype = f.get("Type", "")
+        if ftype not in _HANDLE_TYPES:
+            continue
+        tgt = f.get("Target", "")
+        m_holder = re.search(r"^PID\s+(\d+)", tgt)
+        m_target = re.search(r"Target PID\s+(\d+)", tgt)
+        if not m_holder or not m_target:
+            continue
+        holder_pid = int(m_holder.group(1))
+        target_pid = int(m_target.group(1))
+        summary = {"type": ftype, "severity": f.get("Severity", ""),
+                   "holder_pid": holder_pid, "target_pid": target_pid,
+                   "details": f.get("Details", "")}
+        by_holder.setdefault(holder_pid, []).append(summary)
+        by_target.setdefault(target_pid, []).append(summary)
+    return by_holder, by_target
+
+
 # ATT&CK phase classification for confirmed TP finding types.
 _TP_PHASE = {
     "Shellcode Thread (Memory)":                    "Execution",
@@ -1540,6 +1651,22 @@ def build_enrichment_md(bundle):
             a("**Suspicious handles (eradication artifacts):**")
             for h in susp:
                 a(f"- `{h['category']}` {h['name']}")
+            a("")
+        cph = d.get("cross_process_handles", {})
+        held_by = cph.get("handles_held_by", [])
+        if held_by:
+            a("**Cross-process handle attribution -- other processes reaching INTO this PID "
+              "(Module 23; a High-severity holder here is a strong candidate for the actual "
+              "injecting/controlling process):**")
+            for h in held_by:
+                a(f"- PID {h['holder_pid']} holds a {h['type'].replace(' (Memory)', '')} "
+                  f"({h.get('severity', '')}) -- {h.get('details', '')}")
+            a("")
+        holds_into = cph.get("holds_handles_into", [])
+        if holds_into:
+            a("**Cross-process handle attribution -- this PID reaching into others (Module 23):**")
+            for h in holds_into:
+                a(f"- into PID {h['target_pid']} ({h.get('severity', '')}) -- {h.get('details', '')}")
             a("")
         ti = d.get("threat_iocs", {})
         ioc_lines = [(key, label, ti.get(key, [])) for key, label in _IOC_LABELS if ti.get(key)]
@@ -1743,6 +1870,13 @@ def run(image, out_dir, pids):
     print(f"[*] capa:  {capa_exe or 'not staged'}")
     print(f"[*] floss: {floss_exe or 'not staged'}")
     print(f"[*] mwcp:  {'python -m mwcp (lib: ' + str(mwcp_lib) + ')' if mwcp_py else 'not staged -- run: .\\Build-OfflineToolkit.ps1 -IncludeMWCP'}")
+    # Module 23's cross-process handle/thread attribution (memory_forensic.py) is already
+    # on disk by the time enrichment runs -- index it once so each TP PID's dossier can show
+    # both directions: what it reaches into (holder) and who reaches into it (target). The
+    # target direction often matters more for a confirmed-TP process, since it can attribute
+    # the PID actually doing the injecting/controlling.
+    handles_by_holder, handles_by_target = load_handle_attributions(out_dir)
+
     dossiers = []
     for pid in pids:
         p = pid_map.get(pid)
@@ -1750,10 +1884,16 @@ def run(image, out_dir, pids):
             print(f"[!] PID {pid} not in image - skipping")
             continue
         print(f"[*] enriching PID {pid} ({p.name}) ...")
-        dossiers.append(enrich_pid(vmm, p, pid_map, nets_by_pid, carve_dir,
-                                   capa_exe=capa_exe, floss_exe=floss_exe,
-                                   mwcp_py=mwcp_py, mwcp_lib=mwcp_lib,
-                                   out_dir=out_dir))
+        dossier = enrich_pid(vmm, p, pid_map, nets_by_pid, carve_dir,
+                             capa_exe=capa_exe, floss_exe=floss_exe,
+                             mwcp_py=mwcp_py, mwcp_lib=mwcp_lib,
+                             out_dir=out_dir)
+        holder_of = handles_by_holder.get(pid, [])
+        target_of = handles_by_target.get(pid, [])
+        if holder_of or target_of:
+            dossier["cross_process_handles"] = {"holds_handles_into": holder_of,
+                                                 "handles_held_by": target_of}
+        dossiers.append(dossier)
 
     # attach the YARA rules the pivot matched per PID (so the attack-chain implant node names them)
     tp_path = os.path.join(out_dir, "YARA_Pivot_TP.json")
