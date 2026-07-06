@@ -78,13 +78,56 @@ $mode = if ($Apply) { 'APPLY' } else { 'DRY-RUN' }
 Write-Host "[*] Eradication ($mode) from $(Split-Path -Leaf $AdjudicationPath) - MinVerdict='$MinVerdict'" -ForegroundColor Cyan
 
 # -- Safety rails --------------------------------------------------------------
+# PESTER-EXTRACT-START: pure-logic functions (Test-Protected, Get-EradicationOrder, Test-AlreadySinkholed)
 $ProtectedNames = @('MsMpEng','MpDefenderCoreService','NisSrv','MsSense','SenseIR','SenseCncProxy',
     'System','Idle','smss','csrss','wininit','winlogon','services','lsass','svchost','spoolsv',
     'explorer','dwm','fontdrvhost','RuntimeBroker','WmiPrvSE','taskhostw','SearchIndexer')
+# Expected on-disk path per protected name (lowercase, prefix-matched). A name-only
+# match is NOT sufficient protection: malware named svchost.exe/explorer.exe/lsass.exe
+# running from an unexpected path is exactly the LOTL path-masquerade technique the
+# rest of this toolkit is built to detect (see the ML investigation engine's
+# LOTL_SVCHOST_WRONG_PATH scenario) -- if that finding correctly reaches this script
+# as a True Positive, protecting it by name alone would make it un-eradicable.
+# Names absent from this table (kernel pseudo-processes System/Idle, or names whose
+# install path varies by deployment) fall back to name-only protection.
+$ProtectedPaths = @{
+    'smss'          = @('c:\windows\system32\smss.exe')
+    'csrss'         = @('c:\windows\system32\csrss.exe')
+    'wininit'       = @('c:\windows\system32\wininit.exe')
+    'winlogon'      = @('c:\windows\system32\winlogon.exe')
+    'services'      = @('c:\windows\system32\services.exe')
+    'lsass'         = @('c:\windows\system32\lsass.exe')
+    'svchost'       = @('c:\windows\system32\svchost.exe', 'c:\windows\syswow64\svchost.exe')
+    'spoolsv'       = @('c:\windows\system32\spoolsv.exe')
+    'explorer'      = @('c:\windows\explorer.exe')
+    'dwm'           = @('c:\windows\system32\dwm.exe')
+    'fontdrvhost'   = @('c:\windows\system32\fontdrvhost.exe')
+    'RuntimeBroker' = @('c:\windows\system32\runtimebroker.exe')
+    'WmiPrvSE'      = @('c:\windows\system32\wbem\wmiprvse.exe')
+    'taskhostw'     = @('c:\windows\system32\taskhostw.exe')
+    'SearchIndexer' = @('c:\windows\system32\searchindexer.exe')
+    'MsMpEng'       = @('c:\programdata\microsoft\windows defender\platform\', 'c:\program files\windows defender\')
+}
 function Test-Protected {
     param([string]$Name,[string]$Path,[string]$Sig)
     $bare = ($Name -replace '\.exe$','')
-    if ($bare -and ($ProtectedNames -contains $bare)) { return "protected process name '$bare'" }
+    if ($bare -and ($ProtectedNames -contains $bare)) {
+        if ($ProtectedPaths.ContainsKey($bare) -and $ProtectedPaths[$bare].Count -and $Path) {
+            $pathLower = $Path.ToLower()
+            $onExpectedPath = $false
+            foreach ($expected in $ProtectedPaths[$bare]) {
+                if ($pathLower.StartsWith($expected)) { $onExpectedPath = $true; break }
+            }
+            if ($onExpectedPath) { return "protected process name '$bare' (path-verified)" }
+            # Name matches a protected process but the path does not -- do NOT protect.
+            # This is the path-masquerade case; fall through to the remaining checks.
+        } else {
+            # No path evidence available, or this name has no fixed expected path
+            # (kernel pseudo-process) -- conservative default: protect by name alone
+            # rather than risk eradicating a legitimate system process on missing data.
+            return "protected process name '$bare'"
+        }
+    }
     if ($Sig -eq 'Valid') { return 'binary is validly code-signed' }
     if ($Path -match '(?i)\\Windows\\System32\\|\\Windows\\SysWOW64\\|\\Windows\\WinSxS\\|\\Program Files\\WindowsApps\\') {
         return 'binary in a protected OS location'
@@ -93,6 +136,32 @@ function Test-Protected {
 }
 $Rank = @{ 'True Positive'=2; 'Likely True Positive'=1 }
 function Write-Journal { param([hashtable]$E) ($E | ConvertTo-Json -Compress) | Out-File -FilePath $Journal -Append -Encoding UTF8 }
+
+# Persistence/config-removal types are eradicated BEFORE process-kill types. A crash
+# or interruption mid-run should leave "persistence removed, dirty process still
+# running" (safe: the process cannot survive a reboot or re-trigger) rather than
+# "process killed, persistence intact" (unsafe: the persistence mechanism relaunches
+# it before the next eradication pass gets a chance to clean up).
+function Get-EradicationOrder {
+    param([string]$Type)
+    if ($Type -match '(?i)COM Hijack|Scheduled Task|BITS|Remote Access|Defender Exclusion') { return 0 }
+    if ($Type -match '(?i)Hidden Process|Process|Injection|LOLBin') { return 1 }
+    return 2
+}
+
+# "Does any existing hosts-file line already sinkhole this host" -- -notmatch against
+# an array filters per-element (returns the non-matching lines), it does NOT answer
+# "does any line match"; that filtered array is non-empty (truthy) almost always
+# regardless of whether the host is already present, which silently re-appended a
+# duplicate sinkhole line on every re-run. Isolated as its own function because this
+# exact array-vs-scalar operator confusion is easy to reintroduce.
+function Test-AlreadySinkholed {
+    param([string[]]$ExistingLines, [string]$TargetHost)
+    return @($ExistingLines | Where-Object { $_ -match [regex]::Escape($TargetHost) }).Count -gt 0
+}
+# PESTER-EXTRACT-END
+
+$adj = @($adj | Sort-Object { Get-EradicationOrder $_.Type })
 
 # -- Plan & execute ------------------------------------------------------------
 $actions = foreach ($f in $adj) {
@@ -115,12 +184,81 @@ $actions = foreach ($f in $adj) {
 
     switch -Regex ($f.Type) {
 
+        # Must be tested BEFORE the generic 'Hidden Process|Process|Injection|LOLBin' pattern
+        # below -- "Cross-Process Thread Handle (Memory)" contains the substring "Process" and
+        # would otherwise also match that pattern. Without the unconditional `break` at the end
+        # of this case, PowerShell's `switch -Regex` evaluates every matching pattern (not just
+        # the first), which would run BOTH this thread-scoped action AND the generic whole-
+        # process Stop-Process -- exactly doubling the blast radius this case exists to avoid.
+        'Cross-Process Thread Handle' {
+            # memory_forensic.py's Module 23 Target is 'PID <holder> (<name>) -> Target PID
+            # <target> TID <tid>' -- the same 'PID <n> (<name>)' convention every module uses
+            # (required so engine.py's investigation groups this finding under the HOLDER's
+            # pid, not the target's). The leading 'PID\s+(\d+)' match is anchored to the start
+            # of the string, so it always captures the holder, never the later 'Target PID'.
+            $holderPid = if ($f.Target -match '^PID\s+(\d+)') { [int]$Matches[1] } else { $null }
+            $targetTid = if ($f.Target -match 'TID\s+(\d+)') { [int]$Matches[1] } else { $null }
+            $rec.Action = "terminate TID $targetTid (holder PID $holderPid)"
+            if (-not $targetTid) { $rec.Status='failed'; $rec.Detail='no thread ID parsed from Target'; break }
+            if (-not $Apply) { $rec.Status='planned'; break }
+            # Killing the entire HOLDER process over one malicious thread risks destabilizing
+            # (or, if the holder resolves to a core session-management process, BSOD'ing) the
+            # system outright -- scoping to the single thread is the narrower, safer blast
+            # radius the user asked for. The upstream Test-Protected guard already vetoed acting
+            # on a protected holder identity (by the Details "Name:" tag) before this branch was
+            # ever reached; re-check the LIVE current process name here too as defense in depth,
+            # since TerminateThread is a sharper, less-recoverable primitive than the generic
+            # kill-PID path and adjudication data can be stale relative to a live host by the
+            # time -Apply actually runs.
+            $bsodCriticalNames = @('system','csrss','wininit','winlogon','services','smss')
+            $liveName = if ($holderPid) {
+                try { (Get-Process -Id $holderPid -ErrorAction Stop).Name } catch { $null }
+            } else { $null }
+            if ($liveName -and ($bsodCriticalNames -contains ($liveName -replace '\.exe$',''))) {
+                $rec.Status = 'failed'
+                $rec.Detail = "refused: holder PID $holderPid resolves live to '$liveName', a core OS session-management process -- terminating a thread inside it risks destabilizing or crashing the system"
+                break
+            }
+            try {
+                # TerminateThread is a blunt, undocumented-consequences primitive (Microsoft's
+                # own guidance: it does not run thread cleanup -- no stack unwind, no loader-lock
+                # release, no DLL_THREAD_DETACH -- and can leave the host process in a corrupted
+                # state). It is still the correct action here: the alternative (Stop-Process on
+                # the whole holder) is strictly worse for exactly the processes most likely to be
+                # legitimate multi-purpose hosts (e.g. svchost.exe running unrelated services).
+                Add-Type -Namespace IRToolkit -Name ThreadOps -MemberDefinition @'
+                    [DllImport("kernel32.dll", SetLastError=true)]
+                    public static extern System.IntPtr OpenThread(uint dwDesiredAccess, bool bInheritHandle, uint dwThreadId);
+                    [DllImport("kernel32.dll", SetLastError=true)]
+                    public static extern bool TerminateThread(System.IntPtr hThread, uint dwExitCode);
+                    [DllImport("kernel32.dll", SetLastError=true)]
+                    public static extern bool CloseHandle(System.IntPtr hObject);
+'@ -ErrorAction SilentlyContinue
+                $THREAD_TERMINATE = 0x0001
+                $hThread = [IRToolkit.ThreadOps]::OpenThread($THREAD_TERMINATE, $false, [uint32]$targetTid)
+                if ($hThread -ne [IntPtr]::Zero) {
+                    $ok = [IRToolkit.ThreadOps]::TerminateThread($hThread, 1)
+                    [IRToolkit.ThreadOps]::CloseHandle($hThread) | Out-Null
+                    if ($ok) { $rec.Status='eradicated'; $rec.Detail="TID $targetTid terminated" }
+                    else     { $rec.Status='failed'; $rec.Detail='TerminateThread failed' }
+                } else {
+                    $rec.Status='failed'; $rec.Detail="OpenThread failed for TID $targetTid (thread may have already exited)"
+                }
+            } catch { $rec.Status='failed'; $rec.Detail="$_" }
+            break
+        }
+
         'Hidden Process|Process|Injection|LOLBin' {
             $procId = if ($f.Target -match 'PID:\s*(\d+)') { [int]$Matches[1] } else { $null }
             $rec.Action = "kill PID $procId + quarantine"
             if (-not $Apply) { $rec.Status='planned'; break }
             try {
-                if ($procId) { Stop-Process -Id $procId -Force -ErrorAction SilentlyContinue }
+                $killedProc = $false
+                $quarantinedFile = $false
+                if ($procId) {
+                    Stop-Process -Id $procId -Force -ErrorAction SilentlyContinue
+                    $killedProc = $true
+                }
                 if ($f.SubjectPath -and (Test-Path -LiteralPath $f.SubjectPath -PathType Leaf)) {
                     New-Item -ItemType Directory -Path $QuarantineDir -Force | Out-Null
                     $hashPrefix = if ($f.SHA256) { "$($f.SHA256)".Substring(0,12) } else { 'nohash' }
@@ -128,8 +266,18 @@ $actions = foreach ($f in $adj) {
                     Write-Journal @{ action='quarantine'; original=$f.SubjectPath; dest=$dest; sha256=$f.SHA256 }
                     Move-Item -LiteralPath $f.SubjectPath -Destination $dest -Force
                     $rec.Detail = "quarantined -> $dest"
+                    $quarantinedFile = $true
                 }
-                $rec.Status = 'eradicated'
+                # Only claim 'eradicated' if something was actually done. A Target that
+                # doesn't parse a PID AND has no on-disk SubjectPath means neither the
+                # kill nor the quarantine step ran -- reporting 'eradicated' in that case
+                # would be a false success with nothing behind it.
+                if ($killedProc -or $quarantinedFile) {
+                    $rec.Status = 'eradicated'
+                } else {
+                    $rec.Status = 'failed'
+                    $rec.Detail = 'no PID parsed from Target and no on-disk SubjectPath -- nothing was done'
+                }
             } catch { $rec.Status='failed'; $rec.Detail="$_" }
         }
 
@@ -278,7 +426,7 @@ $md.Add("- Source: ``$(Split-Path -Leaf $AdjudicationPath)``  |  MinVerdict: **$
 $md.Add("- Targeted: $($acted.Count) of $($actions.Count) findings")
 if ($Apply) {
     $ok = @($actions | Where-Object { $_.Status -eq 'eradicated' -and $_.Verified }).Count
-    $md.Add("- Eradicated & verified: **$ok**  |  failed: $(@($actions|?{$_.Status -eq 'failed'}).Count)")
+    $md.Add("- Eradicated & verified: **$ok**  |  failed: $(@($actions | Where-Object {$_.Status -eq 'failed'}).Count)")
     $md.Add("- Rollback journal: ``$(Split-Path -Leaf $Journal)``")
 }
 $md.Add("")
@@ -402,7 +550,7 @@ if (-not $NoFirewallRestore) {
                 if (-not $isIp) {
                     $sink = "0.0.0.0`t$($kb.host)`t# IR sinkhole - adversary C2 ($IncidentId)"
                     $existing = if (Test-Path -LiteralPath $hostsFile) { Get-Content -LiteralPath $hostsFile -ErrorAction SilentlyContinue } else { @() }
-                    if ($existing -notmatch [regex]::Escape($kb.host)) {
+                    if (-not (Test-AlreadySinkholed -ExistingLines $existing -TargetHost $kb.host)) {
                         Add-Content -LiteralPath $hostsFile -Value $sink -ErrorAction SilentlyContinue
                         Write-Host "    [+] Sinkholed $($kb.host) -> 0.0.0.0 (hosts)" -ForegroundColor Green
                     }

@@ -1,5 +1,7 @@
 # IR Toolkit - Offline Incident Response Workflow
 
+[Gitbook](https://rob-weber.gitbook.io/dfir-toolkit)
+
 > **Development disclaimer.** This toolkit is under active parallel development as an investigatory
 > follow-on platform. The current focus is on refining and validating the manual investigation
 > workflows that a human analyst executes after anomalous activity has been confirmed beyond a
