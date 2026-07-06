@@ -29,6 +29,14 @@ import os
 import re
 import sys
 
+# Family-specific C2/beacon config extraction (Sliver/Mythic/Merlin/Havoc/
+# AdaptixC2/Pupy/BPFDoor/Mirai-Gafgyt/Ebury-class/unnamed-Go-C2/XMRig-class
+# miner/SMTP-exfil) -- the structured counterpart to this file's generic
+# IOC sweep. See c2_config_extract.py's module docstring for why this is a
+# plain stdlib module rather than an mwcp parser (mwcp is Windows-build-only).
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import c2_config_extract as _c2cfg
+
 # ---- IOC core (mirrors the Windows memory_enrich.py pure helpers; stdlib-only) ----------------
 _IPV4_RE = re.compile(r"\b(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)\b")
 _URL_RE = re.compile(
@@ -306,11 +314,15 @@ def enrich_region(bin_path):
                   "discord_webhooks", "miner_configs", "wallets"):
             iocs[k] = sorted(set(iocs[k]) | set(di[k]))[:50]
         iocs["private_keys"] += di["private_keys"]
+    # Family-specific structured config extraction (mechanism-based, not a generic
+    # string sweep) -- see c2_config_extract.py. Runs over the same region bytes.
+    c2_hits = _c2cfg.extract_all(data)
     return {"region_file": os.path.basename(bin_path),
             "pid": str(meta.get("pid", "")), "process": meta.get("process", ""),
             "base_address": meta.get("base_address", ""), "region": meta.get("region", ""),
             "perms": meta.get("perms", ""), "matched_rules": meta.get("matched_rules", []),
-            "iocs": iocs, "capa": capa, "floss_deobfuscated": len(floss["decoded"])}
+            "iocs": iocs, "capa": capa, "floss_deobfuscated": len(floss["decoded"]),
+            "c2_config_hits": c2_hits}
 
 
 def dossiers_to_findings(dossiers):
@@ -361,13 +373,18 @@ def dossiers_to_findings(dossiers):
             out.append(_finding("Medium", "Memory Capabilities (capa)", where,
                                 f"capa identified {len(capa['capabilities'])} capability(ies) in "
                                 f"{where}: {', '.join(capa['capabilities'][:10])}.", mitre))
+        c2_hits = d.get("c2_config_hits") or []
+        if c2_hits:
+            out.extend(_c2cfg.to_findings(c2_hits, where))
     return out
 
 
 def _notable(d):
-    """Keep a region's dossier if it carries IOCs OR capa capabilities (capa flags behaviour even
-    when no network IOC is present, e.g. anti-analysis / injection / encryption)."""
-    return has_iocs(d["iocs"]) or bool((d.get("capa") or {}).get("capabilities"))
+    """Keep a region's dossier if it carries IOCs, capa capabilities (capa flags behaviour even
+    when no network IOC is present, e.g. anti-analysis / injection / encryption), or a family-
+    specific C2 config hit."""
+    return (has_iocs(d["iocs"]) or bool((d.get("capa") or {}).get("capabilities"))
+            or bool(d.get("c2_config_hits")))
 
 
 def enrich(carve_dir, out_dir, stamp, quiet=False):

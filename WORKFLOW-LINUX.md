@@ -27,17 +27,28 @@ flowchart TD
     B5 --> B6["④ Remote-access triage
     reverse shells · RMM · tunnels"]:::step
     B6 --> B7["⑤ Journal analysis: brute force · sudo
-    new acct · service/cron · MAC/log tamper"]:::step
-    B7 --> B8["⑥ Merge → Adjudication (verdict ladder)
+    new acct · service/cron · MAC/log tamper · package events"]:::step
+    B7 --> B7b["⑥ Container/K8s hunt: escapes
+    privileged/hostPath · cluster-admin binds"]:::step
+    B7b --> B7c["⑦ Thread inventory: every TID
+    for each already-flagged PID"]:::step
+    B7c --> B8["⑧ Merge → Adjudication (verdict ladder)
     + Evidence bundles"]:::step
     B8 --> B9[/"IOCs.json · Principals.json
     Incident_Report · Attack_Graph · Timeline"/]:::artifact
 
-    B9 --> D0(["TARGET HOST - root"]):::phase
+    B9 --> C0(["ANALYST MACHINE (off-host)"]):::phase
+    C0 --> C1["Analyze-Memory-Linux.sh → memory_enrich.py
+    (if --capture-memory was used)"]:::tool
+    C1 --> C2["Investigation: live_runner.py
+    per-PID TP/FP/UNDETERMINED + lead pursuit"]:::step
+    C2 --> C3[/"Investigation_<host>_<stamp>.{json,md,csv}"/]:::artifact
+
+    C3 --> D0(["TARGET HOST - root"]):::phase
     D0 --> D1["Invoke-Eradication-Linux.sh --apply
     dry-run by default"]:::tool
-    D1 --> D2["Kill · quarantine (sha256) · disable persistence
-    revoke accounts · block C2"]:::step
+    D1 --> D2["Kill/suspend-thread · quarantine (sha256)
+    disable persistence · revoke accounts · block C2"]:::step
     D2 --> D3[/"06_restore.sh - sha256-verified restore"/]:::artifact
 
     classDef prep  fill:#1e3a5f,stroke:#3b82f6,color:#e2e8f0
@@ -103,8 +114,9 @@ The Linux analog of the Windows EventLogAnalysis. Reads `journalctl -o json` (li
 | Reverse shell          | `bash -i`, `/dev/tcp`, `nc -e`, `socat` one-liners                                                         | T1059.004             |
 | Log/MAC tamper         | journal vacuum, auditd disabled, SELinux/AppArmor disabled                                                 | T1070.002 / T1562.001 |
 | Unsigned kernel module | out-of-tree / verification-failed module loads (deduped per module)                                        | T1547.006 / T1014     |
+| Package manager transaction | dpkg/apt log, pacman log, RPM database - context for the investigation module, not a detection itself | N/A |
 
-Implant detection targets `/tmp`, `/var/tmp`, `/dev/shm` broadly, and `/run`/`/var/run` only when a payload (hidden file or script/binary) is implied - so tmpfs staging is covered without flooding on benign systemd runtime activity. Run standalone for offline re-analysis:
+Implant detection targets `/tmp`, `/var/tmp`, `/dev/shm` broadly, and `/run`/`/var/run` only when a payload (hidden file or script/binary) is implied - so tmpfs staging is covered without flooding on benign systemd runtime activity. Package-manager transactions (`--pkg-since-days`, default 30; `--no-pkg-events` to skip) let the investigation module below confirm or refute a "deleted binary due to package upgrade" theory with an actual matching transaction. Run standalone for offline re-analysis:
 
 ```bash
 # Live (bounded), writes Journal_Findings_<stamp>.json
@@ -113,6 +125,16 @@ python3 playbooks/linux/threat_hunting/journal_analysis.py --report-dir reports/
 # From an exported journal (offline)
 python3 playbooks/linux/threat_hunting/journal_analysis.py \
     --report-dir reports/<host> --input reports/<host>/forensics/journal.json
+```
+
+### Thread inventory (`playbooks/linux/threat_hunting/thread_inventory.py`)
+
+Runs after EDR/remote-access/journal/container hunt, auto-targeting every PID already flagged by any of them. A "PID" is a thread *group*, not one unit of execution - ptrace-based code injection compromises ONE specific thread, and the rest of that process's threads may be entirely legitimate. Enumerates every TID under each flagged PID (`/proc/<pid>/task/`), records state and ptrace `TracerPid`, and cross-references live TIDs against `analyze_memory_linux.py`'s `linux.pscallstack` stack-anomaly findings (when a memory image was also analyzed for the same incident) - a TID flagged by both a memory-forensic kernel-stack walk and live enumeration escalates to `Corroborated Injected Thread (memory+live)`. Populates `02_eradicate_process.sh`'s `IR_TARGET_TIDS` so eradication can suspend the SPECIFIC compromised thread instead of killing an entire protected/multi-threaded process.
+
+```bash
+python3 playbooks/linux/threat_hunting/thread_inventory.py --report-dir reports/<host>
+# --pid N (repeatable) to target specific PIDs instead of auto-discovery
+# --json-only prints {pid: [tid, ...]} for eradication tooling, no findings file
 ```
 
 ***
@@ -158,7 +180,7 @@ sudo ./Invoke-IRCollection-Linux.sh \
 | `--incident-id ID`  | Override auto-generated ID                         |
 | `--output-root DIR` | Write to a specific directory (default `reports/`) |
 
-## Memory capture + analysis
+## Step 2 - Memory capture + analysis
 
 > **⚠️ Strongly recommended for every investigation - memory analysis is imperative.** RAM holds evidence that never touches disk: fileless/`memfd` malware, injected code, decrypted payloads, live C2 connections, cleartext credentials/keys, deleted-but-running binaries, and kernel rootkit hooks that hide from the live OS (visible only via DKOM cross-referencing of kernel structures). Modern Linux intrusions are increasingly memory-resident and living-off-the-land - a disk-and-journald-only analysis will miss them, and an attacker can tamper on-disk artifacts. Memory is the **most volatile** evidence (RFC 3227): capture it **first**, because a reboot or power-off destroys it permanently. Run with `--capture-memory`, then analyze (below).
 
@@ -296,6 +318,43 @@ tools/binja/launch.sh data/<incident>/pid1337_evil_0x7f00.bin   # open one
 ```
 
 A carved `.bin` is **raw memory**, not a file format — open it as **Raw**, then set the architecture + **base address** from the sidecar so BN's addresses match the original process (offsets in the YARA finding line up). See `tools/binja/data/readme.md`. ⚠️ Carved regions are **potential live malware** — analyze them only inside the isolated container, and they are git-ignored (never committed).
+
+## Step 3 - Investigation (automated QA pass)
+
+**What it does.** A second, independent read over everything Step 1/2 already collected
+(`EDR_Report`, `Memory_Findings` + enrichment, `Combined_Findings`, `Journal_Findings`,
+`Container_Findings`, `RemoteAccess_Findings`, `Thread_Inventory`, `Adjudication`). Groups
+every finding by owning PID (or a host-scope pseudo-PID for kernel/persistence/account
+findings with no owning process) and re-scores each against a tiered-evidence bar: a single
+structurally-unforgeable fact (a hidden kernel module, a second uid-0 account) settles
+TRUE_POSITIVE alone; otherwise 3+ independent structural/behavioral dimensions across
+different modules are required. Leads this guide's tables say to "verify before closing" are
+pursued automatically where the data allows it - package ownership/integrity
+(`adjudicate.py`'s dpkg/rpm/pacman resolution), a matching package-manager transaction for a
+"deleted binary due to upgrade" theory, and direct process-lineage or shared-network-endpoint
+corroboration between two independently-suspicious PIDs (never from the shared trait alone).
+Named TTP shapes (miner+rootkit deployment, BPFDoor magic-packet activation, SSH backdoor with
+persistence, fileless beacon, container breakout to host) are flagged independent of the
+generic threshold.
+
+```bash
+# Run against everything already collected in reports/<host>/ -- no live image handle needed
+python3 -m playbooks.linux.investigation.live_runner reports/<host>/
+```
+
+**Output:** `Investigation_<host>_<stamp>.{json,md,csv}` alongside the existing reports.
+
+**Read the `.md` for:**
+
+* Per-PID verdict plus the dimensions that drove it (auditable, not a bare label)
+* **Potential Misses** - engine says suspicious, primary adjudication says closed
+* **Unconfirmed Prior True Positives** - primary adjudication says TP, but the evidence this
+  engine can see doesn't independently confirm it (not necessarily wrong - may rest on
+  evidence outside what this engine ingests)
+* Named TTP pattern matches, independent of the generic threshold
+
+See [**playbooks/linux/investigation/README.md**](playbooks/linux/investigation/) for the full
+module list, known gaps, and design rationale.
 
 ## Step 4 - Eradication
 

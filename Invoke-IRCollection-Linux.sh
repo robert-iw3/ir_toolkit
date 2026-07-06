@@ -208,14 +208,23 @@ if [[ $SKIP_HUNT -eq 0 ]]; then
     # container runtime + kubernetes workload hunt (privileged/escape/RBAC). Best-effort:
     # skips cleanly when no docker/podman/kubectl is present.
     run_phase "ContainerHunt" "$PY" "${HUNT_DIR}/container_hunt.py" --report-dir "$OUT_DIR" --stamp "$RUN_STAMP" --live --quiet
+    # Per-PID thread (TID) inventory for every PID EDR_Hunt/RemoteAccess already
+    # flagged -- a "PID hit" is a process, not one thread; this records the full
+    # sibling-thread set (state, ptrace attachment) so a later eradication pass
+    # can target the SPECIFIC compromised thread (IR_TARGET_TIDS) instead of
+    # killing an entire multi-threaded/protected process. Runs after the other
+    # hunts (so EDR_Report already has PIDs to auto-target) and before the merge
+    # (so its own findings flow into Combined_Findings like any other source).
+    run_phase "ThreadInventory" "$PY" "${HUNT_DIR}/thread_inventory.py" --report-dir "$OUT_DIR" --stamp "$RUN_STAMP" --quiet
 
     EDR_JSON="${OUT_DIR}/EDR_Report_${RUN_STAMP}.json"
     RA_JSON="${OUT_DIR}/RemoteAccess_Findings_${RUN_STAMP}.json"
     JOURNAL_JSON="${OUT_DIR}/Journal_Findings_${RUN_STAMP}.json"
     CONTAINER_JSON="${OUT_DIR}/Container_Findings_${RUN_STAMP}.json"
+    THREAD_JSON="${OUT_DIR}/Thread_Inventory_${RUN_STAMP}.json"
     COMBINED="${OUT_DIR}/Combined_Findings_${RUN_STAMP}.json"
 
-    "$PY" - "$EDR_JSON" "$RA_JSON" "$JOURNAL_JSON" "$CONTAINER_JSON" "$COMBINED" <<'PYMERGE' >>"$RUN_LOG" 2>&1 || true
+    "$PY" - "$EDR_JSON" "$RA_JSON" "$JOURNAL_JSON" "$CONTAINER_JSON" "$THREAD_JSON" "$COMBINED" <<'PYMERGE' >>"$RUN_LOG" 2>&1 || true
 import json, sys
 merged = []
 for p in sys.argv[1:-1]:

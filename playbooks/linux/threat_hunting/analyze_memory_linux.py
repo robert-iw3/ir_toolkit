@@ -141,7 +141,12 @@ PLUGINS = ("linux.pslist.PsList", "linux.pidhashtable.PIDHashTable",
            "linux_ir.fops_hooks.FopsHooks")
 
 # Heavy per-VMA / per-thread plugins (big output, slow on large images) - opt-in with --deep.
-OPTIONAL_PLUGINS = ("linux.proc.Maps", "linux.pscallstack.PsCallStack")
+# "linux.pslist.PsList.threads" is a synthetic key: it's the SAME linux.pslist.PsList plugin
+# invoked a second time with --threads so PID (owning process) and TID come back distinct --
+# pscallstack's own TreeGrid has no PID/TGID column (only TID), so without this second pslist
+# run its findings can't be attributed to the correct process. See run_plugin()/collect()'s
+# handling of this key and analyze_pscallstack()'s use of the resulting tid->pid map.
+OPTIONAL_PLUGINS = ("linux.proc.Maps", "linux.pscallstack.PsCallStack", "linux.pslist.PsList.threads")
 
 # YARA scan scope (perf vs coverage): process = per-PID VMAs (faster, attributable, skips free
 # physical pages); full = exhaustive physical layer (kernel + unlinked + free-page remnants, slow).
@@ -289,6 +294,22 @@ def _pid_comm_map(pslist_rows):
         comm = _get(r, "COMM", "Comm", "Process", "Name")
         if pid:
             m[pid] = comm
+    return m
+
+
+def _tid_pid_map(thread_pslist_rows):
+    """TID(str) -> (PID(str), comm), from a linux.pslist.PsList run with --threads. The plain
+    (non-thread) pslist run's own PID column is really the thread-GROUP leader's pid_t, which
+    for a single-threaded process happens to equal every thread's own pid_t -- but pscallstack's
+    TreeGrid only exposes TID (no PID/TGID column at all), so a non-leader thread's stack-anomaly
+    finding has no way back to its owning process without this thread-inclusive run."""
+    m = {}
+    for r in thread_pslist_rows or []:
+        tid = str(_get(r, "TID"))
+        pid = str(_get(r, "PID"))
+        comm = _get(r, "COMM", "Comm")
+        if tid and pid:
+            m[tid] = (pid, comm)
     return m
 
 
@@ -906,18 +927,38 @@ def analyze_maps(rows):
     return out
 
 
-def analyze_pscallstack(rows):
+def analyze_pscallstack(rows, tid_pid_map=None):
     """linux.pscallstack (optional, heavy) -> stack frames returning into anonymous/unbacked
-    memory (no module/symbol) - a hallmark of injected/shellcode execution."""
+    memory (no module/symbol) - a hallmark of injected/shellcode execution.
+
+    pscallstack's own TreeGrid has no PID/TGID column, only TID -- without tid_pid_map (built
+    from a --threads pslist run) a non-leader thread's finding has no owning-process PID the
+    investigation engine's Target parser can extract, and silently misroutes to the host-scope
+    verdict instead of the process that actually owns the thread. When the map resolves the
+    TID, the Target uses the same "PID N (comm)" shape every other memory finding uses, so it
+    routes exactly like any other per-process finding; otherwise it degrades to the TID-only
+    form with an explicit note rather than a silent misattribution.
+    """
+    tid_pid_map = tid_pid_map or {}
     out = []
     for r in rows or []:
         mod = str(_get(r, "Module")).strip()
         name = str(_get(r, "Name", "Symbol")).strip()
         tid, comm = _get(r, "TID", "Tid"), _get(r, "Comm", "Process")
         if mod in ("", "-", "UNKNOWN") and name in ("", "-", "UNKNOWN"):
-            out.append(_finding("Medium", "Anomalous Call Stack (memory)", f"{comm} (TID {tid})",
+            resolved = tid_pid_map.get(str(tid))
+            if resolved:
+                pid, pid_comm = resolved
+                target = f"PID {pid} ({pid_comm or comm}) TID {tid}"
+                unattributed_note = ""
+            else:
+                target = f"{comm} (TID {tid})"
+                unattributed_note = (" (owning PID unresolved -- no --threads pslist data; "
+                                     "host-scope until corroborated)")
+            out.append(_finding("Medium", "Anomalous Call Stack (memory)", target,
                                 f"Stack frame returns into unbacked memory (no module/symbol) "
-                                f"@ {_get(r, 'Address', 'Value')} - possible injected execution.",
+                                f"@ {_get(r, 'Address', 'Value')} - possible injected execution."
+                                f"{unattributed_note}",
                                 "T1055 (Process Injection)"))
     return out
 
@@ -1117,7 +1158,8 @@ def analyze(plugin_rows):
         + analyze_mountinfo(g.get("linux.mountinfo.MountInfo"))
         + analyze_library_list(g.get("linux.library_list.LibraryList"))
         + analyze_maps(g.get("linux.proc.Maps"))                        # optional (--deep)
-        + analyze_pscallstack(g.get("linux.pscallstack.PsCallStack"))   # optional (--deep)
+        + analyze_pscallstack(g.get("linux.pscallstack.PsCallStack"),   # optional (--deep)
+                              _tid_pid_map(g.get("linux.pslist.PsList.threads")))
         + analyze_yara([row for k in YARA_PLUGINS for row in (g.get(k) or [])])
     )
     deduped = dedup(base)
@@ -1245,6 +1287,10 @@ def collect(image, vol=None, symbols=None, offline_dir=None, skip=(), yara_extra
             # multi-minute scan doesn't look hung after "compiled N rules".
             rows[plugin] = run_plugin(vol, image, plugin, symbols,
                                       extra=yara_extra, timeout=yara_timeout, progress=True)
+        elif plugin == "linux.pslist.PsList.threads":
+            # Synthetic key: same underlying plugin as linux.pslist.PsList, run again with
+            # --threads so PID/TID/PPID come back distinct (see OPTIONAL_PLUGINS comment).
+            rows[plugin] = run_plugin(vol, image, "linux.pslist.PsList", symbols, extra=["--threads"])
         else:
             rows[plugin] = run_plugin(vol, image, plugin, symbols)
     return rows

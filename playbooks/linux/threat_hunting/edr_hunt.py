@@ -29,10 +29,17 @@ from collections import Counter
 FINDINGS = []
 # Executable/volatile locations an implant typically drops into.
 WRITABLE_DIRS = ("/tmp", "/var/tmp", "/dev/shm", "/run", "/var/run")
-# World-writable staging dirs only. /run and /var/run are root-owned tmpfs that
-# legitimate services (udev, alsa, gpu) reference constantly, so they are excluded
-# here to avoid flooding the persistence/integrity checks with false positives.
-IMPLANT_DIRS = ("/tmp", "/var/tmp", "/dev/shm")
+# World-writable staging dirs only. Bare /run and /var/run are root-owned tmpfs
+# that legitimate services (udev, alsa, gpu) reference constantly, so those stay
+# excluded to avoid flooding the persistence/integrity checks with false
+# positives. /run/user/<uid>/ is a DIFFERENT thing -- systemd-logind creates it
+# per logged-in user, owned by and writable by that uid alone, making it a real
+# attacker-writable staging area for anything running as that user. Excluding
+# it entirely (as a bare "/run" prefix match would) is a genuine blind spot:
+# an implant staged there was invisible to every check keyed on IMPLANT_DIRS
+# (untrusted-binary network gating, deleted/writable-path severity, process
+# masquerade gating) until this was added.
+IMPLANT_DIRS = ("/tmp", "/var/tmp", "/dev/shm", "/run/user/")
 # SUID binaries shipped by the base OS - anything SUID outside this set is noteworthy.
 SUID_BASELINE = {
     "su", "sudo", "mount", "umount", "passwd", "chsh", "chfn", "newgrp", "gpasswd",
@@ -185,14 +192,27 @@ def check_anon_exec_maps():
             continue
         cm = comm(pid)
         untrusted = _pid_exe_trust(pid)
-        if cm in JIT_RUNTIMES and not untrusted:
-            continue  # expected JIT behaviour from a trusted binary
+        is_jit = cm in JIT_RUNTIMES
         ex = exe_of(pid) or "unknown"
-        sev = "High" if untrusted else "Medium"
+        # Never silently drop: a JIT-named process with no independent
+        # untrustworthiness signal from THIS narrow path/deleted/memfd check
+        # is still emitted (at Info, the common/expected case) rather than
+        # discarded -- comm is attacker-controlled, this check's own path
+        # list is necessarily incomplete, and a downstream cross-check
+        # (e.g. a Process Name Mismatch finding on the same PID proving the
+        # JIT identity is fake) can only ever combine with this finding if it
+        # actually exists. Filtering happens downstream, not here.
+        if untrusted:
+            sev = "High"
+        elif is_jit:
+            sev = "Info"
+        else:
+            sev = "Medium"
         add(sev, "Anonymous Exec Memory", f"PID: {pid}",
             f"{len(hits)} executable mapping(s) with no backing file (possible "
             f"injected code/JIT). exe={ex} comm={cm}"
-            + (f" [untrusted: {untrusted}]" if untrusted else ""),
+            + (f" [untrusted: {untrusted}]" if untrusted else '')
+            + (' [comm matches known JIT runtime]' if is_jit else ''),
             "T1055 (Process Injection)")
 
 
@@ -946,8 +966,15 @@ def check_network():
             elif st == "0A":
                 bound_external = lip not in ("127.0.0.1", "::1", None)
                 # Behavioral: a listener backed by an untrusted binary is a backdoor
-                # listener whatever the port (including high/ephemeral).
-                if untrusted and (bound_external or lport in C2_LISTEN_HINT_PORTS):
+                # listener whatever the port AND whatever the bind scope -- an
+                # implant opening even a loopback-only socket on an "expected"
+                # or ephemeral port is still an untrusted binary with a listening
+                # socket. Previously gated on (bound_external or hint-port), which
+                # let an untrusted binary silently fall through to the weaker
+                # port-based checks below (and potentially be dropped entirely by
+                # them) once it was already known to be untrusted -- fixed so the
+                # untrusted signal is never bypassed by binding on loopback.
+                if untrusted:
                     add("High", "Network Listener From Untrusted Binary", who,
                         f"Listening {proto} on {lip}:{lport} from a process whose "
                         f"{untrusted}. comm={cm} cmd={cmdline(pid)[:100] if pid else 'n/a'}",

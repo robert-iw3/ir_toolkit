@@ -219,10 +219,111 @@ def test_cli_writes_findings_file(tmp_path):
         for i in range(6)))
     r = subprocess.run(
         [sys.executable, os.path.join(LINUX_HUNT, "journal_analysis.py"),
-         "--report-dir", str(tmp_path), "--stamp", stamp, "--input", str(src), "--quiet"],
+         "--report-dir", str(tmp_path), "--stamp", stamp, "--input", str(src), "--quiet",
+         "--no-pkg-events"],
         capture_output=True, text=True)
     assert r.returncode == 0
     out = tmp_path / f"Journal_Findings_{stamp}.json"
     assert out.exists()
     data = json.loads(out.read_text())
     assert any(f["Type"] == "SSH Brute Force" for f in data)
+
+
+# ── package-manager transaction collection ───────────────────────────────────
+def _recent_ts(days_ago=1):
+    return (datetime.datetime.now() - datetime.timedelta(days=days_ago)).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def test_dpkg_log_upgrade_parsed():
+    text = f"{_recent_ts()} upgrade openssh-server:amd64 1:8.9p1-3 1:8.9p1-3ubuntu0.6\n"
+    events = ja.parse_dpkg_log(text)
+    assert len(events) == 1
+    assert events[0]["pkg"] == "openssh-server"          # :amd64 arch suffix stripped
+    assert events[0]["action"] == "upgrade"
+    assert events[0]["version"] == "1:8.9p1-3ubuntu0.6"  # new version, not old
+
+
+def test_dpkg_log_status_lines_ignored():
+    # "status" lines are intermediate state transitions, not transactions --
+    # counting them would multiply one upgrade into several duplicate events.
+    text = (f"{_recent_ts()} status half-configured libc6:amd64 2.31-0ubuntu9.9\n"
+            f"{_recent_ts()} status installed libc6:amd64 2.31-0ubuntu9.9\n")
+    assert ja.parse_dpkg_log(text) == []
+
+
+def test_dpkg_log_skips_unparseable_lines():
+    assert ja.parse_dpkg_log("not a dpkg log line at all\n") == []
+
+
+def test_pacman_log_upgrade_parsed():
+    ts = (datetime.datetime.now() - datetime.timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%S+0000")
+    text = f"[{ts}] [ALPM] upgraded openssl (1.1.1k-1 -> 1.1.1l-1)\n"
+    events = ja.parse_pacman_log(text)
+    assert len(events) == 1
+    assert events[0]["pkg"] == "openssl"
+    assert events[0]["action"] == "upgraded"
+    assert events[0]["version"] == "1.1.1k-1 -> 1.1.1l-1"
+
+
+def test_pacman_log_installed_and_removed():
+    ts = (datetime.datetime.now() - datetime.timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%S+0000")
+    text = (f"[{ts}] [ALPM] installed foo (1.0-1)\n"
+            f"[{ts}] [ALPM] removed bar (2.0-1)\n")
+    events = ja.parse_pacman_log(text)
+    actions = {e["pkg"]: e["action"] for e in events}
+    assert actions == {"foo": "installed", "bar": "removed"}
+
+
+def test_rpm_installed_events_uses_runner():
+    def fake_runner(cmd):
+        class R:
+            returncode = 0
+            stdout = "openssl\t1700000000\t1.1.1k-1\nbash\t1699999999\t5.1-2\n"
+        return R()
+    events = ja.rpm_installed_events(runner=fake_runner)
+    assert {e["pkg"] for e in events} == {"openssl", "bash"}
+    assert all(e["action"] == "install_or_upgrade" for e in events)
+
+
+def test_rpm_installed_events_absent_binary_is_silent():
+    def failing_runner(cmd):
+        raise FileNotFoundError("no rpm")
+    assert ja.rpm_installed_events(runner=failing_runner) == []
+
+
+def test_collect_package_events_reads_dpkg_log(tmp_path):
+    dpkg_log = tmp_path / "dpkg.log"
+    dpkg_log.write_text(f"{_recent_ts()} install curl:amd64 <none> 7.81.0-1ubuntu1.15\n")
+    findings = ja.collect_package_events(dpkg_log=str(dpkg_log),
+                                         pacman_log="/nonexistent/pacman.log",
+                                         use_rpm=False)
+    assert len(findings) == 1
+    assert findings[0]["Type"] == "Package Manager Transaction"
+    assert findings[0]["Severity"] == "Info"
+    assert findings[0]["Target"] == "package curl"
+
+
+def test_collect_package_events_filters_outside_since_window(tmp_path):
+    dpkg_log = tmp_path / "dpkg.log"
+    old_ts = _recent_ts(days_ago=90)
+    dpkg_log.write_text(f"{old_ts} install curl:amd64 <none> 7.81.0-1ubuntu1.15\n")
+    findings = ja.collect_package_events(dpkg_log=str(dpkg_log),
+                                         pacman_log="/nonexistent/pacman.log",
+                                         since_days=30, use_rpm=False)
+    assert findings == []
+
+
+def test_collect_package_events_missing_logs_is_silent():
+    findings = ja.collect_package_events(dpkg_log="/nonexistent/dpkg.log",
+                                         pacman_log="/nonexistent/pacman.log",
+                                         use_rpm=False)
+    assert findings == []
+
+
+def test_package_transaction_findings_conform_to_schema(tmp_path):
+    dpkg_log = tmp_path / "dpkg.log"
+    dpkg_log.write_text(f"{_recent_ts()} upgrade curl:amd64 7.81.0-1 7.81.0-1ubuntu1.15\n")
+    findings = ja.collect_package_events(dpkg_log=str(dpkg_log),
+                                         pacman_log="/nonexistent/pacman.log",
+                                         use_rpm=False)
+    assert finding_schema.validate(findings, adjudicated=False) == []

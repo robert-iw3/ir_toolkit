@@ -18,6 +18,15 @@ Closes the collection gaps the retrospective flagged on the Linux side:
                         out-of-tree/unsigned kernel module
   Execution           - reverse-shell one-liners in the journal text
 
+Also collects package-manager transactions (dpkg/apt, pacman, rpm) as
+"Package Manager Transaction" findings. These are not suspicious on their own
+(Info severity, never scored as a detection) -- they exist so the
+investigation engine can check whether a "deleted running binary" or
+"modified package file" finding coincides with a real install/upgrade/remove
+event for that exact package, closing deleted_binary.py's "verify with
+journalctl/package-manager log for an upgrade window" lead with an actual
+matching transaction instead of a trusted-path assumption alone.
+
 Read-only. Degrades gracefully: unparseable lines are skipped, never fatal.
 
 Usage:
@@ -308,6 +317,129 @@ def analyze(records, window_seconds=DEFAULT_WINDOW_SECONDS,
     return findings
 
 
+# ── package-manager transaction collection ──────────────────────────────────
+# dpkg.log format: "TIMESTAMP ACTION pkg:arch old_ver [new_ver]"
+_DPKG_LOG_RE = re.compile(
+    r'^(?P<ts>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) '
+    r'(?P<action>install|upgrade|remove|purge) '
+    r'(?P<pkg>[^:\s]+)(?::\S+)? (?P<ver1>\S+)(?: (?P<ver2>\S+))?$')
+# pacman.log format: "[2026-07-06T10:15:23+0000] [ALPM] upgraded openssl (1.1.1k-1 -> 1.1.1l-1)"
+_PACMAN_LOG_RE = re.compile(
+    r'^\[(?P<ts>[^\]]+)\] \[ALPM\] '
+    r'(?P<action>installed|upgraded|removed|reinstalled) (?P<pkg>\S+) \((?P<ver>[^)]+)\)$')
+DEFAULT_DPKG_LOG = "/var/log/dpkg.log"
+DEFAULT_PACMAN_LOG = "/var/log/pacman.log"
+
+
+def _normalize_pkg_name(name):
+    """Strip a dpkg :arch suffix or a trailing version token so a package
+    name from any source (log line, PkgOwner resolution) compares equal."""
+    return (name or "").split(":", 1)[0].split()[0] if name else ""
+
+
+def parse_dpkg_log(text):
+    """dpkg.log install/upgrade/remove/purge lines -> [{ts, epoch, action, pkg, version}]."""
+    out = []
+    for line in (text or "").splitlines():
+        m = _DPKG_LOG_RE.match(line.strip())
+        if not m:
+            continue
+        try:
+            epoch = datetime.datetime.strptime(m.group("ts"), "%Y-%m-%d %H:%M:%S").timestamp()
+        except ValueError:
+            continue
+        version = m.group("ver2") or m.group("ver1")
+        out.append({"ts": m.group("ts"), "epoch": epoch, "action": m.group("action"),
+                    "pkg": _normalize_pkg_name(m.group("pkg")), "version": version})
+    return out
+
+
+def parse_pacman_log(text):
+    """pacman.log installed/upgraded/removed/reinstalled lines -> same shape as parse_dpkg_log."""
+    out = []
+    for line in (text or "").splitlines():
+        m = _PACMAN_LOG_RE.match(line.strip())
+        if not m:
+            continue
+        # pacman's ISO-8601 timestamp: "2026-07-06T10:15:23+0000" (colon-less offset).
+        raw_ts = m.group("ts")
+        try:
+            epoch = datetime.datetime.strptime(raw_ts, "%Y-%m-%dT%H:%M:%S%z").timestamp()
+        except ValueError:
+            continue
+        out.append({"ts": raw_ts, "epoch": epoch, "action": m.group("action"),
+                    "pkg": _normalize_pkg_name(m.group("pkg")), "version": m.group("ver")})
+    return out
+
+
+def rpm_installed_events(runner=None):
+    """Every currently-installed RPM's last install/upgrade time, via the RPM
+    database itself rather than a log file (RHEL/Fedora/SUSE rotate/omit
+    dnf.log far more aggressively than dpkg/pacman keep their own logs, but
+    the database's installtime survives as long as the package is installed).
+    Returns the same shape as parse_dpkg_log. Best-effort: absent rpm binary
+    or any query failure -> empty list, never fatal."""
+    run = runner or (lambda cmd: subprocess.run(
+        cmd, capture_output=True, text=True, timeout=60, check=False))
+    out = []
+    try:
+        cp = run(["rpm", "-qa", "--qf", "%{name}\t%{installtime}\t%{version}-%{release}\n"])
+    except (OSError, subprocess.SubprocessError):
+        return out
+    if not cp or cp.returncode != 0:
+        return out
+    for line in (cp.stdout or "").splitlines():
+        parts = line.strip().split("\t")
+        if len(parts) != 3:
+            continue
+        name, raw_epoch, version = parts
+        try:
+            epoch = float(raw_epoch)
+        except ValueError:
+            continue
+        out.append({"ts": datetime.datetime.fromtimestamp(epoch).strftime("%Y-%m-%d %H:%M:%S"),
+                    "epoch": epoch, "action": "install_or_upgrade",
+                    "pkg": _normalize_pkg_name(name), "version": version})
+    return out
+
+
+def collect_package_events(dpkg_log=DEFAULT_DPKG_LOG, pacman_log=DEFAULT_PACMAN_LOG,
+                           since_days=30, use_rpm=True, runner=None):
+    """Read every available package manager's transaction history and return
+    common-schema findings (Type='Package Manager Transaction', Info
+    severity -- context for the investigation engine, never a detection on
+    its own). Missing logs / absent package managers are silently skipped,
+    matching this module's read-only, never-fatal contract."""
+    events = []
+    if os.path.isfile(dpkg_log):
+        try:
+            with open(dpkg_log, "r", encoding="utf-8", errors="replace") as fh:
+                events.extend(parse_dpkg_log(fh.read()))
+        except OSError:
+            pass
+    if os.path.isfile(pacman_log):
+        try:
+            with open(pacman_log, "r", encoding="utf-8", errors="replace") as fh:
+                events.extend(parse_pacman_log(fh.read()))
+        except OSError:
+            pass
+    if use_rpm:
+        events.extend(rpm_installed_events(runner=runner))
+
+    cutoff = datetime.datetime.now().timestamp() - since_days * 86400
+    events = [e for e in events if e["epoch"] >= cutoff]
+
+    out = []
+    for e in events[:MAX_FINDINGS]:
+        out.append({
+            "Timestamp": now(), "Severity": "Info", "Type": "Package Manager Transaction",
+            "Target": f"package {e['pkg']}",
+            "Details": f"{e['action']} {e['pkg']} {e['version']} at {e['ts']}",
+            "MITRE": "N/A",
+        })
+    return out
+
+
 # ── input acquisition ────────────────────────────────────────────────────────
 def read_input(args):
     """Return raw journald JSON text from --input, default forensics file, or --live."""
@@ -352,6 +484,12 @@ def main():
                          "Bounds the dump so it can't hang on a huge journal.")
     ap.add_argument("--max-lines", type=int, default=200000,
                     help="live capture hard line cap (journalctl -n).")
+    ap.add_argument("--no-pkg-events", action="store_true",
+                    help="skip package-manager transaction collection")
+    ap.add_argument("--pkg-since-days", type=int, default=30,
+                    help="package-manager transaction lookback window in days")
+    ap.add_argument("--dpkg-log", default=DEFAULT_DPKG_LOG)
+    ap.add_argument("--pacman-log", default=DEFAULT_PACMAN_LOG)
     ap.add_argument("--quiet", action="store_true")
     args = ap.parse_args()
 
@@ -359,6 +497,10 @@ def main():
     records = parse_journal_text(text)
     findings = analyze(records, window_seconds=args.window_seconds,
                        brute_threshold=args.brute_threshold)
+    if not args.no_pkg_events:
+        findings.extend(collect_package_events(
+            dpkg_log=args.dpkg_log, pacman_log=args.pacman_log,
+            since_days=args.pkg_since_days))
 
     out_path = os.path.join(args.report_dir, f"Journal_Findings_{args.stamp}.json")
     with open(out_path, "w", encoding="utf-8") as fh:

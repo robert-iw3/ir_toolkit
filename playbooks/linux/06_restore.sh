@@ -6,7 +6,9 @@
 #   • restores the pre-containment firewall ruleset saved by 01_contain_host.sh
 #     (this also removes any 04_block_c2 DROP rules),
 #   • restores each quarantined binary to its original path AFTER verifying its
-#     sha256 against the rollback journal written by 02_eradicate_process.sh.
+#     sha256 against the rollback journal written by 02_eradicate_process.sh,
+#   • resumes any thread suspended via suspend_thread.py by terminating its
+#     tracer daemon, which PTRACE_DETACHes on SIGTERM before exiting.
 # Non-destructive: it only un-isolates and puts files back; it deletes no data.
 # ==============================================================================
 set -uo pipefail
@@ -71,6 +73,28 @@ for ln in open('${ROLLBACK_JOURNAL}'):
 ")
 else
     log "no rollback journal at ${ROLLBACK_JOURNAL}; nothing to restore"
+fi
+
+# -- 3. Resume suspended threads: terminate each tracer daemon (suspend_thread.py
+# only holds a thread stopped while it is alive; SIGTERM makes it PTRACE_DETACH
+# then exit, which resumes the thread under the kernel's normal scheduling).
+if [[ -f "${ROLLBACK_JOURNAL}" ]]; then
+    while IFS=$'\t' read -r pid tid tracer_pid; do
+        [[ -d "/proc/${tracer_pid}" ]] || { skipped+=("${pid}:${tid}:tracer_gone"); continue; }
+        if kill -TERM "${tracer_pid}" 2>/dev/null; then
+            restored+=("${pid}:${tid}")
+            log "resumed TID ${tid} of PID ${pid} (terminated tracer ${tracer_pid})"
+        else
+            errors+=("resume_thread_failed:${pid}:${tid}")
+        fi
+    done < <(python3 -c "
+import json,sys
+for ln in open('${ROLLBACK_JOURNAL}'):
+    try: e=json.loads(ln)
+    except Exception: continue
+    if e.get('action')=='suspend_thread':
+        print('\t'.join([str(e.get('pid','')), str(e.get('tid','')), str(e.get('tracer_pid',''))]))
+")
 fi
 
 python3 -c "import json;print(json.dumps({'phase':'restore','status':'completed','incident_id':'${INCIDENT_ID}','restored':${#restored[@]},'skipped':${#skipped[@]},'errors':${#errors[@]}}))"

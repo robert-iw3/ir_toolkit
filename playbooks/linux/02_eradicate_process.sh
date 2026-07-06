@@ -4,6 +4,19 @@
 # Terminates malicious processes identified by the swarm. Kills by PID first
 # (precise), then by name (broader sweep), then quarantines binaries by hash.
 # Never targets PID 1 or critical system processes.
+#
+# Thread-precise suspension (IR_TARGET_TIDS): a process is a group of
+# independently-schedulable threads, not one unit. Ptrace-based injection
+# typically compromises a single thread while the rest of the process stays
+# legitimate. When IR_TARGET_TIDS names the specific compromised thread(s)
+# for a PID, and killing the whole process would be destabilizing (protected
+# daemon, or highly multi-threaded), the script suspends only those threads
+# via threat_hunting/suspend_thread.py (ptrace-based, holds the suspension
+# for as long as its daemon process runs) instead of killing the process.
+# Signal-based termination cannot target one thread: a fatal signal's
+# default action is process-wide regardless of which thread receives it.
+# This path is strictly additive -- with IR_TARGET_TIDS unset (the default),
+# every existing invocation takes the same whole-process path as before.
 # ==============================================================================
 set -uo pipefail
 
@@ -14,6 +27,20 @@ MALICIOUS_HASHES="${IR_MALICIOUS_HASHES:-}"
 # Safe by default: when invoked directly (not via the orchestrator) nothing is changed unless
 # IR_DRY_RUN=0 is set. The orchestrator passes IR_DRY_RUN=0 only under --apply.
 DRY_RUN="${IR_DRY_RUN:-1}"
+
+# "pid:tid,pid:tid,..." -- the SPECIFIC thread(s) known to be running injected/
+# malicious code for a given PID (e.g. from a "Ptrace Injection - Thread IP in
+# Injected Memory (memory)" finding, or thread_inventory.py's "Traced Thread
+# Detail" finding). When set for a PID, kill_tree() suspends ONLY these
+# threads instead of the whole process, if the process is protected or highly
+# multi-threaded. Empty by default -- no behavior change unless supplied.
+TARGET_TIDS="${IR_TARGET_TIDS:-}"
+# Thread-count threshold above which precise per-thread suspension is
+# preferred over a whole-process kill when a specific malicious TID is known.
+MULTI_THREAD_INSTABILITY_THRESHOLD="${IR_MULTI_THREAD_THRESHOLD:-4}"
+# Force whole-process termination even when a precise-thread alternative is
+# available. Off by default.
+FORCE_WHOLE_PROCESS="${IR_FORCE_WHOLE_PROCESS_KILL:-0}"
 
 QUARANTINE_DIR="/var/ir/quarantine/${INCIDENT_ID}"
 mkdir -p "${QUARANTINE_DIR}"
@@ -44,6 +71,63 @@ is_protected() {
     return 1
 }
 
+# -- Thread inventory + precise per-thread suspension -------------------------
+# A process is a group of threads, not one task. Every kill path enumerates
+# and journals the full TID set before acting, whether or not the
+# precise-thread path is used.
+list_tids() {
+    local pid="$1"
+    ls "/proc/${pid}/task/" 2>/dev/null || true
+}
+
+# Look up the analyst/orchestrator-supplied target TID(s) for one PID from
+# IR_TARGET_TIDS ("pid:tid,pid:tid,..."). Empty if none given for this PID.
+target_tids_for_pid() {
+    local want_pid="$1" pair pid tid
+    local out=()
+    IFS=',' read -ra _pairs <<< "${TARGET_TIDS}"
+    for pair in "${_pairs[@]}"; do
+        pid="${pair%%:*}"; tid="${pair##*:}"
+        [[ "${pid}" == "${want_pid}" && "${tid}" =~ ^[0-9]+$ ]] && out+=("${tid}")
+    done
+    echo "${out[@]:-}"
+}
+
+# Suspend exactly ONE thread, leaving the rest of the process running.
+# Signal delivery cannot do this: a fatal signal's default action tears down
+# the whole thread group regardless of which thread receives it. This uses
+# ptrace (suspend_thread.py) instead -- see that script for the mechanism.
+# The suspension is held by a long-lived daemon process; its PID is journaled
+# so 06_restore.sh can reverse it (kill the daemon -> thread resumes).
+SUSPEND_HELPER="$(dirname "${BASH_SOURCE[0]}")/threat_hunting/suspend_thread.py"
+
+kill_thread() {
+    local tgid="$1" tid="$2"
+    [[ "${tgid}" =~ ^[0-9]+$ && "${tid}" =~ ^[0-9]+$ ]] || return 1
+    [[ -d "/proc/${tgid}/task/${tid}" ]] || { errors+=("tid_not_found:${tgid}:${tid}"); return 1; }
+
+    if [[ "${DRY_RUN}" == "1" ]]; then
+        echo "[DRY-RUN] would suspend TID ${tid} of PID ${tgid} only -- rest of process left running"
+        logger -t ir-playbook "ERADICATE-PROC: [DRY-RUN] would suspend TID ${tid} of PID ${tgid}"
+        return 0
+    fi
+
+    local result daemon_pid
+    result=$(python3 "${SUSPEND_HELPER}" --tgid "${tgid}" --tid "${tid}" --incident-id "${INCIDENT_ID}" 2>/dev/null)
+    daemon_pid=$(echo "${result}" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('daemon_pid',''))" 2>/dev/null)
+
+    if [[ -n "${daemon_pid}" ]]; then
+        logger -t ir-playbook "ERADICATE-PROC: Suspended TID ${tid} of PID ${tgid} (tracer PID ${daemon_pid}) -- process left running"
+        killed_pids+=("${tgid}:${tid}")
+        journal "{\"action\":\"suspend_thread\",\"pid\":${tgid},\"tid\":${tid},\"tracer_pid\":${daemon_pid}}"
+        return 0
+    else
+        errors+=("suspend_thread_failed:${tgid}:${tid}")
+        logger -t ir-playbook "ERADICATE-PROC: FAILED to suspend TID ${tid} of PID ${tgid}: ${result}"
+        return 1
+    fi
+}
+
 # -- Kill by PID (and full process tree) --------------------------------------
 # Single choke point for EVERY kill path (by-PID, by-name, by-hash, fileless/hidden/anon-rwx
 # sweeps). Enforces the protected-process guard and IR_DRY_RUN here so no path can bypass them.
@@ -52,12 +136,47 @@ kill_tree() {
     [[ "${root_pid}" =~ ^[0-9]+$ ]] || return 1
     [[ "${root_pid}" -le 1       ]] && return 1
 
-    # Protected-process guard by PID (resolve comm) - applies to all callers, not just by-name.
     local rcomm
     rcomm=$(cat "/proc/${root_pid}/comm" 2>/dev/null || true)
+
+    # Always journal the full thread inventory at kill time -- forensic record
+    # of every task that existed on this PID, whether or not the precise-thread
+    # path below ends up being taken.
+    local tids tid_count
+    tids=$(list_tids "${root_pid}")
+    tid_count=$(wc -w <<< "${tids}")
+    journal "{\"action\":\"thread_inventory\",\"pid\":${root_pid},\"comm\":\"${rcomm}\",\"tids\":\"${tids//$'\n'/,}\"}"
+
+    # Precise-thread path: if IR_TARGET_TIDS names specific thread(s) for this
+    # PID, and a whole-process kill would be destabilizing (protected process,
+    # or highly multi-threaded), suspend only those threads instead. Overridden
+    # by IR_FORCE_WHOLE_PROCESS_KILL=1.
+    local wanted_tids
+    wanted_tids=$(target_tids_for_pid "${root_pid}")
+    if [[ -n "${wanted_tids}" && "${FORCE_WHOLE_PROCESS}" != "1" ]]; then
+        local would_destabilize=0
+        if [[ -n "${rcomm}" ]] && is_protected "${rcomm}"; then
+            would_destabilize=1
+        elif [[ "${tid_count}" -ge "${MULTI_THREAD_INSTABILITY_THRESHOLD}" ]]; then
+            would_destabilize=1
+        fi
+        if [[ "${would_destabilize}" == "1" ]]; then
+            local ok=0
+            for tid in ${wanted_tids}; do
+                kill_thread "${root_pid}" "${tid}" && ok=1
+            done
+            [[ "${ok}" == "1" ]] && return 0
+            # Suspension failed (e.g. TIDs already gone) -- fall through to
+            # the whole-process path below rather than silently no-op.
+        fi
+    fi
+
+    # Protected-process guard by PID (resolve comm) - applies to all callers, not just by-name.
     if [[ -n "${rcomm}" ]] && is_protected "${rcomm}"; then
         errors+=("refused_protected_pid:${root_pid}:${rcomm}")
-        logger -t ir-playbook "ERADICATE-PROC: Refused to kill protected ${rcomm} (PID ${root_pid})"
+        local refusal_msg="ERADICATE-PROC: Refused to kill protected ${rcomm} (PID ${root_pid})"
+        [[ -n "${wanted_tids}" ]] && refusal_msg+=" (precise-thread alternative was attempted and did not succeed)"
+        logger -t ir-playbook "${refusal_msg}"
         return 1
     fi
 

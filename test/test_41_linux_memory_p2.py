@@ -6,10 +6,14 @@ Comm_Spoofed / Cmdline_Spoofed flags (benign on a clean host) are NOT emitted,
 while Exe_Deleted and kernel-thread masquerade ARE.
 """
 import sys
-from conftest import LINUX_HUNT
+from conftest import LINUX_HUNT, ROOT
 
 sys.path.insert(0, LINUX_HUNT)
 import analyze_memory_linux as m  # noqa: E402
+
+if ROOT not in sys.path:
+    sys.path.insert(0, ROOT)
+from playbooks.linux.investigation.engine import _parse_pid_target  # noqa: E402
 
 
 def types(findings):
@@ -122,3 +126,57 @@ def test_envars_writable_preload_is_high():
                              "PID": 9, "COMM": "sshd"}])
     assert out and out[0]["Severity"] == "High"
     assert out[0]["Type"] == "Linker Hijack (memory)"
+
+
+# --- pscallstack: TID -> owning-PID resolution ---------------------------------
+# pscallstack's own TreeGrid has no PID/TGID column (only TID) -- without a
+# --threads pslist run's tid_pid_map, a stack-anomaly finding on a non-leader
+# thread has no owning PID the investigation engine's Target parser can find,
+# and silently misroutes to the host-scope verdict instead of the process
+# that actually owns the thread.
+
+def test_tid_pid_map_builds_from_threaded_pslist_rows():
+    rows = [{"PID": 1234, "TID": 1234, "PPID": 1, "COMM": "nginx"},
+           {"PID": 1234, "TID": 1240, "PPID": 1, "COMM": "nginx"}]
+    tid_map = m._tid_pid_map(rows)
+    assert tid_map["1240"] == ("1234", "nginx")
+    assert tid_map["1234"] == ("1234", "nginx")
+
+
+def test_pscallstack_resolves_owning_pid_when_map_available():
+    rows = [{"TID": 1240, "Comm": "nginx", "Module": "", "Name": "",
+            "Address": "0x7f0000", "Value": "0x7f1234"}]
+    tid_map = {"1240": ("1234", "nginx")}
+    out = m.analyze_pscallstack(rows, tid_map)
+    assert len(out) == 1
+    assert out[0]["Target"] == "PID 1234 (nginx) TID 1240"
+    assert "unresolved" not in out[0]["Details"]
+
+
+def test_pscallstack_findings_route_to_owning_pid_not_host_scope():
+    """The whole point of resolving the PID: the investigation engine's
+    Target parser must actually recover it, not just have it present as text."""
+    rows = [{"TID": 1240, "Comm": "nginx", "Module": "", "Name": "",
+            "Address": "0x7f0000", "Value": "0x7f1234"}]
+    tid_map = {"1240": ("1234", "nginx")}
+    out = m.analyze_pscallstack(rows, tid_map)
+    pid, proc = _parse_pid_target(out[0]["Target"], out[0]["Details"])
+    assert pid == 1234
+    assert proc == "nginx"
+
+
+def test_pscallstack_degrades_to_tid_only_without_map():
+    """No --threads pslist data available (map empty/missing) -- keep the
+    TID-only form with an explicit note rather than silently fabricating
+    a PID attribution that was never actually resolved."""
+    rows = [{"TID": 1240, "Comm": "nginx", "Module": "", "Name": "",
+            "Address": "0x7f0000", "Value": "0x7f1234"}]
+    out = m.analyze_pscallstack(rows)
+    assert out[0]["Target"] == "nginx (TID 1240)"
+    assert "owning PID unresolved" in out[0]["Details"]
+
+
+def test_pscallstack_resolved_module_symbol_not_flagged():
+    rows = [{"TID": 1240, "Comm": "nginx", "Module": "libc.so.6", "Name": "malloc",
+            "Address": "0x7f0000", "Value": "0x7f1234"}]
+    assert m.analyze_pscallstack(rows) == []

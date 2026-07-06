@@ -72,6 +72,137 @@ def test_chmod_action_is_reversible():
     assert '"chmod"' in restore and "orig_mode" in restore   # restore reverses it by mode
 
 
+# ── Precise per-thread suspension (IR_TARGET_TIDS) ───────────────────────────
+# A "PID" is a thread group, not one task -- killing the whole process when
+# only one thread is compromised (e.g. ptrace-injected) is unnecessary
+# instability for a protected/highly-threaded process. Signals can't isolate
+# one thread (a fatal signal's default action is process-wide regardless of
+# which thread receives it), so kill_thread() suspends the target thread via
+# ptrace (suspend_thread.py) instead of signaling it.
+
+def test_kill_thread_delegates_to_suspend_thread_helper():
+    """kill_thread() must call suspend_thread.py (ptrace-based), not send a
+    signal -- tgkill/kill on a bare TID cannot isolate one thread, since a
+    fatal signal's default action always tears down the whole process."""
+    src = read(PROC)
+    assert "SUSPEND_HELPER" in src and "suspend_thread.py" in src
+    kt = src[src.index("kill_thread()"):src.index("# -- Kill by PID")]
+    assert "SUSPEND_HELPER" in kt
+
+
+def test_target_tids_env_var_defaults_empty_no_behavior_change():
+    """IR_TARGET_TIDS must default to empty so every existing invocation
+    (no env var set) takes the exact same whole-process path as before."""
+    src = read(PROC)
+    assert 'TARGET_TIDS="${IR_TARGET_TIDS:-}"' in src
+
+
+def test_force_whole_process_kill_override_exists():
+    src = read(PROC)
+    assert 'FORCE_WHOLE_PROCESS="${IR_FORCE_WHOLE_PROCESS_KILL:-0}"' in src
+    kt = src[src.index("kill_tree()"):]
+    assert 'FORCE_WHOLE_PROCESS' in kt
+
+
+def test_thread_inventory_journaled_unconditionally_in_kill_tree():
+    """Every kill_tree() invocation must record the full TID set at kill time,
+    regardless of whether the precise-thread path is taken -- forensic
+    completeness even when the whole process ends up being killed."""
+    src = read(PROC)
+    kt = src[src.index("kill_tree()"):src.index("Precise-thread path")]
+    assert 'action\\":\\"thread_inventory' in kt
+    assert "list_tids" in kt
+
+
+def test_precise_path_fires_for_protected_process_with_target_tids(tmp_path):
+    """A genuine multi-threaded process, with IR_TARGET_TIDS naming one of
+    its real threads, must take the precise-thread path (not the
+    whole-process path) when that PID's thread count crosses the instability
+    threshold. Dry-run only -- no live ptrace attach in the test suite."""
+    script = f"""
+import threading, time
+def worker():
+    time.sleep(30)
+for _ in range(4):
+    threading.Thread(target=worker, daemon=True).start()
+time.sleep(30)
+"""
+    proc = subprocess.Popen(["python3", "-c", script])
+    try:
+        import time as _time
+        _time.sleep(0.5)
+        tids = os.listdir(f"/proc/{proc.pid}/task")
+        other_tid = next(t for t in tids if t != str(proc.pid))
+
+        env = dict(os.environ, IR_INCIDENT_ID="test-precise-thread",
+                  IR_DRY_RUN="1", IR_MALICIOUS_PIDS=str(proc.pid),
+                  IR_TARGET_TIDS=f"{proc.pid}:{other_tid}",
+                  IR_MULTI_THREAD_THRESHOLD="2")
+        r = subprocess.run(["bash", PROC], capture_output=True, text=True,
+                           timeout=30, env=env)
+        assert f"would suspend TID {other_tid} of PID {proc.pid} only" in r.stdout
+        assert f"would kill PID {proc.pid}" not in r.stdout
+    finally:
+        proc.kill()
+        proc.wait(timeout=5)
+
+
+def test_default_path_unchanged_without_target_tids(tmp_path):
+    """Regression: with IR_TARGET_TIDS unset, behavior must be identical to
+    before this feature existed -- whole-process kill, no thread-precise
+    branching at all."""
+    proc = subprocess.Popen(["python3", "-c", "import time; time.sleep(30)"])
+    try:
+        env = dict(os.environ, IR_INCIDENT_ID="test-default-path",
+                  IR_DRY_RUN="1", IR_MALICIOUS_PIDS=str(proc.pid))
+        r = subprocess.run(["bash", PROC], capture_output=True, text=True,
+                           timeout=30, env=env)
+        assert f"would kill PID {proc.pid}" in r.stdout
+        assert "would suspend TID" not in r.stdout
+    finally:
+        proc.kill()
+        proc.wait(timeout=5)
+
+
+def test_restore_reverses_suspend_thread_by_killing_tracer(tmp_path, monkeypatch):
+    """06_restore.sh must reverse a suspend_thread journal entry by SIGTERM-ing
+    the recorded tracer_pid -- suspend_thread.py's daemon only holds a thread
+    stopped while it is alive, so terminating it is what resumes the thread."""
+    tracer = subprocess.Popen(["python3", "-c", "import time; time.sleep(30)"])
+    try:
+        rollback_dir = tmp_path / "rollback"
+        rollback_dir.mkdir()
+        (rollback_dir / "test-restore-thread.jsonl").write_text(
+            json.dumps({"action": "suspend_thread", "pid": 4242,
+                        "tid": 4243, "tracer_pid": tracer.pid}) + "\n"
+        )
+        env = dict(os.environ, IR_INCIDENT_ID="test-restore-thread")
+        monkeypatch_src = read(RESTORE).replace(
+            '/var/ir/rollback/${INCIDENT_ID}.jsonl', f'{rollback_dir}/${{INCIDENT_ID}}.jsonl'
+        )
+        patched = tmp_path / "06_restore_patched.sh"
+        patched.write_text(monkeypatch_src)
+        r = subprocess.run(["bash", str(patched)], capture_output=True, text=True,
+                           timeout=30, env=env)
+        assert r.returncode == 0, r.stderr
+        tracer.wait(timeout=5)
+        assert tracer.returncode is not None       # SIGTERM delivered, process exited
+        assert "resumed TID 4243 of PID 4242" in r.stdout
+    finally:
+        if tracer.poll() is None:
+            tracer.kill()
+            tracer.wait(timeout=5)
+
+
+def test_restore_skips_suspend_thread_when_tracer_already_gone(tmp_path):
+    """If the tracer daemon already exited (thread already resumed, or the
+    daemon crashed), restore must skip it -- not error -- since there is
+    nothing left to reverse."""
+    src = read(RESTORE)
+    assert '"/proc/${tracer_pid}"' in src
+    assert "tracer_gone" in src
+
+
 # ── Cloud eradication revisions (2026-06-21 review) ──────────────────────────
 CLOUD_ERAD = os.path.join(ROOT, "Invoke-Eradication-Cloud.sh")
 CLOUD_PROC = os.path.join(ROOT, "playbooks", "cloud", "02_eradicate_process.sh")

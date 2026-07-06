@@ -6,6 +6,62 @@ Generic playbook for pivoting from IR Toolkit output into live-host triage.
 
 ---
 
+## Automation Status (as of 2026-07-06)
+
+What `playbooks/linux/investigation/` (the second-pass QA/correlation engine) currently
+automates from this guide, by section:
+
+- **§2 Deleted Binary / memfd** — `modules/deleted_binary.py` reproduces the writable-vs-package-path
+  table; `journal_analysis.py`'s package-manager-event collection (dpkg/apt log, pacman log, RPM
+  database) plus `correlator.py`'s upgrade-window match confirm or refute the "package upgrade" FP
+  theory with an actual transaction, not an assumption.
+- **§3 Hidden Process** — `modules/hidden_process.py` scores the memory-vs-`/proc` asymmetry.
+- **§4 Injected/Anonymous-Executable Memory** — `modules/injected_memory.py` (malfind, JIT-runtime
+  exemption voided only by a genuine disproof finding, never by process name alone) and
+  `modules/ptrace.py`'s `Corroborated Injected Thread` (a TID independently flagged by both
+  `linux.pscallstack`'s memory-forensic stack walk and `thread_inventory.py`'s live enumeration).
+- **§5 Kernel Rootkit Signals** — `modules/kernel_rootkit.py` scores hidden-module/hook/usermodehelper
+  findings as Tier 1 (DEFINITIVE) — a single structurally-unforgeable fact settles TRUE_POSITIVE.
+- **§6 Credential Override / Privesc** — `modules/credential_privesc.py`.
+- **§7 eBPF / io_uring** — `modules/ebpf_io_uring.py` (agent-name match is context only, never a
+  tier-crossing downgrade).
+- **§8 Namespace Escape / Container Breakout** — `modules/namespace_container.py` (same
+  name-is-context-only rule as §7).
+- **§9 Persistence** — `modules/persistence.py`; `adjudicate.py`'s package-ownership/integrity
+  resolution is consumed directly (`correlator.py`'s `_package_integrity_dimension`) so "verify
+  package ownership before closing" is answered, not left as an instruction — a tampered packaged
+  binary is DEFINITIVE TRUE_POSITIVE regardless of finding type, an unowned file in a trusted path
+  is incriminating (not exonerating).
+- **§10 Network Connection Triage** — `modules/network.py`; `engine.py`'s cross-PID
+  shared-infrastructure propagation corroborates two independently-suspicious PIDs sharing the same
+  external endpoint (never from the shared endpoint alone).
+- **§11 SSH Key & Account Hygiene** — `modules/ssh_hygiene.py`.
+- **§1 Triage Live Processes** — process-lineage propagation (`engine.py`'s
+  `_propagate_process_lineage`) corroborates two independently-suspicious PIDs in a direct
+  parent/child relationship; `thread_inventory.py` extends "triage the PID" to every TID under it.
+- **§12 Direct YARA / File Scan** — `modules/yara_capa.py`; `c2_config_extract.py` identifies
+  Sliver/Mythic/Merlin/Havoc/AdaptixC2/Pupy/BPFDoor/Mirai-class/Ebury-class/XMRig-class by
+  protocol-required structure (ELF dynamic symbols, magic-packet sequences, capability mismatches)
+  — never brand-name string matching.
+- **§15 Eradication Pivot** — `IR_TARGET_TIDS` + `suspend_thread.py` suspend the SPECIFIC compromised
+  thread (`PTRACE_SEIZE`/`PTRACE_INTERRUPT`, held by a tracer daemon) instead of killing an entire
+  protected/multi-threaded process; `06_restore.sh` reverses it by terminating the tracer.
+- **Quick Reference FP patterns** — the deterministic noise filter (`models/noise_filter.py`) covers
+  several rows (known-daemon/expected-path background noise); a name match alone never downgrades a
+  genuinely strong signal (a name-spoofing vulnerability found and corrected mid-build).
+
+Run it: `python3 -m playbooks.linux.investigation.live_runner reports/<host>/` ->
+`Investigation_<host>_<stamp>.{json,md,csv}`. It resolves each finding to
+TRUE_POSITIVE/FALSE_POSITIVE/UNDETERMINED/NOISE_CLOSED before a human opens a section below — pivot
+into the numbered sections only for what's still UNDETERMINED, or to verify a verdict yourself before
+acting on it. Full architecture reference: `playbooks/linux/investigation/README.md`.
+
+Everything else in this guide (live-host queries, YARA/file scan follow-on, eradication mechanics)
+runs outside this offline engine by design — it consumes already-collected JSON, it never queries
+the live host directly.
+
+---
+
 ## How to use this guide
 
 ```
@@ -13,18 +69,30 @@ Step 1 — Read the toolkit reports
     reports/<host>/EDR_Report_<stamp>.json        <- live-host hunt (edr_hunt.py)
     reports/<host>/Memory_Findings_<stamp>.json   <- per-PID memory + YARA signals
     reports/<host>/Combined_Findings_<stamp>.json <- cross-source adjudication (verdict ladder)
+    reports/<host>/Adjudication_<stamp>.json      <- package ownership/integrity, lineage (ParentPid)
+    reports/<host>/Thread_Inventory_<stamp>.json  <- per-PID TID enumeration (if a PID was flagged)
     reports/<host>/Incident_Report.md             <- human summary + coverage grid
 
-Step 2 — Pivot here
-    For each Open/Suspicious item, find the matching section below.
-    Run the commands on the target host (or over SSH).
+Step 2 — Run the automated investigation layer
+    python3 -m playbooks.linux.investigation.live_runner reports/<host>/
+    This already resolves most findings to TRUE_POSITIVE/FALSE_POSITIVE/UNDETERMINED
+    (see "Automation Status" above) — it's the disposition logic in every
+    section's "Logic breakdown" table, run automatically before a human opens
+    a section. Best results when Adjudication_*.json and Thread_Inventory_*.json
+    are already present (both are collected automatically during Step 1 of
+    WORKFLOW-LINUX.md, but may not exist yet for a report folder gathered
+    before those phases existed).
 
-Step 3 — Follow the rabbit hole
+Step 3 — Pivot here for what's left
+    For each finding still UNDETERMINED (or to verify a TP/FP yourself before
+    acting on it), find the matching section below and run its commands.
+
+Step 4 — Follow the rabbit hole
     Each section ends with a "what to do if suspicious" branch.
     Pursue until you either close the finding as FP or collect enough
     evidence to escalate/remediate.
 
-Step 4 — Document and close
+Step 5 — Document and close
     Append findings to Investigation_Notes_*.md in the report folder.
     Update the disposition for each PID/artifact.
     Open items needing memory carve -> see Section 13.
