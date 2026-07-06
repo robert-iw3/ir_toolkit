@@ -1,4 +1,5 @@
 # Obfuscation Detection (v2.3)
+
 Author: **Tim Blazytko**
 
 _Automatically detect obfuscated code and other interesting code constructs_
@@ -11,7 +12,7 @@ Based on various heuristics, the plugin pinpoints functions that contain complex
 
 * obfuscated code
 * state machines and protocols
-* C&C server communication
+* C\&C server communication
 * string decryption routines
 * cryptographic algorithms
 
@@ -19,11 +20,10 @@ The following blog posts provide more information about the underlying heuristic
 
 * [Automated Detection of Control-flow Flattening](https://synthesis.to/2021/03/03/flattening_detection.html)
 * [Automated Detection of Obfuscated Code](https://synthesis.to/2021/08/10/obfuscation_detection.html)
-* [Statistical Analysis to Detect Uncommon Code](https://synthesis.to//2023/01/26/uncommon_instruction_sequences.html)
+* [Statistical Analysis to Detect Uncommon Code](https://synthesis.to/2023/01/26/uncommon_instruction_sequences.html)
 * [Identification of API Functions in Binaries](https://synthesis.to/2023/08/02/api_functions.html)
 
-Some example use cases can be found in [examples](./examples). Furthermore, the REcon talk ["Unveiling Secrets in Binaries using Code Detection Strategies"](https://cfp.recon.cx/2023/talk/QD8UNJ/) demonstrates some use cases. The slides can be found [here](./presentation/recon23_code_detection.pdf); the recording can be found [here](https://www.youtube.com/watch?v=y95MNr2Xu-g).
-
+Some example use cases can be found in [examples](examples/). Furthermore, the REcon talk ["Unveiling Secrets in Binaries using Code Detection Strategies"](https://cfp.recon.cx/2023/talk/QD8UNJ/) demonstrates some use cases. The slides can be found [here](presentation/recon23_code_detection.pdf); the recording can be found [here](https://www.youtube.com/watch?v=y95MNr2Xu-g).
 
 ## Core Features
 
@@ -32,7 +32,6 @@ Some example use cases can be found in [examples](./examples). Furthermore, the 
 * efficient and architecture-agnostic implementation
 * runs as a background task
 * can be used in UI and headless mode
-
 
 ## Installation
 
@@ -48,28 +47,21 @@ cd obfuscation_detection
 pip install .
 ```
 
-
 ## Usage
 
 The plugin can be used in the user interface and in headless mode.
-
 
 ### User Interface
 
 Choose the index tab `Plugins -> Obfuscation Detection` to run one or more detection heuristics in Binary Ninja's user interface:
 
-<p align="left">
-<img alt="Plugin Menu" src="imgs/plugin_menu.png" width="500"/>
-</p>
+<div align="left"><img src="../../../../.gitbook/assets/plugin_menu.png" alt="Plugin Menu" width="500"></div>
 
 The results are displayed in the Log window:
 
-<p align="center">
-<img alt="Binary Ninja Log" src="imgs/plugin_results.png"/>
-</p>
+<div align="center"><img src="../../../../.gitbook/assets/plugin_results.png" alt="Binary Ninja Log"></div>
 
 By clicking on the identified function addresses, Binary Ninja navigates to the selected function.
-
 
 ### Headless
 
@@ -78,7 +70,6 @@ To use the plugin in headless mode, run [`scripts/detect_obfuscation.py`](script
 ```
 $ python3 scripts/detect_obfuscation.py <binary>
 ```
-
 
 ## Detection Heuristics
 
@@ -101,16 +92,14 @@ To complex functions heuristic identifies the top 10% of functions with the most
 * state machines
 * functions obfuscated with opaque predicates
 
-
 ### Flattened Functions
 
 The flattened function heuristic uses some graph-theoretic properties to identify functions implementing state machines. Usually, such state machines can be represented as switch statements that are dispatched in a loop. The heuristic allows to identify
 
 * network protocol dispatching
 * file parsing logic
-* C&C server communication / command dispatching
+* C\&C server communication / command dispatching
 * control-flow flattening
-
 
 ### Uncommon Instruction Sequences
 
@@ -121,7 +110,6 @@ The uncommon instruction sequences heuristic performs a statistical analysis to 
 * arithmetic obfuscation / Mixed Boolean-Arithmetic
 * generic obfuscation patterns
 
-
 ### Instruction Overlapping
 
 The instruction overlapping heuristic identifies functions with disaligned instructions (instruction bytes are shared by two different instructions). The heuristic identifies
@@ -131,14 +119,12 @@ The instruction overlapping heuristic identifies functions with disaligned instr
 
 If the heuristic is used in Binary Ninja's user interface, overlapping instructions are also highlighted in the graph view.
 
-
 ### Most Called Functions
 
 The heuristic for most called functions identifies the top 10% of functions with the largest number of calls from different functions. This way, the heuristic can identify
 
 * string decryption routines
 * library functions in statically linked binaries
-
 
 ### High Loop Frequency
 
@@ -149,7 +135,6 @@ The heuristic identifies functions with a high number of loops. These kind of fu
 
 The heuristic also helps pinpointing potential performance bottlenecks.
 
-
 ### Irreducible Loops
 
 The heuristic identifies functions with rare and complex loop structures that typically suggest
@@ -159,7 +144,6 @@ The heuristic identifies functions with rare and complex loop structures that ty
 * usage of goto statements
 * obfuscated code
 
-
 ### XOR Decryption Loops
 
 The heuristic identifies functions which perform an XOR operation with a constant inside of a loop. This way, the heuristic can identify
@@ -168,7 +152,6 @@ The heuristic identifies functions which perform an XOR operation with a constan
 * code decryption stubs
 * cryptographic implementations
 
-
 ### Complex Arithmetic Expressions
 
 The heuristic identifies functions in which the expressions have more than one arithmetic operation and one boolean operation simultaneously. This way, the heuristic can identify
@@ -176,7 +159,6 @@ The heuristic identifies functions in which the expressions have more than one a
 * mixed-boolean arithmetic obfuscation
 * initialization routine
 * cryptographic implementations
-
 
 ### Duplicate Subgraphs
 
@@ -187,11 +169,9 @@ The heuristic uses an iterative context-hashing approach to detect repeated mult
 * multi-way branching logic like range dividers and decision trees
 * repeated cryptographic or checksumming stubs
 
-
 ## Utils
 
 Contrary to the detection heuristics which target a wider scope of code, the plugin also implements various helpers which aim to identify functions with a narrower scope. In the following, we describe these helpers and explain their characteristics.
-
 
 ### Entry Functions
 
@@ -200,7 +180,6 @@ This helper identifies functions without known callers. These functions might be
 * entry points in the binary
 * indirect jumps targets where the call hierarchy could not be recovered by the disassembler
 
-
 ### Leaf Functions
 
 This helper identifies functions that do not call other functions. These kinds of functions may, for example, be functions that
@@ -208,7 +187,6 @@ This helper identifies functions that do not call other functions. These kinds o
 * are outlined by the compiler to implement functionalities utilized across various code locations
 * are trampolines to other functions
 * are part of code obfuscation schemes (e.g., outlined computations for control-flow obfuscation)
-
 
 ### Recursive Functions
 
@@ -219,7 +197,6 @@ This helper identifies recursive functions---functions that directly or indirect
 * implementations of mathematical algorithms or complex parsing routines
 * potential stack overflow vulnerabilities due to deep recursion
 
-
 ### Section Entropy
 
 This helper evaluates the entropy of each section. Entropy is a statistical measure of randomness with values ranging between 0 and 8. Sections with an entropy close to 8 indicate a high degree of randomness and can hint at:
@@ -228,16 +205,13 @@ This helper evaluates the entropy of each section. Entropy is a statistical meas
 * encrypted data or code
 * random data
 
-
 ### RC4
 
 This helper detects potential RC4 algorithm implementations by employing heuristic markers typically associated with RC4's Key Scheduling Algorithm (KSA) and Pseudo-Random Generation Algorithm (PRGA). RC4 is widely used in malware for purposes such as:
 
 * decrypting strings and other data payloads
-* obfuscating command and control (C&C) communications
-
+* obfuscating command and control (C\&C) communications
 
 ## Contact
 
-For more information, contact [@mr_phrazer](https://twitter.com/mr_phrazer).
-
+For more information, contact [@mr\_phrazer](https://twitter.com/mr_phrazer).
