@@ -1,27 +1,13 @@
 # mwcp Parser Roadmap
 
 Parsers in this directory extend DC3-MWCP beyond its bundled generic parsers.
-All parsers in `mwcp_parsers/` are staged into `tools/mwcp/lib/mwcp/parsers/`
-by `Build-OfflineToolkit.ps1 -IncludeMWCP`. Each parser runs automatically against
-the appropriate file type via the file-type detection in `mwcp_scan.py`.
+`mwcp_scan.py` auto-resyncs every parser + `parser_config.yml` from this directory
+over the staged `tools/mwcp/lib/mwcp/parsers/` copy before each scan, so changes
+here take effect immediately. `Build-OfflineToolkit.ps1 -IncludeMWCP` performs the
+same staging for offline-bundle deployments that ship only `tools/mwcp/lib`.
 
 What is implemented and validated is documented in [README.md](README.md).
 This file tracks only what is planned but not yet built.
-
----
-
-## Tier 1 — Additional C2 Frameworks
-
-Detection strategy: `identify()` uses **wire-protocol field names and binary
-structural indicators** — NOT framework name strings that operators strip.
-
-| Parser | Target | Detection basis | Extracts |
-|--------|--------|-----------------|----------|
-| `DeimosConfig.py` | PE (Go) | Go struct field names (`CallbackURL`, `Interval`, `PubKey`) unique to Deimos | C2 URL, interval, public key |
-| `MacroPackConfig.py` | ALL | MacroPack marker strings in macro documents + payload URL pattern | Delivery URL, payload type |
-| `IcedIDConfig.py` | PE | RC4-encrypted botnet config in PE overlay with documented key location | Bot ID, campaign ID, C2 domain |
-| `QakBotConfig.py` | PE | XOR-encoded config block with `tid`/`campaign_id`/C2 list | Campaign ID, C2 IP list |
-| `EmotedConfig.py` | PE | Emotet's multi-layer RSA+AES config with documented structure | C2 IP:port list, public key |
 
 **NightHawk — NOT planned as mwcp parser (intentional):**
 MDSec explicitly engineered NightHawk to defeat all file-content and memory-
@@ -36,101 +22,34 @@ These belong in `memory_enrich.py` (thread context module), the egress monitor
 
 ---
 
-## Tier 1 — Common RATs (commodity malware, high volume)
+## Tier 5 — Backlog (not yet built)
 
-| Parser | Target | Detection basis | Extracts |
+Every entry below requires 2+ independent structural/behavioral signals per
+identify() — a single flag/field/string is never sufficient (see CRITICAL
+Requirements below and [[feedback-detection-design]]). See the "Guidance for
+Writing a New Parser" and "Lessons Learned" sections of [README.md](README.md)
+before starting -- syntax/logic pitfalls and performance pitfalls actually
+hit while building the current 68 parsers, worth avoiding from the start.
+
+### Credential / identity abuse
+
+| Parser | Target | Detection basis (2+ signals) | Extracts |
 |--------|--------|-----------------|----------|
-| `RemcosConfig.py` | PE | `SETTINGS` PE section + RC4-encrypted config with documented key derivation | C2 host:port, mutex, license key, campaign tag, keylog path |
-| `NanoCoreConfig.py` | PE | .NET resource named `MANIFEST` containing encrypted XML with documented structure | C2 host:port, mutex, Group, BuildTime, plugin list |
-| `AsyncSpyConfig.py` | PE | AsyncRAT variant cluster — same field names but with `AsyncSpy` marker string | C2 host:port, mutex |
+| `PassTheHashConfig.py` | PS1, PE | Mimikatz-style `sekurlsa::pth` invocation (or the `/run:` argument) AND a 32-hex-character NTLM-hash-shaped token in the same argument set -- an NTLM hash string alone is common in unrelated password-audit tooling output; only paired with the pass-the-hash run argument is it the attack shape | Target user, hash value (credential) |
+| `AzureADDeviceCodeConfig.py` | PS1, PE | The Azure AD device-code OAuth2 endpoint (`login.microsoftonline.com/*/oauth2/*/devicecode`) AND a `refresh_token` grant-type reference -- device-code phishing tools (TokenTactics-style) request a token then immediately trade it for a long-lived refresh token, a combination ordinary interactive sign-in flows don't exhibit in static config/script form | Tenant/endpoint, grant-type summary |
 
----
+### GPO / domain-wide abuse
 
-## Tier 1 — Stealers (high volume in initial access incidents)
-
-| Parser | Target | Detection basis | Extracts |
+| Parser | Target | Detection basis (2+ signals) | Extracts |
 |--------|--------|-----------------|----------|
-| `RedlineConfig.py` | PE | .NET resource named `cfg` containing base64 XML config | C2 host:port, build ID, license ID |
-| `VidarConfig.py` | PE | PE overlay URL string after section boundary + Telegram channel in newer variants | C2 URL, botnet ID, Telegram channel |
-| `LummaConfig.py` | PE | Multiple base64-encoded C2 URLs in PE overlay separated by null bytes | C2 URL list, build ID |
-| `StealcConfig.py` | PE | Plaintext C2 URL adjacent to `Content-Type: application/x-www-form-urlencoded` marker | C2 URL, bot ID |
-| `RaccoonConfig.py` | PE | Hardcoded C2 URL string in PE data section (Raccoon v2 uses Telegram for C2 URL delivery) | C2 URL, build ID |
+| `GPOAbuseConfig.py` | PS1, PE | A GPO GUID-path write (`\\<domain>\SYSVOL\...\Policies\{GUID}\...`) AND a scheduled-task or startup-script XML fragment embedded in the same file -- SharpGPOAbuse-style tooling writes both together; a bare SYSVOL path alone appears in benign GPO management scripts | GPO GUID, embedded task/script fragment |
 
----
-
-## Tier 2 — Ransomware Config Extraction
-
-| Parser | Target | Detection basis | Extracts |
-|--------|--------|-----------------|----------|
-| `RansomwareIndicators.py` | PE | RSA/ECC PKCS#1 public key block in PE overlay (universal ransomware signal) | File extension list, ransom note filename, embedded public key, victim ID format, VSS commands |
-| `LockBitConfig.py` | PE | JSON config after RSA-encrypted region in PE overlay | Process/service kill list, extension, ransom note name, C2 URL |
-| `BlackCatConfig.py` | PE (Rust) | Plaintext JSON embedded in Rust binary (Rust doesn't strip string sections) | Extension, kill list, exclusion paths, C2 URL, public key |
-| `REvil_SodinokibiConfig.py` | PE | RC4-encrypted JSON with documented key derivation | C2 domain list, public key, campaign ID, exclusion paths |
-| `ContiConfig.py` | PE | RC4-encrypted blob with hardcoded key pattern | C2 IP:port list, RSA public key, AES key |
-| `AkiraConfig.py` | PE (Go) | Go binary with JSON config — Akira uses documented config structure | File extensions, exclusion paths, ransom note name |
-| `BlackBastaConfig.py` | PE | Config in PE overlay after RSA public key block | Kill list, excluded paths, bot ID |
-
----
-
-## Tier 2 — Living-off-the-Land / Fileless Behavioral Patterns
-
-| Parser | Target | Extracts |
-|--------|--------|----------|
-| `WMIPersistenceConfig.py` | ALL | WMI filter query (EventFilter), consumer command (CommandLineTemplate/ScriptText), event name |
-| `ScheduledTaskConfig.py` | XML, ALL | Task action (Execute + Arguments), trigger type, author, run-as user |
-| `RegistryPersistenceConfig.py` | PE, PS1 | Run/RunOnce paths, AppInit_DLL paths, IFEO debugger paths embedded in dropper |
-| `DefenderExclusionConfig.py` | PE, PS1 | Add-MpPreference -ExclusionPath / -ExclusionProcess strings |
-| `AMSIPatchConfig.py` | PS1, PE | AmsiScanBuffer patch bytes, amsi.dll load / patch patterns |
-| `ETWPatchConfig.py` | PS1, PE | ETW patch patterns (NtTraceEvent nulling, EtwEventWrite patching) |
-| `COMHijackConfig.py` | PE | COM CLSID registration paths embedded in droppers for persistence |
-
----
-
-## Tier 2 — Delivery Mechanism Parsers
-
-| Parser | Target | Extracts |
-|--------|--------|----------|
-| `MacroExtractor.py` | DOC, XLS, XLSM, DOCM | VBA source code, embedded URLs, Shell/CreateObject calls |
-| `ISOLNKChain.py` | ISO/LNK combo | LNK arguments inside ISO image, download URL |
-| `HTMLSmugglingDetector.py` | HTML, HTM | `navigator.msSaveBlob`, `<a download>` data URI, base64 blob content |
-| `OneNoteEmbedDetector.py` | ONE | OneNote EmbeddedFile paths, attachment click-to-run scripts |
-| `MSHTAConfig.py` | HTA | Inline VBScript/JScript C2 URLs, download cradle |
-| `WSFPolyglotConfig.py` | WSF | Polyglot WSF files embedding PS/VBS with C2 URLs |
-| `RegSvrConfig.py` | DLL, PS1 | regsvr32 /s /n /i:URL scrobj.dll patterns (Squiblydoo) |
-
----
-
-## Tier 2 — Cloud / SaaS C2 Abuse
-
-Modern C2 frameworks increasingly abuse legitimate cloud services to hide traffic.
-Detection must focus on the CLIENT-SIDE config (what URL/service is called) not on
-the server (which looks like legitimate traffic to network defenders).
-
-| Parser | Target | Extracts |
-|--------|--------|----------|
-| `SlackC2Config.py` | ALL | Slack webhook URL + token from C2 configs using Slack API for command delivery |
-| `TeamsDriveC2Config.py` | ALL | SharePoint/OneDrive API URLs + access tokens used for exfil or C2 |
-| `GoogleSheetC2Config.py` | ALL | Google Sheets/Drive API credentials for C2 (e.g., DoH via Google APIs) |
-| `DropboxC2Config.py` | ALL | Dropbox API tokens used for file-based C2 (upload tasks, download results) |
-| `GitHubC2Config.py` | ALL | GitHub personal access tokens (PAT) used for Gist-based C2 |
-| `PastebinC2Config.py` | ALL | Pastebin API keys + paste IDs used as dead-drop C2 staging |
-
-Detection note: these configs are often visible in plaintext (API tokens) even in
-compiled binaries — TelegramC2Config.py and DiscordExfilConfig.py demonstrate the
-pattern for Telegram and Discord respectively.
-
----
-
-## Tier 3 — Specialized / Post-Compromise
-
-| Parser | Target | Extracts |
-|--------|--------|----------|
-| `CryptoMinerConfig.py` | PE, UNKNOWN | Stratum pool URL, wallet, worker name, algorithm, thread count |
-| `MetasploitPayload.py` | PE, UNKNOWN | LHOST, LPORT from Metasploit shellcode — XOR-encoded with known offsets |
-| `BitsadminPersistenceConfig.py` | PS1, BAT | BITS job name, download URL, destination path |
-| `KerberoastConfig.py` | PS1 | SPN targets, ticket requests embedded in PS Kerberoasting scripts |
-| `DCsyncConfig.py` | PS1, PE | DRSUAPI replication source DC, target account — DCsync attack config |
-| `AntiAnalysisStrings.py` | PE | VM/sandbox names, analyst tool names the binary checks — confirms malware-awareness |
+Add new entries here once a genuinely mechanical (non-string, non-name)
+detection basis is confirmed from 2+ independent sources (a public IR
+writeup with byte/API-level detail, a leaked builder, or a validated
+sample) -- per [[feedback-detection-design]], a single dated writeup is not
+sufficient grounding on its own. Prefer 3+ corroborating signals over 2
+where the technique genuinely offers them; 2 is the floor, not the target.
 
 ---
 
@@ -145,12 +64,18 @@ Every custom parser needs an entry in `tools/mwcp/lib/mwcp/parser_config.yml`.
 Without it, `mwcp.run('MyParser', ...)` silently rejects the name with debug log
 `[dc3] Invalid name MyParser` — no exception, no report.errors, 0 results.
 
+Parsers live in category subfolders (`generic/`, `c2_frameworks/`, `stagers/`,
+`rats/`, `stealers/`, `ransomware/`, ...). The `.MyParser` leading-dot shorthand
+only resolves to a **flat sibling module** of the top-level key (mwcp's
+`registry._generate_parser_aux` does `group_name + parser_name` when it starts
+with a dot) — it does **not** support subfolders. Use the full dotted path:
+
 ```yaml
 MyParser:
   description: Brief description matching DESCRIPTION field
   author: IR_Toolkit
   parsers:
-    - .MyParser   # dot + exact Python class name
+    - <subfolder>.MyParser.MyParser   # <subfolder>.<module>.<ClassName>, no leading dot
 ```
 
 ### 2. File data attribute is `.data` not `.file_data`
@@ -188,6 +113,30 @@ Debug: `import logging; logging.basicConfig(level=logging.DEBUG)` before `mwcp.r
 `splitext()` returns a 2-tuple — calling `.lower()` on it raises AttributeError caught silently.
 Correct: `os.path.splitext(path)[1].lower()`.
 
+### 6. `mwcp_scan.py`'s parser-discovery must NOT be a filesystem listing
+
+`mwcp_scan.py` builds its own `available` parser list once per batch, then
+`_select_parsers()` filters it per file type. It used to do this via
+`pkgutil.iter_modules(mwcp.parsers.__path__)` — a *non-recursive* listing of
+`mwcp.parsers`'s immediate children. That broke silently, with zero errors,
+the moment parsers moved into category subfolders: `iter_modules()` returned
+the **subfolder names themselves** (`c2_frameworks`, `rats`, `stealers`, ...)
+instead of the parser names nested inside them, so every subfoldered parser's
+name never matched `_select_parsers()`'s lookups and it simply never ran —
+`mwcp_scan.py` still exited 0 and returned a well-formed empty result, so
+nothing looked wrong until a test asserted on the actual output. Confirmed
+via the tailing log: `parsers=c2_frameworks,generic,ransomware,rats,stagers,stealers`
+instead of real parser names.
+
+Fixed by sourcing `available` from `mwcp.registry.get_sources()` +
+`.config.keys()` instead — this reads the parsed `parser_config.yml` directly
+with zero imports, independent of directory layout. Two earlier candidate
+fixes were also tried and rejected: `mwcp.get_parser_descriptions()` eagerly
+imports every registered parser (including unrelated DC3 built-ins with
+unstaged optional deps, e.g. `pycdlib` for the ISO parser), and one such
+`ImportError` — not wrapped as `mwcp`'s own `DependencyNotInstalled` — crashes
+the whole call instead of being skipped.
+
 ---
 
 ## Parser writing guide
@@ -217,11 +166,30 @@ class MyParser(mwcp.Parser):
 ```
 
 **To add a new parser:**
-1. Write `MyParser.py` in this directory
-2. Copy to `tools/mwcp/lib/mwcp/parsers/`
-3. **Add entry to `parser_config.yml`** here AND in `tools/mwcp/lib/mwcp/parser_config.yml` (required — see §1 above)
-4. Add to `mwcp_scan.py` `_select_parsers()` type map and `known_generic` set
-5. Add TP/FP samples to `test/windows/lab_mwcp/generate_samples.py` and write tests
-6. Run `pytest test/test_53_mwcp_parsers.py` and `Invoke-Pester test/windows/lab_mwcp/` — both must pass
-7. Add parser to `README.md` once validated
-8. Rebuild: `Build-OfflineToolkit.ps1 -IncludeMWCP` stages parsers + updated config to tools/
+1. Write `<category>/MyParser.py` in this directory (pick the matching category
+   subfolder: `generic/`, `c2_frameworks/`, `stagers/`, `rats/`, `stealers/`,
+   `ransomware/`, `lol_fileless/`, `delivery/`, `cloud_saas/`, `specialized/`,
+   or a new one if it doesn't fit any existing category — `identify()` must
+   require 2+ independent signals, never a single indicator)
+2. **Add entry to `parser_config.yml`** here, using the full dotted path
+   `<category>.MyParser.MyParser` (required — see §1 above; the `.MyParser`
+   leading-dot shorthand does NOT work across subfolders)
+3. No manual copy step needed for local testing — `mwcp_scan.py` auto-resyncs
+   this directory + `parser_config.yml` over the staged
+   `tools/mwcp/lib/mwcp/parsers/` copy before every scan (see the module
+   docstring / `_resync_parsers()` in `mwcp_scan.py`)
+4. Add the parser name to `mwcp_scan.py` `_select_parsers()`'s relevant
+   `type_specific` entry (or `_PE_C2` for PE/UNKNOWN) and to the
+   `known_generic` set — `available` is sourced from
+   `mwcp.registry.get_sources()` + `.config.keys()`, so no filesystem-layout
+   changes are needed there; see §6 above
+5. Add TP/FP samples to `test/windows/lab_mwcp/generate_samples.py` and write
+   a `test_NN_mwcp_<category>_parsers.py` covering identify(TP), FP-silence,
+   single-indicator-insufficiency, and end-to-end extraction (identify()
+   unit tests import via the dotted path too, e.g.
+   `from c2_frameworks.MyParser import MyParser`)
+6. Run the new pytest file and `Invoke-Pester test/windows/lab_mwcp/` — both must pass
+7. Add parser to `README.md` once validated; remove it from this file's backlog
+8. Before merging: `Build-OfflineToolkit.ps1 -IncludeMWCP` rebuilds the offline
+   staging bundle (recursively, preserving subfolders) for deployments that
+   ship only `tools/mwcp/lib`, not the source tree

@@ -1,0 +1,3 @@
+{"url":"stratum+tcp://pool.minexmr.com:4444","user":"4AB9226C6BBddSomeAddress1234567890abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNO","pass":"x"}
+{"id":1,"method":"mining.subscribe","params":["xmrig/6.0"]}
+{"id":2,"method":"mining.authorize","params":["wallet","x"]}

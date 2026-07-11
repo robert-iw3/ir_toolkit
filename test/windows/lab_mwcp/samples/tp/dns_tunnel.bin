@@ -1,0 +1,2 @@
+Resolve-DnsName -Name data.c2.lab.test -Type TXT
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA.c2.lab.test

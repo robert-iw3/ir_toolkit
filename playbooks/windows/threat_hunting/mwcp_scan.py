@@ -4,6 +4,9 @@ DC3-MWCP file scanner helper.
 
 Invoked by memory_enrich.py (carved injected regions) and by the PowerShell
 Invoke-MWCPFileScan function (flagged on-disk files). Handles:
+  - Resyncing every parser + parser_config.yml from mwcp_parsers/ (source of
+    truth) over the staged tools/mwcp/lib copy before each scan -- a parser
+    fix takes effect immediately, no separate rebuild step required
   - Parser registration and file-type detection
   - Running appropriate parsers based on file type magic bytes
   - Correct mwcp 3.x API: mwcp.run(parser_name, file_path=path)
@@ -17,15 +20,54 @@ Output (stdout): JSON {"mutex":[...],"address":[...],"filename":[...],"password"
 Tailing log: <out_dir>/mwcp_scan_log.txt (appended, never truncated)
 """
 
-import sys, os, json, pkgutil
+import sys, os, json, shutil, filecmp
 from datetime import datetime, timezone
+
+def _resync_parsers(lib_path):
+    """Copy every IR Toolkit parser (and parser_config.yml) from the source
+    tree (mwcp_parsers/, sitting next to this script) over the staged copy
+    under lib_path, whenever the two differ. Source is authoritative -- a
+    parser fix landing in mwcp_parsers/ takes effect on the next scan without
+    a separate Build-OfflineToolkit.ps1 -IncludeMWCP run. No-ops (silently)
+    on a target host deployed with only the staged tools/mwcp/lib bundle and
+    no source tree."""
+    src_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'mwcp_parsers')
+    if not os.path.isdir(src_dir):
+        return
+
+    dst_parsers = os.path.join(lib_path, 'mwcp', 'parsers')
+    for root, _dirs, files in os.walk(src_dir):
+        for fname in files:
+            if not fname.endswith('.py'):
+                continue
+            src_file = os.path.join(root, fname)
+            rel      = os.path.relpath(src_file, src_dir)
+            dst_file = os.path.join(dst_parsers, rel)
+            if os.path.isfile(dst_file) and filecmp.cmp(src_file, dst_file, shallow=False):
+                continue
+            os.makedirs(os.path.dirname(dst_file), exist_ok=True)
+            shutil.copyfile(src_file, dst_file)
+
+    src_config = os.path.join(src_dir, 'parser_config.yml')
+    dst_config = os.path.join(lib_path, 'mwcp', 'parser_config.yml')
+    if os.path.isfile(src_config) and not (
+            os.path.isfile(dst_config) and filecmp.cmp(src_config, dst_config, shallow=False)):
+        shutil.copyfile(src_config, dst_config)
+
 
 def _setup(lib_path):
     if lib_path not in sys.path:
         sys.path.insert(0, lib_path)
+    _resync_parsers(lib_path)
     import mwcp
     mwcp.register_entry_points()
     return mwcp
+
+
+_MACRO_DOC_EXTS = {'.doc', '.dot', '.docm', '.dotm', '.xls', '.xlt', '.xlsm',
+                    '.xltm', '.ppt', '.pptm', '.potm'}
+_ONE_MAGIC = bytes([0xE4, 0x52, 0x5C, 0x7B, 0x8C, 0xD8, 0xA7, 0x4D,
+                     0xAE, 0xB1, 0x53, 0x78, 0xD0, 0x29, 0x96, 0xD3])
 
 
 def _detect_type(path):
@@ -35,21 +77,26 @@ def _detect_type(path):
             h = f.read(16)
     except Exception:
         return 'UNKNOWN'
+    ext = os.path.splitext(path)[1].lower()
     if h[:2] == b'MZ':                     return 'PE'
     if h[:4] == b'%PDF':                   return 'PDF'
-    if h[:2] == b'PK':                     return 'ZIP'
+    if h[:8] == b'\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1':  return 'DOC'  # legacy OLE-CFB
+    if h[:16] == _ONE_MAGIC:               return 'ONE'
+    if h[:2] == b'PK':
+        return 'DOC' if ext in _MACRO_DOC_EXTS else 'ZIP'
     if h[:2] == b'\x1f\x8b':              return 'GZIP'
     if h[:4] in (b'\xfe\xed\xfa\xce', b'\xce\xfa\xed\xfe',
                  b'\xcf\xfa\xed\xfe', b'\xca\xfe\xba\xbe'):
         return 'MACHO'
-    ext = os.path.splitext(path)[1].lower()
     ext_map = {'.ps1': 'PS1', '.psm1': 'PS1', '.psd1': 'PS1',
                '.vbs': 'VBS', '.vbe': 'VBS', '.js': 'JS',
                '.hta': 'HTA', '.bat': 'BAT', '.cmd': 'BAT',
                '.wsf': 'WSF', '.wsh': 'WSF',
                '.lnk': 'LNK',
                '.py':  'PY',  '.rb':  'RB',  '.pl': 'PL',
-               '.iso': 'ISO', '.img': 'ISO'}
+               '.iso': 'ISO', '.img': 'ISO',
+               '.html': 'HTML', '.htm': 'HTML',
+               '.one': 'ONE'}
     return ext_map.get(ext, 'UNKNOWN')
 
 
@@ -69,9 +116,51 @@ def _select_parsers(file_type, available):
         'BruteRatelConfig', 'MythicConfig', 'MerlinConfig', 'AdaptixC2Config',
         # RATs (plaintext / .NET string configs -- all use identify() to reject non-matching)
         'NjRATConfig', 'AsyncRATConfig', 'DcRATConfig', 'XWormConfig',
-        'QuasarRATConfig', 'AgentTeslaConfig',
+        'QuasarRATConfig', 'AgentTeslaConfig', 'RemcosConfig', 'NanoCoreConfig',
         # Exfil / credential stealers
         'SMTPExfilConfig', 'DiscordExfilConfig', 'TelegramC2Config',
+        'RedlineConfig', 'VidarConfig', 'LummaConfig', 'StealcConfig', 'RaccoonConfig',
+        # Additional C2 frameworks / loaders (Tier 1 backlog)
+        'DeimosConfig', 'IcedIDConfig', 'QakBotConfig', 'EmotedConfig',
+        # Ransomware
+        'RansomwareIndicators', 'LockBitConfig', 'BlackCatConfig',
+        'REvil_SodinokibiConfig', 'ContiConfig', 'AkiraConfig', 'BlackBastaConfig',
+        # Living-off-the-land / fileless persistence (dropper-embedded)
+        'WMIPersistenceConfig', 'ScheduledTaskConfig', 'RegistryPersistenceConfig',
+        'DefenderExclusionConfig', 'AMSIPatchConfig', 'ETWPatchConfig', 'COMHijackConfig',
+        # Delivery command-pattern detectors (may appear as strings embedded
+        # in a compiled dropper/loader, not just their native container type;
+        # MacroExtractor also covers carved VBA source with no surrounding
+        # OLE/ZIP container, the shape memory forensics typically produces)
+        'MSHTAConfig', 'RegSvrConfig', 'MacroExtractor',
+        # Cloud/SaaS C2 (legitimate services abused as a covert channel --
+        # plaintext token+endpoint pairs, same class as TelegramC2Config)
+        'SlackC2Config', 'TeamsDriveC2Config', 'GoogleSheetC2Config',
+        'DropboxC2Config', 'GitHubC2Config', 'PastebinC2Config',
+        # Specialized / post-compromise
+        'CryptoMinerConfig', 'MetasploitPayload', 'AntiAnalysisStrings', 'DCsyncConfig',
+        'LSASSDumpConfig', 'RubeusTicketConfig', 'PsExecServiceConfig',
+        'BloodHoundCollectionConfig', 'ClipboardHijackConfig', 'DNSTunnelC2Config',
+        'NgrokTunnelConfig',
+    ]
+    _CLOUD_SAAS = [
+        'SlackC2Config', 'TeamsDriveC2Config', 'GoogleSheetC2Config',
+        'DropboxC2Config', 'GitHubC2Config', 'PastebinC2Config', 'NgrokTunnelConfig',
+    ]
+    # Tier 4 post-exploitation/lateral-movement/commodity-crimeware detectors
+    # that plausibly appear in a PS1 script (Rubeus/PsExec/BloodHound tooling,
+    # clipboard hijack loaders, and DNS-tunnel/ngrok C2 are all commonly
+    # PowerShell-driven, not just compiled-binary).
+    _PS1_TIER4 = [
+        'LSASSDumpConfig', 'RubeusTicketConfig', 'PsExecServiceConfig',
+        'BloodHoundCollectionConfig', 'ClipboardHijackConfig', 'DNSTunnelC2Config',
+    ]
+    # LOL/fileless parsers that plausibly appear in a PS1 dropper/stager, not
+    # just a compiled PE (script-based WMI/registry/Defender/task manipulation
+    # is at least as common as compiled-binary droppers doing the same).
+    _PS1_LOL_FILELESS = [
+        'WMIPersistenceConfig', 'ScheduledTaskConfig', 'RegistryPersistenceConfig',
+        'DefenderExclusionConfig', 'COMHijackConfig',
     ]
     type_specific = {
         # Executable and GenericDropper require 'rugosa' which is not in our offline bundle;
@@ -82,13 +171,21 @@ def _select_parsers(file_type, available):
         'PDF':     ['PDF'],
         'ZIP':     ['Archive'],
         'GZIP':    ['Archive'],
-        'ISO':     ['ISO'],
+        'ISO':     ['ISO', 'ISOLNKChain'],
+        'DOC':     ['Decoy', 'MacroExtractor'],
+        'ONE':     ['OneNoteEmbedDetector'],
+        'HTML':    ['HTMLSmugglingDetector'],
         'PS1':     ['PowerShell', 'PowerShellDecoder', 'PoshC2Config', 'PowGratConfig',
-                    'TelegramC2Config', 'DiscordExfilConfig', 'AgentTeslaConfig'],
-        'VBS':     ['VisualBasic', 'PowerShellDecoder', 'TelegramC2Config', 'DiscordExfilConfig'],
-        'HTA':     ['PowerShellDecoder', 'TelegramC2Config', 'DiscordExfilConfig'],
-        'BAT':     ['PowerShellDecoder', 'TelegramC2Config', 'DiscordExfilConfig'],
-        'WSF':     ['PowerShellDecoder'],
+                    'TelegramC2Config', 'DiscordExfilConfig', 'AgentTeslaConfig',
+                    'RegSvrConfig', 'BitsadminPersistenceConfig', 'KerberoastConfig',
+                    'DCsyncConfig', *_PS1_LOL_FILELESS, *_CLOUD_SAAS, *_PS1_TIER4],
+        'VBS':     ['VisualBasic', 'PowerShellDecoder', 'TelegramC2Config', 'DiscordExfilConfig',
+                    'MacroPackConfig', 'RegSvrConfig'],
+        'HTA':     ['PowerShellDecoder', 'TelegramC2Config', 'DiscordExfilConfig',
+                    'MacroPackConfig', 'MSHTAConfig', 'RegSvrConfig'],
+        'BAT':     ['PowerShellDecoder', 'TelegramC2Config', 'DiscordExfilConfig', 'RegSvrConfig',
+                    'BitsadminPersistenceConfig'],
+        'WSF':     ['PowerShellDecoder', 'MacroPackConfig', 'WSFPolyglotConfig', 'RegSvrConfig'],
         'LNK':     ['LNKParser', 'PowerShellDecoder'],
         'PY':      ['Python'],
         'MACHO':   ['MachO'],
@@ -125,7 +222,29 @@ def _select_parsers(file_type, available):
         'MythicConfig','MerlinConfig','PoshC2Config','AdaptixC2Config','PowGratConfig',
         # IR Toolkit RATs / stealers
         'NjRATConfig','AsyncRATConfig','DcRATConfig','XWormConfig','QuasarRATConfig',
-        'AgentTeslaConfig','SMTPExfilConfig',
+        'AgentTeslaConfig','SMTPExfilConfig','RemcosConfig','NanoCoreConfig',
+        # IR Toolkit Tier 1 backlog -- C2 frameworks / loaders / stealers
+        'DeimosConfig','MacroPackConfig','IcedIDConfig','QakBotConfig','EmotedConfig',
+        'RedlineConfig','VidarConfig','LummaConfig','StealcConfig','RaccoonConfig',
+        # IR Toolkit Tier 2 backlog -- ransomware
+        'RansomwareIndicators','LockBitConfig','BlackCatConfig','REvil_SodinokibiConfig',
+        'ContiConfig','AkiraConfig','BlackBastaConfig',
+        # IR Toolkit Tier 2 backlog -- LOL/fileless
+        'WMIPersistenceConfig','ScheduledTaskConfig','RegistryPersistenceConfig',
+        'DefenderExclusionConfig','AMSIPatchConfig','ETWPatchConfig','COMHijackConfig',
+        # IR Toolkit Tier 2 backlog -- delivery mechanisms
+        'MacroExtractor','ISOLNKChain','HTMLSmugglingDetector','OneNoteEmbedDetector',
+        'MSHTAConfig','WSFPolyglotConfig','RegSvrConfig',
+        # IR Toolkit Tier 2 backlog -- cloud/SaaS C2
+        'SlackC2Config','TeamsDriveC2Config','GoogleSheetC2Config',
+        'DropboxC2Config','GitHubC2Config','PastebinC2Config',
+        # IR Toolkit Tier 3 backlog -- specialized / post-compromise
+        'CryptoMinerConfig','MetasploitPayload','BitsadminPersistenceConfig',
+        'KerberoastConfig','DCsyncConfig','AntiAnalysisStrings',
+        # IR Toolkit Tier 4 backlog -- post-exploitation / commodity crimeware
+        'LSASSDumpConfig','RubeusTicketConfig','PsExecServiceConfig',
+        'BloodHoundCollectionConfig','ClipboardHijackConfig','DNSTunnelC2Config',
+        'NgrokTunnelConfig',
     }
     for p in available:
         if p not in known_generic and p not in selected:
@@ -264,11 +383,16 @@ def main():
     try:
         mwcp = _setup(lib_path)
         import mwcp.metadata as meta
-        import mwcp.parsers as mp_mod
+        import mwcp.registry as mwcp_registry
 
-        # Enumerate available parsers ONCE -- shared across all files in this batch
-        available = [n for _, n, _ in pkgutil.iter_modules(mp_mod.__path__)
-                     if not n.startswith('_') and n not in ('tests', 'foo')]
+        # Enumerate available parsers ONCE -- shared across all files in this batch.
+        # Reads registered parser names directly from each Source's parsed
+        # parser_config.yml (top-level keys) -- no importing, no dependency
+        # resolution, so an unstaged optional dependency on an unrelated DC3
+        # built-in parser can't affect this at all.
+        _sources = mwcp_registry.get_sources()
+        available = [n for src in _sources for n in src.config.keys()
+                     if n not in ('tests', 'foo')]
 
         results = []
         for file_path in file_paths:

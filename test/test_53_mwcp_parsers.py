@@ -146,15 +146,15 @@ def _lnk_sample() -> bytes:
 @needs_mwcp
 class TestCobaltStrikeIdentify:
     def test_tp_binary(self):
-        from CobaltStrikeConfig import CobaltStrikeConfig
+        from c2_frameworks.CobaltStrikeConfig import CobaltStrikeConfig
         assert CobaltStrikeConfig.identify(_FO(_cs_block())) is True
 
     def test_fp_plain_text(self):
-        from CobaltStrikeConfig import CobaltStrikeConfig
+        from c2_frameworks.CobaltStrikeConfig import CobaltStrikeConfig
         assert CobaltStrikeConfig.identify(_FO(b'hello world, nothing binary here at all')) is False
 
     def test_fp_too_small(self):
-        from CobaltStrikeConfig import CobaltStrikeConfig
+        from c2_frameworks.CobaltStrikeConfig import CobaltStrikeConfig
         assert CobaltStrikeConfig.identify(_FO(b'MZ')) is False
 
 
@@ -170,16 +170,16 @@ class TestSliverIdentify:
         return _mz(b'\x00' * 64 + payload)
 
     def test_tp_two_proto_fields(self):
-        from SliverConfig import SliverConfig
+        from c2_frameworks.SliverConfig import SliverConfig
         assert SliverConfig.identify(_FO(self._tp_data())) is True
 
     def test_fp_single_field_only(self):
-        from SliverConfig import SliverConfig
+        from c2_frameworks.SliverConfig import SliverConfig
         # Only one proto field -- not enough
         assert SliverConfig.identify(_FO(b'"implant_name":"x"')) is False
 
     def test_fp_unrelated_json(self):
-        from SliverConfig import SliverConfig
+        from c2_frameworks.SliverConfig import SliverConfig
         data = b'{"server_url":"https://api.example.com","retry":3}'
         assert SliverConfig.identify(_FO(data)) is False
 
@@ -191,29 +191,29 @@ class TestHavocIdentify:
         return _mz(b'\x00' * 64 + magic + struct.pack('<I', 64) + b'\x00' * 32)
 
     def test_tp_magic_valid_size(self):
-        from HavocConfig import HavocConfig
+        from c2_frameworks.HavocConfig import HavocConfig
         assert HavocConfig.identify(_FO(self._tp_data())) is True
 
     def test_fp_magic_zero_size(self):
-        from HavocConfig import HavocConfig
+        from c2_frameworks.HavocConfig import HavocConfig
         # Magic present but config_size == 0 -- invalid
         data = _mz(b'\x00' * 64 + b'\xde\xad\xbe\xef' + struct.pack('<I', 0))
         assert HavocConfig.identify(_FO(data)) is False
 
     def test_fp_no_magic(self):
-        from HavocConfig import HavocConfig
+        from c2_frameworks.HavocConfig import HavocConfig
         assert HavocConfig.identify(_FO(b'MZ' + b'\x00' * 128)) is False
 
 
 @needs_mwcp
 class TestBruteRatelIdentify:
     def test_tp_pipe_present(self):
-        from BruteRatelConfig import BruteRatelConfig
+        from c2_frameworks.BruteRatelConfig import BruteRatelConfig
         data = _mz(b'\x00' * 64 + b'\\\\.\\pipe\\ratel\x00')
         assert BruteRatelConfig.identify(_FO(data)) is True
 
     def test_fp_no_indicator(self):
-        from BruteRatelConfig import BruteRatelConfig
+        from c2_frameworks.BruteRatelConfig import BruteRatelConfig
         assert BruteRatelConfig.identify(_FO(b'MZ' + b'\x00' * 256)) is False
 
 
@@ -224,11 +224,11 @@ class TestMythicIdentify:
         return _mz(b'\x00' * 64 + json.dumps(config).encode())
 
     def test_tp_two_required_fields(self):
-        from MythicConfig import MythicConfig
+        from c2_frameworks.MythicConfig import MythicConfig
         assert MythicConfig.identify(_FO(self._tp_data())) is True
 
     def test_fp_single_field(self):
-        from MythicConfig import MythicConfig
+        from c2_frameworks.MythicConfig import MythicConfig
         data = _mz(b'{"PayloadUUID":"abc"}')
         assert MythicConfig.identify(_FO(data)) is False
 
@@ -240,11 +240,11 @@ class TestMerlinIdentify:
         return _mz(b'\x00' * 64 + json.dumps(config).encode())
 
     def test_tp_two_required_fields(self):
-        from MerlinConfig import MerlinConfig
+        from c2_frameworks.MerlinConfig import MerlinConfig
         assert MerlinConfig.identify(_FO(self._tp_data())) is True
 
     def test_fp_no_fields(self):
-        from MerlinConfig import MerlinConfig
+        from c2_frameworks.MerlinConfig import MerlinConfig
         data = _mz(b'{"url":"https://api.example.com","retry":3}')
         assert MerlinConfig.identify(_FO(data)) is False
 
@@ -252,16 +252,16 @@ class TestMerlinIdentify:
 @needs_mwcp
 class TestPoshC2Identify:
     def test_tp_two_markers(self):
-        from PoshC2Config import PoshC2Config
+        from stagers.PoshC2Config import PoshC2Config
         data = b'$URLS = @("https://c2.lab.test")\n$kill_date = "2099-12-31"\n'
         assert PoshC2Config.identify(_FO(data)) is True
 
     def test_fp_single_marker(self):
-        from PoshC2Config import PoshC2Config
+        from stagers.PoshC2Config import PoshC2Config
         assert PoshC2Config.identify(_FO(b'$URLS = @("https://ok.example.com")\n')) is False
 
     def test_fp_benign_ps1(self):
-        from PoshC2Config import PoshC2Config
+        from stagers.PoshC2Config import PoshC2Config
         data = b'Get-ChildItem C:\\Windows | Select Name\n'
         assert PoshC2Config.identify(_FO(data)) is False
 
@@ -269,7 +269,7 @@ class TestPoshC2Identify:
 @needs_mwcp
 class TestNjRATIdentify:
     def test_tp_always_runs(self):
-        from NjRATConfig import NjRATConfig
+        from rats.NjRATConfig import NjRATConfig
         assert NjRATConfig.identify(_FO(b'anything')) is True
 
 
@@ -278,74 +278,76 @@ class TestAsyncRATIdentify:
     def _cluster(self) -> bytes:
         return b'Hosts\x00Ports\x00Version\x00Mutex\x00Certificate\x00'
 
-    def test_tp_mz_header(self):
-        from AsyncRATConfig import AsyncRATConfig
-        assert AsyncRATConfig.identify(_FO(b'MZ' + b'\x00' * 128)) is True
+    def test_mz_header_alone_not_enough(self):
+        # A bare MZ header is not evidence of anything -- every PE has one.
+        # identify() must require the actual key cluster (see AsyncRATConfig.py).
+        from rats.AsyncRATConfig import AsyncRATConfig
+        assert AsyncRATConfig.identify(_FO(b'MZ' + b'\x00' * 128)) is False
 
     def test_tp_key_cluster(self):
-        from AsyncRATConfig import AsyncRATConfig
+        from rats.AsyncRATConfig import AsyncRATConfig
         data = self._cluster() + b'\x00' * 512 + self._cluster()
         assert AsyncRATConfig.identify(_FO(data)) is True
 
     def test_fp_too_small(self):
-        from AsyncRATConfig import AsyncRATConfig
+        from rats.AsyncRATConfig import AsyncRATConfig
         assert AsyncRATConfig.identify(_FO(b'Hosts\x00Ports\x00')) is False
 
 
 @needs_mwcp
 class TestTelegramC2Identify:
     def test_always_runs(self):
-        from TelegramC2Config import TelegramC2Config
+        from generic.TelegramC2Config import TelegramC2Config
         assert TelegramC2Config.identify(_FO(b'anything')) is True
 
 
 @needs_mwcp
 class TestSMTPExfilIdentify:
     def test_tp_smtp_prefix(self):
-        from SMTPExfilConfig import SMTPExfilConfig
+        from stealers.SMTPExfilConfig import SMTPExfilConfig
         data = b'smtp.lab.test\x00587\x00exfil@lab.test\x00password:x\x00'
         assert SMTPExfilConfig.identify(_FO(data)) is True
 
     def test_tp_port_587(self):
-        from SMTPExfilConfig import SMTPExfilConfig
+        from stealers.SMTPExfilConfig import SMTPExfilConfig
         # SMTPExfilConfig.identify() requires len(data) >= 32
         data = b'host=mail.example.com port=587 tls=true auth=login'
         assert SMTPExfilConfig.identify(_FO(data)) is True
 
     def test_fp_no_smtp_indicator(self):
-        from SMTPExfilConfig import SMTPExfilConfig
+        from stealers.SMTPExfilConfig import SMTPExfilConfig
         assert SMTPExfilConfig.identify(_FO(b'regular text file with no email config')) is False
 
 
 @needs_mwcp
 class TestLNKIdentify:
     def test_tp_valid_lnk(self):
-        from LNKParser import LNKParser
+        from generic.LNKParser import LNKParser
         assert LNKParser.identify(_FO(_lnk_sample())) is True
 
     def test_fp_wrong_magic(self):
-        from LNKParser import LNKParser
+        from generic.LNKParser import LNKParser
         # Same size but wrong magic (PE not LNK)
         data = b'MZ\x00\x00' + b'\x00' * 36
         assert LNKParser.identify(_FO(data)) is False
 
     def test_fp_too_short(self):
-        from LNKParser import LNKParser
+        from generic.LNKParser import LNKParser
         assert LNKParser.identify(_FO(b'\x4c\x00\x00\x00\x01\x14')) is False
 
 
 @needs_mwcp
 class TestGenericParsersIdentify:
     def test_generic_c2_always_runs(self):
-        from GenericC2 import GenericC2
+        from generic.GenericC2 import GenericC2
         assert GenericC2.identify(_FO(b'anything')) is True
 
     def test_generic_mutex_always_runs(self):
-        from GenericMutex import GenericMutex
+        from generic.GenericMutex import GenericMutex
         assert GenericMutex.identify(_FO(b'anything')) is True
 
     def test_ps_decoder_always_runs(self):
-        from PowerShellDecoder import PowerShellDecoder
+        from generic.PowerShellDecoder import PowerShellDecoder
         assert PowerShellDecoder.identify(_FO(b'anything')) is True
 
 

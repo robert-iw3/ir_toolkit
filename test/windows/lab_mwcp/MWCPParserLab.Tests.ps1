@@ -614,7 +614,7 @@ Describe "TP: PowGratConfig" {
 # ===========================================================================
 # Parser source integrity checks
 # ===========================================================================
-Describe "Parser source: all 22 parsers registered in parser_config.yml" {
+Describe "Parser source: all 34 parsers registered in parser_config.yml" {
     BeforeAll {
         $cfgPath = Join-Path $script:WinHunt "mwcp_parsers\parser_config.yml"
         $script:ParserCfg = if (Test-Path $cfgPath) {
@@ -628,7 +628,12 @@ Describe "Parser source: all 22 parsers registered in parser_config.yml" {
         'HavocConfig','BruteRatelConfig','MythicConfig','MerlinConfig',
         'PoshC2Config','NjRATConfig','AsyncRATConfig','SMTPExfilConfig',
         'DiscordExfilConfig','DcRATConfig','XWormConfig','QuasarRATConfig',
-        'AgentTeslaConfig','AdaptixC2Config','PowGratConfig'
+        'AgentTeslaConfig','AdaptixC2Config','PowGratConfig',
+        # Tier 1 backlog (2026-07-11)
+        'DeimosConfig','MacroPackConfig','IcedIDConfig','QakBotConfig',
+        'EmotedConfig','RemcosConfig','NanoCoreConfig','RedlineConfig',
+        'VidarConfig','LummaConfig','StealcConfig','RaccoonConfig',
+        'RansomwareIndicators'
     )
 
     foreach ($p in $parsers) {
@@ -640,8 +645,13 @@ Describe "Parser source: all 22 parsers registered in parser_config.yml" {
 
 Describe "Parser source: no .file_data attribute usage (silent mwcp 3.x bug)" {
     BeforeAll {
+        # -Recurse is required: parsers live in category subfolders (generic/,
+        # c2_frameworks/, stagers/, rats/, stealers/, ransomware/, ...) -- a
+        # non-recursive listing here would silently return zero files and turn
+        # both checks below into no-ops that always pass (see ROADMAP.md's
+        # "CRITICAL requirements" #6 for the same bug class in mwcp_scan.py).
         $parsersDir = Join-Path $script:WinHunt "mwcp_parsers"
-        $script:AllParserSrc = Get-ChildItem $parsersDir -Filter "*.py" |
+        $script:AllParserSrc = Get-ChildItem $parsersDir -Filter "*.py" -Recurse |
             Get-Content -Raw | Out-String
     }
 
@@ -651,5 +661,30 @@ Describe "Parser source: no .file_data attribute usage (silent mwcp 3.x bug)" {
 
     It "Should use report.add() not report.get() for metadata" {
         $script:AllParserSrc | Should -Not -Match 'report\.get\(meta\.'
+    }
+}
+
+Describe "mwcp_scan.py auto-resync -- staged parsers self-heal from source" {
+    It "Overwrites a deliberately-staled staged parser file before the next scan" {
+        $srcFile = Join-Path $script:WinHunt "mwcp_parsers\rats\XWormConfig.py"
+        $dstFile = Join-Path $script:MwcpLib "mwcp\parsers\rats\XWormConfig.py"
+        Test-Path $srcFile | Should -BeTrue -Because "source of truth must exist"
+        Test-Path $dstFile | Should -BeTrue -Because "staged copy must already exist from prior staging"
+
+        $original = Get-Content -LiteralPath $dstFile -Raw
+        try {
+            Add-Content -LiteralPath $dstFile -Value "`n# deliberately staled by a Pester test"
+            (Get-Content -LiteralPath $dstFile -Raw) | Should -Match 'deliberately staled'
+
+            $tpSample = Join-Path $script:TP "xworm_config.bin"
+            & $script:Python $script:MwcpScan $script:MwcpLib "-" $tpSample 2>&1 | Out-Null
+
+            (Get-Content -LiteralPath $dstFile -Raw) | Should -Not -Match 'deliberately staled' `
+                -Because "mwcp_scan.py resyncs every parser from mwcp_parsers/ before each scan"
+            (Get-Content -LiteralPath $dstFile -Raw) | Should -Be (Get-Content -LiteralPath $srcFile -Raw)
+        } finally {
+            # Belt-and-suspenders: restore even if the resync assertion above failed.
+            Set-Content -LiteralPath $dstFile -Value $original -NoNewline
+        }
     }
 }

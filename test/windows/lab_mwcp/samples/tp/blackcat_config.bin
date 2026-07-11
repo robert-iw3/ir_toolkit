@@ -1,0 +1,1 @@
+{"config_id": "lab-affiliate-001", "public_key": "LabTestPubKeyBase64==", "extension": "labcat", "note_file_name": "RECOVER-LABCAT-FILES.txt", "kill_processes": ["sql.exe", "veeam.exe"], "exclude_directory_names": ["Windows", "Program Files"]}

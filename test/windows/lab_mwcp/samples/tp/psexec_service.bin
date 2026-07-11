@@ -1,0 +1,3 @@
+\\.\pipe\PSEXESVC
+CreateServiceA(hSCM, "PSEXESVC", "PSEXESVC", ...);
+C:\Users\LabUser\AppData\Local\Temp\svc.exe

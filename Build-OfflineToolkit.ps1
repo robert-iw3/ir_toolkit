@@ -435,8 +435,14 @@ if ($IncludeMWCP) {
 
             # Stage all IR Toolkit parsers from mwcp_parsers/ into the installed lib.
             # SOURCE OF TRUTH: playbooks/windows/threat_hunting/mwcp_parsers/
-            #   - parser_config.yml  <- authoritative config (NOT the pip-installed version)
-            #   - *.py               <- all custom parsers
+            #   - parser_config.yml       <- authoritative config (NOT the pip-installed version)
+            #   - <category>/*.py         <- all custom parsers, grouped into category
+            #                                subfolders (generic/, c2_frameworks/, stagers/,
+            #                                rats/, stealers/, ransomware/, ...) -- parser_config.yml
+            #                                references them via a full dotted path
+            #                                ("<subfolder>.<ModuleName>.<ClassName>"), so the
+            #                                subfolder structure (and each __init__.py) MUST be
+            #                                preserved when staging, not flattened.
             #
             # The pip-installed parser_config.yml is overwritten by ours so our custom
             # parsers are registered. Never edit tools/mwcp/lib/mwcp/parser_config.yml
@@ -454,14 +460,17 @@ if ($IncludeMWCP) {
                 Write-Host "    WARN: mwcp_parsers/parser_config.yml not found -- pip version not overridden" -ForegroundColor Yellow
             }
 
-            # 2. Stage all *.py parser files from mwcp_parsers/
+            # 2. Stage all *.py parser files from mwcp_parsers/, preserving category subfolders
             if (Test-Path $parsersDir) {
-                $pyFiles = Get-ChildItem -Path $parsersRepo -Filter '*.py' -ErrorAction SilentlyContinue
+                $pyFiles = Get-ChildItem -Path $parsersRepo -Filter '*.py' -Recurse -ErrorAction SilentlyContinue
                 foreach ($pf in $pyFiles) {
-                    $dst = Join-Path $parsersDir $pf.Name
+                    $relPath = $pf.FullName.Substring($parsersRepo.Length).TrimStart('\', '/')
+                    $dst     = Join-Path $parsersDir $relPath
+                    $dstDir  = Split-Path $dst -Parent
+                    if (-not (Test-Path $dstDir)) { New-Item -ItemType Directory -Path $dstDir -Force | Out-Null }
                     Copy-Item -LiteralPath $pf.FullName -Destination $dst -Force
                 }
-                Write-Host "    -> Staged $($pyFiles.Count) parsers from mwcp_parsers/" -ForegroundColor Green
+                Write-Host "    -> Staged $($pyFiles.Count) parser files (subfolders preserved) from mwcp_parsers/" -ForegroundColor Green
             } else {
                 Write-Host "    WARN: mwcp parsers directory not found" -ForegroundColor Yellow
             }
