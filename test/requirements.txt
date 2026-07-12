@@ -1,1 +1,2 @@
 pytest>=7.0
+numpy>=1.24   # playbooks/windows/investigation/models/noise_filter.py

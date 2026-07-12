@@ -15,9 +15,13 @@ htmlcov/
 .mypy_cache/
 .ruff_cache/
 
-# Virtualenvs (tests run in /tmp/venv; ignore any local ones too)
+# Virtualenvs (test/run_tests.sh builds a temporary one per run and tears it down; ignore any
+# local ones too)
 venv/
 .venv/
+
+# test/run_tests.sh per-run logs
+test/logs/
 env/
 ENV/
 

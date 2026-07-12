@@ -1,0 +1,1 @@
+{"config_id": "abc", "public_key": "xyz", "extension": "alphv", "note_file_name": "RECOVER-FILES.txt", "kill_services": ["vmware"], "kill_processes": ["vmx"], "exclude_directory_names": ["boot"]}

@@ -292,6 +292,26 @@ def test_cli_offline_dir(tmp_path):
     assert any(x["Type"] == "Hidden Kernel Module (memory)" for x in data)
 
 
+def test_cli_creates_missing_output_dir(tmp_path):
+    """Real bug hit live: --output-dir is normally pre-created by the collection step, but
+    this analyzer can also run standalone against an already-staged image (exactly the
+    documented workflow) -- it must not crash with a raw FileNotFoundError from deep inside
+    a temp-file write the first time something tries to use a directory that doesn't exist
+    yet."""
+    off = tmp_path / "vol"
+    off.mkdir()
+    (off / "linux.malfind.Malfind.json").write_text("[]")
+    missing_out = tmp_path / "does" / "not" / "exist" / "yet"
+    assert not missing_out.exists()
+    stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    r = subprocess.run(
+        [sys.executable, os.path.join(LINUX_HUNT, "analyze_memory_linux.py"),
+         "--offline-dir", str(off), "--output-dir", str(missing_out), "--stamp", stamp, "--quiet"],
+        capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    assert (missing_out / f"Memory_Findings_{stamp}.json").is_file()
+
+
 def test_yara_match_and_noise_suppression():
     f = m.analyze_yara([
         {"Rule": "Linux_Trojan_Gafgyt", "PID": 1337, "Process": "x", "Offset": "0x1"},
@@ -503,13 +523,28 @@ def test_decompress_passthrough_for_plain_image():
 
 
 def test_decompress_compressed_without_tool_raises(monkeypatch):
-    monkeypatch.setattr(m.shutil, "which", lambda _: None)    # avml-convert not on PATH
-    monkeypatch.setattr(m.os, "access", lambda *_a, **_k: False)  # and no staged tools/avml-convert
+    monkeypatch.setattr(m.shutil, "which", lambda _: None)    # avml not on PATH
+    monkeypatch.setattr(m.os, "access", lambda *_a, **_k: False)  # and no staged tools/avml
     try:
         m.decompress_if_needed("memory_host.lime.compressed")
         assert False, "expected RuntimeError"
     except RuntimeError as e:
-        assert "avml-convert" in str(e)
+        assert "avml" in str(e)
+
+
+def test_decompress_invokes_avml_convert_subcommand(monkeypatch):
+    """Real bug caught live: modern avml (v0.9+) is a single binary with subcommands
+    (acquire/convert/upload/stream) -- there is no separate avml-convert release asset
+    (confirmed live: fetching one 404s). Decompression must invoke the staged/PATH
+    'avml' binary with 'convert' as its first argument, not a standalone 'avml-convert'
+    executable."""
+    monkeypatch.setattr(m.shutil, "which", lambda name: "/usr/bin/avml" if name == "avml" else None)
+    calls = []
+    monkeypatch.setattr(m.subprocess, "run",
+                        lambda cmd, **kw: calls.append(cmd) or type("R", (), {"returncode": 0})())
+    out = m.decompress_if_needed("memory_host.lime.compressed", quiet=True)
+    assert out == "memory_host.lime"
+    assert calls == [["/usr/bin/avml", "convert", "memory_host.lime.compressed", "memory_host.lime"]]
 
 
 def test_cli_offline_yarascan(tmp_path):

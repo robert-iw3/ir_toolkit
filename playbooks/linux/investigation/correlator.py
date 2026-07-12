@@ -8,7 +8,7 @@ already emits the SAME common schema by design:
     {Timestamp, Severity, Type, Target, Details, MITRE}
 
 edr_hunt.py, analyze_memory_linux.py, journal_analysis.py, container_hunt.py,
-remote_access_triage.py, and memory_enrich.py/c2_config_extract.py's findings
+remote_access_triage.py, and memory_enrich.py/mwcp_parsers/'s findings
 all merge into Combined_Findings_*.json for exactly this reason. So the
 Linux correlator's job is NOT translating incompatible shapes into a shared
 weight model (that's what the Windows correlator's _score_mwcp/_score_edr/

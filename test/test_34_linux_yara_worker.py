@@ -104,6 +104,65 @@ def test_resume_skips_finished_and_crasher(tmp_path):
     assert "100" in skip and "200" in skip                      # both skipped on resume (no infinite crash loop)
 
 
+class _FakeVMA:
+    def __init__(self, start, end):
+        self.vm_start = start
+        self.vm_end = end
+
+
+class _FakeMM:
+    """Mimics Volatility3's mm.get_vma_iter() raising MID-GENERATOR on a corrupt VMA (e.g. a
+    NULL inode inside its own is_valid() check) -- the real crash seen live: one bad VMA killed
+    the whole per-process worker (every remaining PID in the run), not just this task."""
+    def __init__(self, good_vmas, boom_after):
+        self._good = good_vmas
+        self._boom_after = boom_after
+
+    def get_vma_iter(self):
+        for i, vma in enumerate(self._good):
+            if i == self._boom_after:
+                raise AttributeError("'NoneType' object has no attribute 'i_size'")
+            yield vma
+
+
+class _FakeProcLayer:
+    def read(self, addr, size, pad=True):
+        return b"\x00" * size
+
+
+class _FakeTask:
+    def __init__(self, mm, tgid=123):
+        self.mm = mm
+        self.tgid = tgid
+        self.comm = None
+
+    def add_process_layer(self):
+        return "layer0"
+
+
+class _FakeCtx:
+    def __init__(self):
+        self.layers = {"layer0": _FakeProcLayer()}
+
+
+class _FakeRules:
+    def match(self, data=None):
+        return []
+
+
+def test_scan_task_survives_get_vma_iter_raising_mid_generator():
+    # a bad VMA raising from INSIDE get_vma_iter() must not propagate out of _scan_task -- it
+    # must be treated as an incomplete (capped) scan of this one task, not a crash that would
+    # otherwise kill the whole worker process (every remaining PID in the run) uncaught.
+    vmas = [_FakeVMA(0x1000, 0x2000), _FakeVMA(0x3000, 0x4000), _FakeVMA(0x5000, 0x6000)]
+    mm = _FakeMM(vmas, boom_after=1)              # first VMA reads fine, then the iterator raises
+    task = _FakeTask(mm)
+    hits, canary, capped, had_mem = lw._scan_task(_FakeCtx(), task, _FakeRules(), ptimeout=30)
+    assert hits == [] and canary is False
+    assert capped is True                          # incomplete, not silently "0 hits, clean"
+    assert had_mem is True                          # the first VMA WAS read before the crash
+
+
 def test_timeout_is_recorded_not_silent():
     lines = _jsonl(
         {"t": "start", "pid": "9"},

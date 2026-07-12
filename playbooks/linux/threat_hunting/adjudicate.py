@@ -130,13 +130,23 @@ PID_RE = re.compile(r"(?:PID:?\s*|pid[ =]|\(PID\s*)(\d+)", re.I)
 
 
 def resolve_subject(finding):
-    """Return (subject_path, pid) for a finding from its Target/Details."""
+    """Return (subject_path, pid) for a finding from its Target/Details.
+
+    A collector that already knows the EXACT file its finding is about (e.g.
+    edr_hunt.py's GOT/PLT check, whose subject is the specific library a GOT slot
+    resolved into -- not the owning process's own executable) can set SubjectPath
+    directly on the finding; that's trusted over-riding the generic PID -> exe
+    fallback below, so the package-ownership/hash verification this function feeds
+    runs against the file the finding is ACTUALLY about."""
     target = finding.get("Target", "") or ""
     details = finding.get("Details", "") or ""
     pid = None
     m = PID_RE.search(target) or PID_RE.search(details)
     if m:
         pid = m.group(1)
+    explicit = finding.get("SubjectPath")
+    if explicit and os.path.lexists(explicit):
+        return explicit, pid
     # explicit filesystem path in Target?
     if target.startswith("/") and os.path.lexists(target.split()[0]):
         return target.split()[0], pid

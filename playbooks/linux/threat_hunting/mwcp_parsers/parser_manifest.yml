@@ -1,0 +1,63 @@
+# parser_manifest.yml -- catalog of every family parser in this package, for
+# at-a-glance reference and for the drift-check test (test/linux/lab_mwcp/
+# test_manifest_matches_code.py) that asserts this file never falls out of sync with
+# the actual Python MODULES tuples.
+#
+# Unlike Windows' parser_config.yml, this file is NOT load-bearing for a plugin
+# registry -- there is no separate mwcp package to register against (mwcp_parsers is
+# stdlib-only, never staged as a pip package on Linux; see the package __init__.py
+# docstring). The actual registration mechanism is each category's `MODULES` tuple in
+# its own __init__.py -- that is what driver.py imports and runs. This manifest is
+# documentation-plus-drift-detection, kept honest by the test that reads it.
+
+c2_frameworks:
+  description: Cross-platform red-team/post-ex frameworks with real Linux agent builds.
+  parsers:
+    - {module: sliver, family: Sliver, basis: "2+ of wire-protocol JSON fields (implant_name/c2s/reconnect_interval) or mtls/wg URL scheme"}
+    - {module: mythic, family: Mythic, basis: "2+ of PayloadUUID/callback_interval/c2_profiles/AES_PSK/encrypted_exchange_check"}
+    - {module: merlin, family: Merlin, basis: "2+ of psk/PSK/skew/maxRetry/proto JSON fields"}
+    - {module: havoc, family: Havoc, basis: "0xDEADBEEF config magic + plausible size, or 2+ of DemonID/SleepTime/Injection fields"}
+    - {module: adaptix, family: AdaptixC2, basis: "agent_id AND callback_url both present"}
+    - {module: pupy, family: Pupy, basis: "2+ of Pupy module/RPC marker strings"}
+    - {module: generic_go_c2, family: "Unnamed Go C2", basis: "Go build marker AND 2+ heartbeat-shaped JSON fields"}
+
+native:
+  description: Linux/Unix-native malware families -- no Windows equivalent.
+  parsers:
+    - {module: bpfdoor, family: BPFDoor, basis: "kernel-side magic-packet trigger byte sequence"}
+    - {module: mirai_gafgyt, family: "Mirai/Gafgyt-class", basis: "single-byte-XOR string-table obfuscation MECHANISM (unique-token-density scoring), not a vocabulary match"}
+    - {module: ebury, family: "Ebury-class", basis: "ELF-verified capability mismatch: exports keyutils API AND imports network syscalls"}
+    - {module: xmrig_miner, family: "Miner (XMRig-class)", basis: "pools/algo/donate-level JSON fields or stratum+tcp/ssl URL"}
+    - {module: smtp_exfil, family: SMTP-Exfil, basis: "SMTP host + valid port + email + credential label, all in one context window (multi-hit)"}
+
+ransomware:
+  description: Linux/ESXi ransomware -- cross-family mechanisms, plus two named ports where the Linux build shares the exact same codebase as this toolkit's own Windows parser.
+  parsers:
+    - {module: esxi_encryptor, family: "Ransomware: ESXi Encryptor (Babuk-lineage mechanism)", basis: "esxcli vm process list+kill VM-lock-release sequence, ESXi datastore extension cluster, or snapshot-removal command (2+ of 3)"}
+    - {module: recovery_inhibition, family: "Ransomware: Local Snapshot/Backup Destruction", basis: "lvremove/btrfs subvolume delete/zfs destroy co-occurring with forced-bulk deletion, a crypto pubkey, or backup-service shutdown"}
+    - {module: generic_indicators, family: "Ransomware: Generic Indicators", basis: "2+ of embedded pubkey, Tor .onion contact, ransom-note language, dense target-extension list"}
+    - {module: conti_linux, family: "Ransomware: Conti-lineage Argument Schema (Linux)", basis: "PORT of Windows ContiConfig.py -- same leaked C++ source's -m local|net|all|backups + sibling flag"}
+    - {module: blackcat_linux, family: "Ransomware: BlackCat/ALPHV-lineage JSON Schema (Linux)", basis: "PORT of Windows BlackCatConfig.py -- same Rust serde schema, 4+/10 builder fields"}
+
+cloud_saas:
+  description: Cloud SaaS platforms as C2/exfil/dead-drop channels -- OS-agnostic protocol-level detection.
+  parsers:
+    - {module: telegram, family: "SaaS C2: Telegram Bot API", basis: "bot-token format (digits:35char) AND api.telegram.org endpoint"}
+    - {module: discord, family: "SaaS C2: Discord Webhook", basis: "Snowflake-ID+token webhook URL AND webhook-POST-body field (content/embeds/username)"}
+    - {module: slack, family: "SaaS C2: Slack", basis: "Incoming Webhook URL (T-/B-prefixed segments) or Bot OAuth token (xoxb- format)"}
+    - {module: dropbox, family: "SaaS C2: Dropbox API", basis: "content-upload endpoint AND Dropbox-API-Arg header"}
+    - {module: github, family: "SaaS C2: GitHub API", basis: "api.github.com/repos/ endpoint AND a valid PAT format (ghp_ or classic 40-hex)"}
+    - {module: pastebin, family: "SaaS C2: Pastebin", basis: "raw-fetch URL (8-char paste ID) AND API POST parameter names"}
+    - {module: ngrok, family: "SaaS C2: Ngrok Tunnel", basis: "ngrok-allocated tunnel domain AND agent YAML config keys"}
+
+delivery:
+  description: Linux-native dropper/stager patterns (not ports of Windows' LNK/HTA/macro-specific delivery category).
+  parsers:
+    - {module: shell_pipeline_stager, family: "Delivery: Shell Pipeline Stager", basis: "fetch command PIPED directly into an interpreter, or the process-substitution equivalent"}
+    - {module: base64_elf_dropper, family: "Delivery: base64-ELF Dropper", basis: "base64 decode invocation co-occurring with a chmod+x grant or direct shell pipe"}
+
+specialized:
+  description: Narrowly-scoped technique detectors -- only signals a stdlib byte/string scanner can ground without disassembly.
+  parsers:
+    - {module: anti_analysis, family: "Anti-Analysis: Self-TracerPid Check", basis: "TracerPid: field name AND /proc/self/status|stat path, both required to perform the check"}
+    - {module: dns_tunnel, family: "DNS Tunnel: Base32-Label TXT Query", basis: "oversized base32-shaped DNS label AND a low-level TXT-capable resolver API (res_query/ares_query/etc.)"}

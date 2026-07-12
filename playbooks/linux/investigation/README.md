@@ -3,7 +3,7 @@
 Second-pass, cross-collector correlation on top of the primary Linux IR
 workflow. It re-examines what `edr_hunt.py`, `analyze_memory_linux.py`,
 `journal_analysis.py`, `container_hunt.py`, `remote_access_triage.py`, and
-`memory_enrich.py`/`c2_config_extract.py` already gathered, and holds every
+`memory_enrich.py`/`mwcp_parsers/` already gathered, and holds every
 PID (or the host itself, for kernel/persistence/account findings that have
 no owning process) to a combined evidentiary standard before calling
 anything a true positive.
@@ -32,7 +32,7 @@ case one is enough. Below that floor, it stays UNDETERMINED and says
 exactly what evidence would close the gap.
 
 Detection here is mechanism-based, not signature-based, throughout --
-including in `c2_config_extract.py`'s family-specific parsers: a YARA hit
+including in `mwcp_parsers/`'s family-specific parsers: a YARA hit
 matters because it fired in an anonymous executable region, not which named
 rule matched; a Mirai-class botnet hit matters because a single-byte-XOR
 string table structurally exists, not because a specific attack-string
@@ -63,7 +63,7 @@ flowchart TD
     MODS --> M5[M5 kernel rootkit -- Tier 1<br/>hidden LKM, hooks, modprobe_path hijack]
     MODS --> M6[M6 credential override/privesc -- Tier 1<br/>UID0 account, empty password]
     MODS --> M7[M7 eBPF/io_uring anti-EDR]
-    MODS --> M18[M18 recovered C2 config<br/>c2_config_extract.py output]
+    MODS --> M18[M18 recovered C2 config<br/>mwcp_parsers/ output]
     MODS --> Mx[M4 M8-M17 M19<br/>shell tooling, containers, persistence,<br/>network, SSH, YARA, linker hijack,<br/>masquerade, anti-forensics, ptrace,<br/>SUID/caps, remote access]
 
     M1 & M2 & M3 & M5 & M6 & M7 & M18 & Mx --> DD[engine.py: dedup dimensions<br/>repetition != independence]
@@ -109,7 +109,11 @@ username -- not `PID N`). Rather than discarding these or forcing them onto
 an arbitrary PID, they route to `HOST_SCOPE_PID` (0) and get their own
 `Verdict`, `CorrelationVerdict`, attack chain, and TTP-pattern eligibility --
 a hidden kernel module is exactly as actionable as a compromised process, and
-the engine treats it that way.
+the engine treats it that way. One difference: `HOST_SCOPE_PID` dimensions
+come from unrelated findings (no owning process to link them), not
+corroborating facts about one actor, so the N-independent-dimension
+accumulation path (below) never promotes it to TRUE_POSITIVE -- only a
+single genuinely unforgeable Tier 1 fact can.
 
 **Tiered evidence model (`verdict.py`)** -- identical rules to the Windows
 engine (see its `Tier` docstring for the full rationale), but Linux modules
@@ -121,8 +125,9 @@ password account, and a mechanism-gated C2 config recovery (BPFDoor magic
 sequence, Ebury-class keyutils/network capability mismatch) are all
 structurally unforgeable and settle TRUE_POSITIVE on their own.
 
-**Mechanism-based C2/beacon config extraction (`c2_config_extract.py`,
-wired into `memory_enrich.py`)** -- the structured counterpart to
+**Mechanism-based C2/beacon config extraction (`mwcp_parsers/`, wired into
+both `memory_enrich.py` (carved memory) and `edr_hunt.py` (on-disk binaries
+of already-distrusted PIDs))** -- the structured counterpart to
 `memory_enrich.py`'s generic IOC sweep. Covers cross-platform frameworks with
 real Linux agent builds (Sliver, Mythic, Merlin, Havoc, AdaptixC2, Pupy) and
 Linux/Unix-native families that have no Windows equivalent at all (BPFDoor,
@@ -221,13 +226,13 @@ adapted to `adjudicate.py`'s five-level verdict ladder (`False Positive` <
   reads** when no dedicated `ProcessTree_*.json` snapshot exists -- a
   process with no adjudicated finding of its own has no lineage entry at
   all, unlike a dedicated ps-shaped snapshot which would cover every PID.
-- **`c2_config_extract.py`'s XOR-table scan is bounded to the first 64KB**
+- **`mwcp_parsers/`'s XOR-table scan is bounded to the first 64KB**
   of a region for cost reasons; a Mirai-class table located later in a very
   large carved region would be missed. Carved regions from this toolkit's
   YARA/malfind pipeline are small in practice, so this has not been an
   issue, but a future large-region source could need the window raised.
 - **mwcp is not used or staged for Linux at all** (Build-OfflineToolkit-Linux.sh
-  never installs it) -- `c2_config_extract.py` is a deliberate, permanent
+  never installs it) -- `mwcp_parsers/` is a deliberate, permanent
   stdlib-only substitute, not a stopgap pending an mwcp port.
 
 ## End-state goal

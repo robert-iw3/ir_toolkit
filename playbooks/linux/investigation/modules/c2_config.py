@@ -1,5 +1,5 @@
 """Module 18 -- recovered C2/implant configuration (memory_enrich.py +
-c2_config_extract.py output).
+mwcp_parsers/ output).
 
 Toolkit signals (dynamic Type strings): 'C2 Config Recovered (<Family>)',
 'BPFDoor Config Artifact (memory)', 'Botnet Config Recovered (memory)', 'SSH
@@ -10,7 +10,7 @@ Channel (memory)', 'Cloud Credential in Memory', 'Private Key Material
 (capa)' is routed separately (Module 12).
 
 These findings are the product of a recovery pipeline that already applied
-structural/mechanism gates (see c2_config_extract.py's docstring: XOR-table
+structural/mechanism gates (see mwcp_parsers/'s docstring: XOR-table
 detection for Mirai, keyutils/network capability mismatch for Ebury-class,
 protocol-required field names for the named C2 frameworks, magic-sequence
 match for BPFDoor) -- by the time a finding of this Type exists, the
@@ -23,7 +23,7 @@ from typing import List
 from ..verdict import Dimension, Tier
 
 # Mechanism-gated recoveries where the underlying check is a structural
-# capability-mismatch or protocol-invariant match (see c2_config_extract.py) --
+# capability-mismatch or protocol-invariant match (see mwcp_parsers/) --
 # effectively as strong as a named-framework config recovery gets without
 # live kernel corroboration.
 _DEFINITIVE_PREFIXES = ('SSH Backdoor Artifact', 'BPFDoor Config Artifact')
@@ -44,7 +44,7 @@ def investigate(finding: dict) -> List[Dimension]:
             name='M18_C2Config_MechanismGated', positive=True, source_module=18,
             tier=Tier.DEFINITIVE,
             rationale=(f'{ftype}: {details[:220]} -- recovered via a structural capability-'
-                       f'mismatch or protocol-invariant match (see c2_config_extract.py); no '
+                       f'mismatch or protocol-invariant match (see mwcp_parsers/); no '
                        f'benign object produces this shape.')
         )]
 

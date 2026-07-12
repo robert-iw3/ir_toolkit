@@ -1,0 +1,1 @@
+{"implant_name": "abc123", "reconnect_interval": 60, "c2s": [{"url": "mtls://10.0.0.5:8888"}]}

@@ -8,8 +8,10 @@
 # and runs fully offline. This stages the DEPTH tools the isolated host can't fetch:
 #
 #   AVML            -> Linux volatile-memory acquisition (single static binary),
-#                      used by --capture-memory in the Linux collector
-#   avml-convert    -> decompress snappy LiME images (--compress) for Volatility
+#                      used by --capture-memory in the Linux collector. Modern avml
+#                      (v0.9+) is a single binary with subcommands (acquire/convert/
+#                      upload/stream) -- `avml convert` decompresses a --compress'd
+#                      image; there is no separate avml-convert release asset anymore.
 #   dwarf2json      -> build the Volatility 3 Linux ISF from a debug vmlinux
 #   volatility3     -> memory analyzer wheels (+ yara-python) vendored for an
 #                      OFFLINE analyst venv (pip install --no-index)
@@ -21,8 +23,8 @@
 #                      are too large to bundle, so their presence + version is
 #                      RECORDED here and install hints emitted if missing
 #
-#   --include-memory stages avml + avml-convert + dwarf2json + volatility3 wheels
-#                    + capa + FLOSS + the YARA rule packs.
+#   --include-memory stages avml + dwarf2json + volatility3 wheels + capa + FLOSS
+#                    + the YARA rule packs.
 #
 # Everything lands in <toolkit>/tools/ with a sha256 manifest. The workflow
 # auto-detects and uses what is present and silently skips what is not.
@@ -72,7 +74,6 @@ case "$(uname -m)" in
 esac
 AVML_REL="https://github.com/microsoft/avml/releases/latest/download"
 AVML_URL="${AVML_URL:-${AVML_REL}/avml${AV_SFX}}"
-AVMLCONV_URL="${AVML_REL}/avml-convert${AV_SFX}"
 D2J_URL="https://github.com/volatilityfoundation/dwarf2json/releases/latest/download/${D2J_ASSET}"
 # capa (capabilities/ATT&CK) + FLOSS (deobfuscated strings) — memory_enrich.py auto-runs them over
 # each carved true-positive region. Linux standalone release zips (capa bundles its own rules).
@@ -129,11 +130,12 @@ stage_zip_bin() {  # name, url, out_subdir, binary - download zip + unzip + chmo
 }
 
 # --- Memory acquisition + analysis toolchain ----------------------------------
-# avml (capture) + avml-convert (decompress --compress LiME) + dwarf2json (build
-# the Volatility 3 Linux ISF) + volatility3 wheels (offline analyzer venv).
+# avml (capture; its own 'convert' subcommand decompresses --compress'd LiME --
+# no separate avml-convert binary exists in modern avml releases, confirmed live:
+# that asset 404s) + dwarf2json (build the Volatility 3 Linux ISF) + volatility3
+# wheels (offline analyzer venv).
 if [[ $INCLUDE_MEMORY -eq 1 ]]; then
     stage_bin "AVML"         "$AVML_URL"     "${TOOLS_DIR}/avml"
-    stage_bin "avml-convert" "$AVMLCONV_URL" "${TOOLS_DIR}/avml-convert"
     stage_bin "dwarf2json"   "$D2J_URL"      "${TOOLS_DIR}/dwarf2json"
     # capa + FLOSS — memory_enrich.py runs them over carved true-positive regions for
     # capabilities/ATT&CK + deobfuscated strings (encoded C2 plain strings miss).
@@ -155,7 +157,11 @@ if [[ $INCLUDE_MEMORY -eq 1 ]]; then
     fi
 fi
 
-# --- YARA rules: community packs + abuse.ch yaraify, staged for the memory --yara scan ---------
+# --- YARA rules: community packs staged for the memory --yara scan ------------------------------
+# abuse.ch/yaraify is deliberately NOT staged: it's a file-scan-oriented pack whose rules are
+# unstable against raw memory (e.g. ELF_Mirai's architecture-suffix condition fires on ordinary
+# GTK/X11 binaries mapped in memory) -- confirmed via live scanning, not staged at all rather than
+# staged-then-filtered.
 # The analyzer (linux_yara.py) filters these to Linux/generic rules and compiles them with the
 # externals declared (so they actually load - see analyze_memory_linux.py).
 yrules="${TOOLS_DIR}/yara_rules"
@@ -184,7 +190,6 @@ stage_yara_pack() {  # name, url, subdir, within(substr filter, "" = flat zip li
     rm -rf "$zip" "$ex" 2>/dev/null || true
 }
 if [[ $INCLUDE_MEMORY -eq 1 ]]; then
-    stage_yara_pack "abusech-yaraify" "https://yaraify.abuse.ch/yarahub/yaraify-rules.zip" "abusech" ""
     stage_yara_pack "neo23x0" "https://github.com/Neo23x0/signature-base/archive/refs/heads/master.zip" "neo23x0" "/yara/"
     stage_yara_pack "elastic" "https://github.com/elastic/protections-artifacts/archive/refs/heads/main.zip" "elastic" "/yara/"
     stage_yara_pack "reversinglabs" "https://github.com/reversinglabs/reversinglabs-yara-rules/archive/refs/heads/develop.zip" "reversinglabs" "/yara/"
@@ -212,13 +217,19 @@ if [[ $STAGE_SYMBOLS -eq 1 && $CHECK_ONLY -eq 0 ]]; then
     kv="${SYM_KERNEL:-$(uname -r)}"
     symdir="${TOOLS_DIR}/symbols"
     SYMBUILD="${SCRIPT_DIR}/playbooks/linux/threat_hunting/Build-LinuxSymbols.sh"
+    symerr="$(mktemp)"
     if built="$(bash "$SYMBUILD" --kernel "$kv" --out "$symdir" --fetch-symbols \
-                     --dwarf2json "${TOOLS_DIR}/dwarf2json" 2>/dev/null | tail -1)" \
+                     --dwarf2json "${TOOLS_DIR}/dwarf2json" 2>"$symerr" | tail -1)" \
        && [[ -n "$built" && -d "$built" ]]; then
         record "symbols:${kv}" "Build-LinuxSymbols" "$(ls "$symdir"/linux/*.json 2>/dev/null | head -1)" "ok"
     else
-        record "symbols:${kv}" "Build-LinuxSymbols" "" "failed (need debug vmlinux/dbgsym for ${kv} while connected)"
+        # Build-LinuxSymbols.sh's own log() lines (the ACTUAL reason -- rootless/sudo
+        # download error, no debuginfod client, etc.) were previously discarded here
+        # (2>/dev/null) in favor of this one hardcoded, uninformative message.
+        reason="$(tail -3 "$symerr" | sed 's/^\[symbols\] //' | tr '\n' ' ' | sed 's/ *$//')"
+        record "symbols:${kv}" "Build-LinuxSymbols" "" "failed${reason:+ (${reason})}"
     fi
+    rm -f "$symerr"
 elif [[ $CHECK_ONLY -eq 1 ]]; then
     compgen -G "${TOOLS_DIR}/symbols/linux/*.json" >/dev/null 2>&1 \
         && record "symbols" "tools/symbols" "" "present ($(ls "${TOOLS_DIR}"/symbols/linux/*.json 2>/dev/null | wc -l) ISF)" \
@@ -251,6 +262,31 @@ if [[ $CHECK_ONLY -eq 1 || $INCLUDE_MEMORY -eq 1 ]]; then
             || record "sys:$1" "host" "" "absent - $2 (install on target if that capability is needed)"
     }
     probe python3   "core: every analyzer/report (stdlib only - no pip deps)"
+    # mwcp_parsers/ needs no install/copy step (stdlib-only, used directly from its source
+    # location like every other Linux threat_hunting script -- unlike Windows' -IncludeMWCP,
+    # which stages a separate pip-installed mwcp/ copy). This is a build-time SANITY CHECK
+    # that the catalog is present, complete, and importable, not a staging action.
+    _mwcp_parsers_dir="${SCRIPT_DIR}/playbooks/linux/threat_hunting/mwcp_parsers"
+    if [[ -d "$_mwcp_parsers_dir" ]]; then
+        _mwcp_count="$(python3 -c "
+import sys
+sys.path.insert(0, '${SCRIPT_DIR}/playbooks/linux/threat_hunting')
+try:
+    from mwcp_parsers import driver
+    print(len(driver._FAMILY_EXTRACTORS) + len(driver._MULTI_HIT_EXTRACTORS))
+except Exception as e:
+    print('ERROR:' + str(e))
+" 2>/dev/null)"
+        if [[ "$_mwcp_count" =~ ^[0-9]+$ ]]; then
+            record "mwcp_parsers" "playbooks/linux/threat_hunting/mwcp_parsers" "" \
+                "present - ${_mwcp_count} family parser(s) importable across 6 categories"
+        else
+            record "mwcp_parsers" "playbooks/linux/threat_hunting/mwcp_parsers" "" \
+                "PRESENT BUT NOT IMPORTABLE - ${_mwcp_count:-unknown import error}"
+        fi
+    else
+        record "mwcp_parsers" "playbooks/linux/threat_hunting/mwcp_parsers" "" "MISSING"
+    fi
     probe bash      "core: collection + eradication scripts"
     probe ip        "containment: network isolation"
     probe nft       "containment: firewall (nftables)"

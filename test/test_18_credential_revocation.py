@@ -1,21 +1,17 @@
-"""P0 #1 - credential/session revocation: principal extraction, reversible contract, per-platform wiring."""
+"""P0 #1 - credential/session revocation: principal extraction + the reversible revocation
+contract (platform-agnostic). See test_18_credential_revocation_{windows,linux,cloud}.py for
+the per-platform orchestrator/eradication wiring."""
 import json
 import os
-import subprocess
 import sys
 
-import pytest
-
 import workflow_sim as sim
-from conftest import (REPORTING, PLAYBOOKS, ROOT, IRCOLLECT_SH, IRCOLLECT_PS1,
-                      IRCOLLECT_CLOUD_SH, ERADICATE_PS1, ERADICATE_CLOUD_SH,
-                      read_text, run_py, cloud_env)
+from conftest import REPORTING, run_py
 
 sys.path.insert(0, REPORTING)
 import extract_principals as ep   # noqa: E402
 
 PRINC_PY = os.path.join(REPORTING, "extract_principals.py")
-REVOKE_SH = os.path.join(PLAYBOOKS, "linux", "07_revoke_credentials.sh")
 
 
 # -- Principal extraction (analysis stage) -------------------------------------
@@ -98,61 +94,3 @@ def test_revoke_is_reversible(tmp_path):
     restored = sim.restore_accounts(store, journal)
     assert set(restored) == {"alice", "bob"}
     assert all(store[u]["enabled"] for u in ("alice", "bob"))
-
-
-# -- Linux revocation playbook (plan mode, safety) -----------------------------
-def test_linux_plan_lists_targets_skips_protected(tmp_path):
-    princ = tmp_path / "Principals.json"
-    princ.write_text(json.dumps({"principals": [
-        {"name": "attacker", "type": "local", "auto_revoke": True},
-        {"name": "root", "type": "local", "auto_revoke": False},
-    ]}))
-    r = subprocess.run(["bash", REVOKE_SH, "--principals", str(princ)],
-                       capture_output=True, text=True, timeout=30)
-    assert r.returncode == 0, r.stderr
-    assert "PLAN: passwd -l attacker" in r.stdout
-    assert "root" not in r.stdout.replace("rollback", "")  # root never planned
-    assert "[i] PLAN only" in r.stdout                      # nothing applied
-
-
-# -- Per-platform wiring -------------------------------------------------------
-def test_orchestrators_emit_principals():
-    assert "extract_principals.py" in read_text(IRCOLLECT_SH)
-    assert "extract_principals.py" in read_text(IRCOLLECT_CLOUD_SH)
-    win = read_text(IRCOLLECT_PS1)
-    assert "-PrincipalsOnly" in win                          # Windows native, no python
-    assert "extract_principals.py" not in win
-
-
-def test_windows_eradication_revokes_credentials_natively():
-    src = read_text(ERADICATE_PS1)
-    assert "Principals.json" in src
-    assert "Disable-LocalUser" in src
-    assert "klist purge" in src
-    assert "disable_account" in src                          # journaled (reversible)
-    assert "$env:USERNAME" in src                            # never disable the responder
-
-
-def test_cloud_eradication_revokes_iam_principals(tmp_path):
-    host = tmp_path / "aws-10_0_0_5"
-    host.mkdir()
-    (host / "Principals.json").write_text(json.dumps({"principals": [
-        {"name": "rogue-iam-user", "type": "iam", "auto_revoke": True},
-        {"name": "system", "type": "iam", "auto_revoke": False},
-    ]}))
-    env = cloud_env(incident="aws-cred", mock_log=tmp_path / "c.log")
-    r = subprocess.run(["bash", ERADICATE_CLOUD_SH, "--provider", "aws", "--target", "10.0.0.5",
-                        "--host-folder", str(host)], env=env, capture_output=True, text=True, timeout=60)
-    assert r.returncode == 0, r.stderr
-    assert "rogue-iam-user" in r.stdout          # implicated IAM principal flows to eradication
-    assert "system" not in r.stdout.split("IAM revoke:")[1].split("\n")[0]  # protected excluded
-
-
-def test_windows_collection_no_python_dependency():
-    """Windows orchestrator + native generator must not invoke python or .py scripts."""
-    orch = read_text(IRCOLLECT_PS1)
-    assert ".py" not in orch                            # orchestrator references no python scripts
-    for src in (orch, read_text(os.path.join(REPORTING, "generate_reports.ps1"))):
-        assert "Get-Command python" not in src          # no python executable lookup
-        assert "python.exe" not in src
-        assert "-File" not in src or ".py" not in src.split("-File", 1)[-1][:40]  # no -File *.py invocation

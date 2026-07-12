@@ -1367,20 +1367,23 @@ def collect(image, vol=None, symbols=None, offline_dir=None, skip=(), yara_extra
 
 
 def decompress_if_needed(image, quiet=False):
-    """avml --compress output (snappy LiME) isn't readable by Volatility directly. If the
-    image is compressed, convert it to plain LiME with avml-convert. Returns the usable path."""
+    """avml acquire --compress output (snappy LiME) isn't readable by Volatility directly. If
+    the image is compressed, convert it to plain LiME via `avml convert` -- modern avml
+    (v0.9+) merged the standalone avml-convert binary into a subcommand of the main avml
+    tool; there is no separate avml-convert release asset to stage anymore (confirmed live:
+    fetching one 404s). Returns the usable path."""
     if not image or not re.search(r"\.(lime\.)?compressed$", image, re.IGNORECASE):
         return image
-    staged = os.path.join(os.path.dirname(__file__), "..", "..", "..", "tools", "avml-convert")
-    conv = shutil.which("avml-convert") or (staged if os.access(staged, os.X_OK) else None)
+    staged = os.path.join(os.path.dirname(__file__), "..", "..", "..", "tools", "avml")
+    conv = shutil.which("avml") or (staged if os.access(staged, os.X_OK) else None)
     if not conv:
-        raise RuntimeError("compressed image needs 'avml-convert' to decompress "
-                           "(stage it: Build-OfflineToolkit-Linux.sh --include-memory) - not found")
+        raise RuntimeError("compressed image needs 'avml' (its 'convert' subcommand) to "
+                           "decompress (stage it: Build-OfflineToolkit-Linux.sh --include-memory) - not found")
     out = re.sub(r"\.(lime\.)?compressed$", ".lime", image, flags=re.IGNORECASE)
     if not quiet:
         print(f"[mem] decompressing {os.path.basename(image)} -> {os.path.basename(out)}",
               file=sys.stderr)
-    subprocess.run([conv, image, out], check=True, capture_output=True, timeout=1800)
+    subprocess.run([conv, "convert", image, out], check=True, capture_output=True, timeout=1800)
     return out
 
 
@@ -1518,6 +1521,8 @@ def main():
 
     out_dir = args.output_dir or (os.path.dirname(os.path.abspath(args.image))
                                   if args.image else ".")
+    os.makedirs(out_dir, exist_ok=True)   # normally pre-created by the collection step, but this
+                                          # analyzer can also run standalone against a staged image
     vol, image = None, args.image
     yara_extra, yarc, yara_n, yara_failed = None, None, 0, 0
     yara_requested = bool(args.yara or args.yara_file or args.yara_rules_dir)

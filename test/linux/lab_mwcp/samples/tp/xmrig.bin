@@ -1,0 +1,1 @@
+{"pools": [{"url": "pool.test:3333", "user": "wallet123"}], "algo": "rx/0", "donate-level": 1}stratum+tcp://pool.test:3333

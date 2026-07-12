@@ -1,9 +1,14 @@
-"""P0-2 - IOC emission belongs to the analysis stage, not reporting."""
+"""P0-2 - IOC emission belongs to the analysis stage, not reporting.
+
+Platform-agnostic: generate_reports.py's IOC-emission logic runs against a mock collection
+folder (windows_collection is just a synthetic fixture, not real Windows tooling). See
+test_08_ioc_decoupling_windows.py / _linux.py for the per-platform orchestrator wiring check.
+"""
 import json
 import os
 
 import generate_reports as gr
-from conftest import REPORTING, IRCOLLECT_PS1, IRCOLLECT_SH, read_text, run_py
+from conftest import REPORTING, run_py
 
 
 def test_emit_iocs_standalone(windows_collection):
@@ -33,13 +38,3 @@ def test_iocs_match_full_report(windows_collection):
     from_report = json.load(open(os.path.join(windows_collection, "IOCs.json")))
     assert standalone["c2_endpoints"] == from_report["c2_endpoints"]
     assert standalone["file_hashes_sha256"] == from_report["file_hashes_sha256"]
-
-
-def test_orchestrators_emit_iocs_before_reporting():
-    """All collection orchestrators run the IOC analysis phase ahead of reporting."""
-    lin = read_text(IRCOLLECT_SH)
-    assert "build_iocs.py" in lin
-    assert lin.index("build_iocs.py") < lin.index("generate_reports.py")
-    win = read_text(IRCOLLECT_PS1)
-    assert "-IocsOnly" in win
-    assert win.index("IOCs (analysis hand-off)") < win.index("Reporting (Incident_Report")

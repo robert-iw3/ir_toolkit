@@ -27,8 +27,18 @@ def investigate(finding: dict) -> List[Dimension]:
                       'with a network/persistence/injection signal on the same PID/region.'
         )]
 
+    # Real bug caught live: the 'in ANONYMOUS' alternative matched analyze_memory_linux.py's
+    # own NON-executable phrasing too ("...matched in anonymous rw- memory..." legitimately
+    # contains "in anonymous"), so every YARA hit in ordinary anonymous heap/data memory --
+    # not just genuinely executable, unbacked memory -- got promoted to STRONG_BEHAVIORAL
+    # "code executing outside any loaded module." On one live host this alone turned 19
+    # coincidental rule-pack matches inside a large process's non-executable heap (rw-, no
+    # x bit) into a false TRUE POSITIVE. The collector's ONLY phrasing for the genuine
+    # anon+exec case is "ANONYMOUS EXECUTABLE" (analyze_memory_linux.py's analyze_yara());
+    # anonymous non-exec memory is worded "anonymous {perms} memory" with no "EXECUTABLE"
+    # anywhere in it, so requiring that exact word is both necessary and sufficient.
     in_anon_exec = ftype == 'Injected Code (memory YARA)' or bool(
-        re.search(r'ANONYMOUS EXECUTABLE|in ANONYMOUS', details, re.IGNORECASE))
+        re.search(r'ANONYMOUS EXECUTABLE', details, re.IGNORECASE))
     is_file_backed = 'file-backed' in details.lower()
     breadth_shared = 'likely common/shared bytes' in details
 

@@ -39,10 +39,15 @@ automates from this guide, by section:
 - **§1 Triage Live Processes** — process-lineage propagation (`engine.py`'s
   `_propagate_process_lineage`) corroborates two independently-suspicious PIDs in a direct
   parent/child relationship; `thread_inventory.py` extends "triage the PID" to every TID under it.
-- **§12 Direct YARA / File Scan** — `modules/yara_capa.py`; `c2_config_extract.py` identifies
+- **§12 Direct YARA / File Scan** — `modules/yara_capa.py`; `mwcp_parsers/` identifies
   Sliver/Mythic/Merlin/Havoc/AdaptixC2/Pupy/BPFDoor/Mirai-class/Ebury-class/XMRig-class by
   protocol-required structure (ELF dynamic symbols, magic-packet sequences, capability mismatches)
-  — never brand-name string matching.
+  — never brand-name string matching. Also runs during live triage (`edr_hunt.py`'s
+  `check_mwcp_structural_configs`, on-disk binaries) and memory carving
+  (`memory_enrich.py`), not just offline file scan.
+- **§16 GOT/PLT Hooking** — `modules/linker_library.py` scores `GOT/PLT Overwrite` DEFINITIVE,
+  `GOT Entry Relocation (verify)` WEAK pending `adjudicate.py`'s package-integrity check on the
+  resolved-into library (`SubjectPath`).
 - **§15 Eradication Pivot** — `IR_TARGET_TIDS` + `suspend_thread.py` suspend the SPECIFIC compromised
   thread (`PTRACE_SEIZE`/`PTRACE_INTERRUPT`, held by a tracer daemon) instead of killing an entire
   protected/multi-threaded process; `06_restore.sh` reverses it by terminating the tracer.
@@ -623,6 +628,24 @@ sudo IR_INCIDENT_ID=<id> ./playbooks/linux/monitor_egress.sh
 
 ---
 
+## 16 — GOT/PLT Userland API Hooking
+
+Toolkit signal: `edr_hunt.py`'s `check_got_plt_hooks` (live-only — memory images routinely
+have these pages paged out). Reads the live pointer in each sensitive process's GOT slots.
+
+```bash
+sudo python3 playbooks/linux/threat_hunting/edr_hunt.py --report-dir /tmp/edrcheck
+```
+
+| Result | Meaning | Next step |
+|--------|--------------|-----------------|
+| `GOT/PLT Overwrite (memory)` — resolves into anon exec memory | Userland API hook | TP; carve the region (Section 4) |
+| `GOT Entry Relocation (verify)` — resolves into a mapped library, not the symbol's definer | RELRO/lazy-binding, `LD_PRELOAD` interposition, or a hook | `SubjectPath` on the finding points at the resolved library; `adjudicate.py` auto-verifies its package/hash |
+| Resolves to own `.plt` stub, real definer, or `[vdso]`/`[vsyscall]`/`[vvar]` | Normal linking / kernel fast-path | Not surfaced — silent by design |
+| `Info: GOT/PLT Hook Check Reduced Coverage` | Not run as root | Re-run as root |
+
+---
+
 ## Quick Reference: Common FP Patterns
 
 | Signal | Common FP explanation | Confirm or clear |
@@ -638,3 +661,4 @@ sudo IR_INCIDENT_ID=<id> ./playbooks/linux/monitor_egress.sh
 | `Deleted Running Binary` where recovered hash = package file | Upgrade artifact | FP |
 | `Namespace` differences on a monitoring sidecar sharing host ns | Intentional host-ns sharing for observability | FP after confirming the container's purpose |
 | Kernel `taint` bit set with proprietary GPU/driver module loaded | Out-of-tree vendor module (NVIDIA, etc.) | FP after matching the taint to a known loaded module; unaccounted taint → image analysis |
+| ⚠️ `Syscall Table Hook`/`Network Proto-Handler Hook`/`Hidden Process` in bulk (many unrelated, mundane PIDs/entries at once) | **Kernel-version-mismatched symbols**, not a rootkit — the host was patched since the ISF was staged/built, or `--allow-closest-symbols` substituted an approximate point-release | Check `_symbols_<stamp>.json` in the report folder; if `kernel` doesn't match the image's actual running kernel, re-run with `--fetch-symbols`/`--kernel` for the correct version; if `approximate: true`, the exact symbols weren't published yet and `actual_kernel` names the substitute used — treat these findings as unconfirmed until the exact version is available |

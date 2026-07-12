@@ -152,13 +152,18 @@ def _vma_context(ctx, task, vma):
     return perms, region, path
 
 
-def _scan_task(ctx, task, rules, ptimeout, byte_budget=PROC_BYTE_BUDGET, carve_dir=None, image=""):
+def _scan_task(ctx, task, rules, ptimeout, byte_budget=PROC_BYTE_BUDGET, carve_dir=None, image="",
+               carve_all=False):
     """Scan one task's VMAs. Bounded by BOTH a wall-clock timeout (between VMAs) and a per-process
     byte budget (so a multi-GB process can't dominate). Each hit is enriched with the matching VMA's
     permissions + anon/file-backed + path + matched-string ids (the context that disambiguates an
     injected-code hit from a rule grazing a loaded library). When carve_dir is set, a hit in an
     ANONYMOUS EXECUTABLE region (injected code, the TP signal) is CARVED to disk for RE in Binary
-    Ninja. Returns (hits[{rule,perms,region,path,strings,n}], canary_bool, capped_bool, had_mem)."""
+    Ninja. carve_all additionally carves EVERY readable VMA regardless of whether YARA matched it at
+    all -- for a PID a caller has already decided is worth a full ground-truth pass (the static-scan
+    findings -> deep-scan flow), several mwcp_parsers families need no YARA hit to fire, so gating
+    the carve on a YARA match first would hide them from ever seeing the bytes. Returns
+    (hits[{rule,perms,region,path,strings,n}], canary_bool, capped_bool, had_mem)."""
     proc_layer_name = task.add_process_layer()
     if not proc_layer_name:
         return [], False, False, False            # kernel thread / no address space
@@ -168,7 +173,27 @@ def _scan_task(ctx, task, rules, ptimeout, byte_budget=PROC_BYTE_BUDGET, carve_d
     mm = task.mm
     if not mm:
         return [], False, False, False
-    for vma in mm.get_vma_iter():
+    try:
+        tgid = int(task.tgid)
+    except Exception:
+        tgid = 0
+    # Manual next()-driven walk, not `for vma in mm.get_vma_iter():` -- Volatility3's own
+    # get_vma_iter() can raise (e.g. AttributeError on a VMA whose inode is NULL) from INSIDE
+    # its generator body on a corrupt/partial VMA entry. A `for` loop has no way to recover from
+    # that; it propagates straight out of this function and, uncaught, kills the whole worker
+    # process (every remaining PID in this run, not just the bad one). Once a generator raises,
+    # it can't be resumed past the failure point, so this task's remaining VMAs are genuinely
+    # unreachable -- treated as `capped` (incomplete scan), same as a timeout, rather than
+    # silently returning "0 hits" indistinguishable from a clean, fully-scanned process.
+    vma_iter = mm.get_vma_iter()
+    while True:
+        try:
+            vma = next(vma_iter)
+        except StopIteration:
+            break
+        except Exception:
+            capped = True
+            break
         if time.time() - t0 > ptimeout:
             capped = True
             break
@@ -184,6 +209,15 @@ def _scan_task(ctx, task, rules, ptimeout, byte_budget=PROC_BYTE_BUDGET, carve_d
             continue
         had_mem = True
         scanned_bytes += size
+
+        if carve_dir and carve_all:
+            perms, region, path = _vma_context(ctx, task, vma)
+            p = carve_region(carve_dir, image, tgid, _task_name(task), int(vma.vm_start),
+                             data, perms, region, path, [])
+            if p:
+                sys.stderr.write(f"[mem]   CARVED (deep-scan) region -> {p}\n")
+                sys.stderr.flush()
+
         try:
             matches = rules.match(data=data)
         except Exception:
@@ -204,14 +238,11 @@ def _scan_task(ctx, task, rules, ptimeout, byte_budget=PROC_BYTE_BUDGET, carve_d
             ent["strings"] |= _matched_string_ids(m)
         # CARVE: a real rule hitting anonymous EXECUTABLE memory == injected/unbacked code (TP).
         # IR_CARVE_ANY=1 relaxes this to carve ANY hit's region (test/triage of file-backed hits too).
+        # Skipped when carve_all already carved this VMA unconditionally above.
         carve_this = region == "anon" and "x" in (perms or "")
         if os.environ.get("IR_CARVE_ANY") == "1":
             carve_this = True
-        if carve_dir and real and carve_this:
-            try:
-                tgid = int(task.tgid)
-            except Exception:
-                tgid = 0
+        if carve_dir and real and carve_this and not carve_all:
             p = carve_region(carve_dir, image, tgid, _task_name(task), int(vma.vm_start),
                              data, perms, region, path, real)
             if p:
@@ -246,6 +277,10 @@ def main():
     ptimeout = int(ptimeout)
     want_pids = {p.strip() for p in sys.argv[6].split(",")} if len(sys.argv) > 6 else None
     carve_dir = os.environ.get("IR_CARVE_DIR") or None    # set by the analyzer's --carve
+    # Deep-scan mode: carve every VMA for the named PIDs regardless of YARA match. Requires an
+    # explicit want_pids list -- refusing to run host-wide guards against an accidental full-image
+    # carve if the env var is set without also narrowing the target PID set.
+    carve_all = os.environ.get("IR_CARVE_ALL_VADS") == "1" and want_pids is not None
 
     import yara
     rules = yara.load(yarc)
@@ -266,8 +301,19 @@ def main():
         name = _task_name(task)
         fh.write(json.dumps({"t": "start", "pid": pid, "name": name, "ts": time.time()}) + "\n")
         fh.flush()
-        hits, canary, capped, had_mem = _scan_task(ctx, task, rules, ptimeout,
-                                                   carve_dir=carve_dir, image=image)
+        # A single corrupt/unusual task (bad page tables, a race with a dying process, a
+        # Volatility3 internal edge case we haven't hit before) must never abort the other
+        # ~300 PIDs in this run -- fall back to an empty, capped (incomplete) result and move
+        # on, same as a timeout, rather than letting an uncaught exception here kill the
+        # process and silently drop per-process attribution for every PID after it.
+        try:
+            hits, canary, capped, had_mem = _scan_task(ctx, task, rules, ptimeout,
+                                                       carve_dir=carve_dir, image=image,
+                                                       carve_all=carve_all)
+        except Exception as exc:
+            sys.stderr.write(f"[mem]   YARA pid {pid} ({name}): SCAN ERROR ({exc}) -- skipped\n")
+            sys.stderr.flush()
+            hits, canary, capped, had_mem = [], False, True, False
         fh.write(json.dumps({"t": "result", "pid": pid, "name": name, "canary": canary,
                              "timed_out": capped, "had_mem": had_mem, "hits": hits,
                              "ts": time.time()}) + "\n")

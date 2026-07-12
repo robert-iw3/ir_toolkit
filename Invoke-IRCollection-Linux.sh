@@ -43,7 +43,7 @@ SKIP_REPORTS=0
 DEEP=0
 CAPTURE_MEMORY=0
 MEMORY_OUTPUT=""        # explicit path for the memory image (e.g. a local disk with space)
-MEM_COMPRESS=0          # avml snappy compression (smaller image; needs avml-convert to analyze)
+MEM_COMPRESS=0          # avml snappy compression (smaller image; analyzer runs `avml convert` to decompress)
 NO_EGRESS_MONITOR=0     # by default, start the deferred egress-observation sensor after collection
 EGRESS_WINDOW_HOURS=24
 EGRESS_MGMT_IPS="${IR_MGMT_IPS:-}"
@@ -176,7 +176,7 @@ if [[ $SKIP_FORENSICS -eq 0 ]]; then
             elif "$AVML" "${AVML_ARGS[@]}" "$MEM_PATH" >>"$RUN_LOG" 2>&1; then
                 SZ="$(stat -c %s "$MEM_PATH" 2>/dev/null || echo 0)"
                 if [[ "$SZ" -ge "$MIN" && "$SZ" -gt 0 ]]; then
-                    log "  Memory image -> ${MEM_PATH} ($((SZ/1024/1024)) MiB$([[ $MEM_COMPRESS -eq 1 ]] && echo ', snappy - avml-convert to analyze'))"; ir_record "Memory" success
+                    log "  Memory image -> ${MEM_PATH} ($((SZ/1024/1024)) MiB$([[ $MEM_COMPRESS -eq 1 ]] && echo ", snappy - analyzer decompresses via 'avml convert' first"))"; ir_record "Memory" success
                 else
                     mv -f "$MEM_PATH" "$(dirname "$MEM_PATH")/INVALID_$(basename "$MEM_PATH")" 2>/dev/null || true
                     log "  Memory capture INVALID (size $((SZ/1024/1024)) MiB too small) - renamed INVALID_."; ir_record "Memory" failed

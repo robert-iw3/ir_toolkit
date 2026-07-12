@@ -27,6 +27,16 @@ import subprocess
 import sys
 from collections import Counter
 
+# Structural/behavioral family config extraction (C2 frameworks, Linux/ESXi ransomware, cloud
+# SaaS C2 channels, delivery stagers, specialized techniques) -- the same catalog
+# memory_enrich.py runs against carved memory regions, run here against a LIVE on-disk binary
+# this pass already has independent reason to distrust. See mwcp_parsers/README.md.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+try:
+    import mwcp_parsers as _mwcp
+except ImportError:
+    _mwcp = None
+
 FINDINGS = []
 # Executable/volatile locations an implant typically drops into.
 WRITABLE_DIRS = ("/tmp", "/var/tmp", "/dev/shm", "/run", "/var/run")
@@ -62,22 +72,43 @@ _ELF_DT_SYMENT = 11
 _ELF_DT_JMPREL = 23
 _GOT_PLT_MAX_LIBS_PER_PROC = 200     # defensive cap: distinct mapped objects scanned per PID
 _GOT_PLT_MAX_RELOCS_PER_LIB = 500    # defensive cap: PLT relocations walked per library
-_GOT_PLT_MAX_LIB_SIZE = 64 * 1024 * 1024   # matches this toolkit's established carve-size ceiling
+_GOT_PLT_MAX_LIB_SIZE = 256 * 1024 * 1024
+# A library over this size is skipped when building symbol_definers -- but region_path
+# resolution (which library a live pointer lands in) has NO size cap, since it only
+# needs /proc/<pid>/maps address ranges, not the file's own parsed symbol table. That
+# split caused a real bug at 64MB: libwebkit2gtk-4.1.so (~90MB, entirely ordinary on a
+# GNOME desktop -- Evolution embeds it) was skipped from symbol_definers, so every GOT
+# slot that genuinely, correctly resolved into it (confirmed via `nm -D`: webkit_web_view_
+# get_type etc. really are defined there, really are undefined/PLT-imported by the
+# caller) had no recorded definer to match against -- 20 false "GOT Entry Relocation
+# (verify)" findings on one clean host. 256MB comfortably covers real-world large
+# libraries (WebKitGTK, LLVM, Qt WebEngine) while still bounding worst-case read cost.
+_MWCP_SCAN_SIZE_CAP = 64 * 1024 * 1024     # same ceiling: bound the read on a huge backing binary
 
 
 def now():
     return datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
-def add(severity, ftype, target, details, mitre):
-    FINDINGS.append({
+def add(severity, ftype, target, details, mitre, subject_path=None):
+    """subject_path: the SPECIFIC file this finding is about, when it's known and it's
+    NOT just the owning process's own executable (e.g. the GOT/PLT check's subject is
+    the library a GOT slot resolved into, not PID's exe). adjudicate.py's
+    resolve_subject() falls back to a PID -> /proc/pid/exe guess when this is absent;
+    setting it here lets the SAME package-ownership/hash verification adjudicate.py
+    already runs for every finding check the file THIS finding is actually about,
+    closing that lead without an analyst going back to the host."""
+    f = {
         "Timestamp": now(),
         "Severity": severity,
         "Type": ftype,
         "Target": target,
         "Details": details,
         "MITRE": mitre,
-    })
+    }
+    if subject_path:
+        f["SubjectPath"] = subject_path
+    FINDINGS.append(f)
 
 
 def read_file(path, binary=False, limit=None):
@@ -1669,10 +1700,21 @@ _MAPS_LINE_RE = re.compile(
     r"^([0-9a-f]+)-([0-9a-f]+)\s+([-rwxps]{4})\s+[0-9a-f]+\s+[0-9a-f:]+\s+\d+\s*(.*)$")
 
 
+_KERNEL_PSEUDO_MAPPINGS = frozenset({"[vdso]", "[vsyscall]", "[vvar]", "[vvar_vclock]"})
+
+
 def _read_maps_objects(pid):
     """/proc/<pid>/maps -> {backing_path: [{'start','end','perms'}, ...]}, with an
-    'ANON' bucket for path-less (anonymous/private) mappings. Gives both a library's
-    load bias and, across the whole table, where any live pointer actually lands."""
+    'ANON' bucket for path-less (anonymous/private) mappings ONLY -- kernel-injected
+    pseudo-mappings ([vdso]/[vsyscall]/[vvar]/[vvar_vclock]) keep their own bracketed key
+    rather than being folded into ANON: glibc legitimately redirects gettimeofday/time/
+    clock_gettime/getcpu straight into the executable, read-only [vdso] page for every
+    process on every Linux system (bypassing the syscall), so lumping it in with genuinely
+    anonymous/unnamed executable memory turned that universal, benign redirect into a
+    "GOT/PLT Overwrite" Critical finding on nearly every long-running process ([heap]/
+    [stack] are excluded from this set since they're never legitimate GOT targets and stay
+    correctly bucketed as ANON). Gives both a library's load bias and, across the whole
+    table, where any live pointer actually lands."""
     text = read_file(f"/proc/{pid}/maps")
     if not text:
         return {}
@@ -1683,7 +1725,12 @@ def _read_maps_objects(pid):
             continue
         start, end, perms, path = m.groups()
         path = path.strip()
-        key = path if path and not path.startswith("[") else "ANON"
+        if path in _KERNEL_PSEUDO_MAPPINGS:
+            key = path
+        elif path and not path.startswith("["):
+            key = path
+        else:
+            key = "ANON"
         objs.setdefault(key, []).append(
             {"start": int(start, 16), "end": int(end, 16), "perms": perms})
     return objs
@@ -1723,8 +1770,15 @@ def _got_plt_scan_pid(pid, cm):
     # Load bias + defined-symbol set for every mapped library, so a PLT relocation's
     # live target can be checked against whichever library actually exports that
     # symbol -- not just the library whose own PLT table is being walked (most PLT
-    # entries legitimately resolve into a DIFFERENT library, e.g. libc).
-    lib_data, symbol_definer = {}, {}
+    # entries legitimately resolve into a DIFFERENT library, e.g. libc). A symbol name
+    # can have MORE THAN ONE legitimate definer among a process's mapped libraries (e.g.
+    # ldexp/frexp/modf are exported by both libc.so.6 and libm.so.6; some libraries
+    # re-export a plugin/backend library's symbols under their own DT_SYMTAB too) -- the
+    # dynamic linker's actual resolution can legitimately land in EITHER, so this must
+    # record every definer, not just the first one encountered (a real host run recorded
+    # 570 false "GOT Entry Relocation (verify)" findings from exactly this: a
+    # first-definer-wins map flagged the SECOND legitimate exporter as suspicious).
+    lib_data, symbol_definers = {}, {}
     for path in lib_paths:
         try:
             if os.path.getsize(path) > _GOT_PLT_MAX_LIB_SIZE:
@@ -1743,7 +1797,7 @@ def _got_plt_scan_pid(pid, cm):
             continue
         lib_data[path] = (data, h, phdrs, bias)
         for name in _elf_defined_symbols(data, h, phdrs):
-            symbol_definer.setdefault(name, path)
+            symbol_definers.setdefault(name, set()).add(path)
 
     for path, (data, h, phdrs, bias) in lib_data.items():
         for symbol, got_vaddr in _elf_plt_relocations(data, h, phdrs):
@@ -1758,6 +1812,11 @@ def _got_plt_scan_pid(pid, cm):
                     break
             if region_path is None:
                 continue                                   # target resolves nowhere known -> skip
+            if region_path in _KERNEL_PSEUDO_MAPPINGS:
+                # gettimeofday/time/clock_gettime/getcpu legitimately resolving into the
+                # kernel-injected [vdso] (or [vsyscall]/[vvar]) page -- universal glibc
+                # behavior on every process, not a hook; see _read_maps_objects().
+                continue
             if region_path == "ANON":
                 if "x" in region_perms:
                     add("Critical", "GOT/PLT Overwrite (memory)", f"PID: {pid} ({cm})",
@@ -1766,25 +1825,32 @@ def _got_plt_scan_pid(pid, cm):
                         f"API hook (rootkit/credential theft).",
                         "T1574.001 (GOT/PLT Overwrite), T1014 (Rootkit)")
                 continue                                   # anon + non-exec: not the hook shape
-            definer = symbol_definer.get(symbol)
-            if region_path in (definer, path):
-                # Either resolves into its real definer, or lands back in the SAME object
-                # whose PLT table is being walked -- the universal signature of an
-                # UNRESOLVED lazy-bound slot (still pointing at its own .plt stub, which
-                # then jumps to the dynamic linker) or a legitimate intra-object PLT call.
-                # Confirmed against a real process: every one of a clean python3's ~400
-                # never-yet-called imports showed exactly this shape before this check was
-                # added -- without it, ordinary unresolved lazy binding reads as "verify"
-                # noise on every process, every run.
+            definers = symbol_definers.get(symbol, set())
+            if region_path in definers or region_path == path:
+                # Either resolves into ONE OF its real definers (more than one library can
+                # legitimately export the same symbol name -- see symbol_definers above),
+                # or lands back in the SAME object whose PLT table is being walked -- the
+                # universal signature of an UNRESOLVED lazy-bound slot (still pointing at
+                # its own .plt stub, which then jumps to the dynamic linker) or a
+                # legitimate intra-object PLT call. Confirmed against a real process: every
+                # one of a clean python3's ~400 never-yet-called imports showed exactly
+                # this shape before this check was added -- without it, ordinary
+                # unresolved lazy binding reads as "verify" noise on every process, every
+                # run.
                 continue
 
             add("Medium", "GOT Entry Relocation (verify)", f"PID: {pid} ({cm})",
                 f"GOT entry for {symbol} in {os.path.basename(path)} resolves into "
-                f"{os.path.basename(region_path)} @ {hex(target)}, not its "
-                + (f"confirmed definer {os.path.basename(definer)}" if definer
-                   else "any confirmed definer")
-                + " - could be RELRO/lazy-binding, LD_PRELOAD interposition, or a hook; verify.",
-                "T1574.001 (GOT/PLT Overwrite)")
+                f"{os.path.basename(region_path)} @ {hex(target)}, not "
+                + (f"any of its confirmed definers ({', '.join(sorted(os.path.basename(d) for d in definers))})"
+                   if definers else "any confirmed definer")
+                + " - could be RELRO/lazy-binding, LD_PRELOAD interposition, or a hook; verify. "
+                  f"Subject for package/hash verification: {region_path} (the resolved-into "
+                  "library, not this PID's own executable -- an attacker swapping a REAL "
+                  "definer library for a malicious one exporting the same symbol name is the "
+                  "one scenario this check's own export-table parsing can never rule out; "
+                  "package ownership + hash on region_path closes that gap).",
+                "T1574.001 (GOT/PLT Overwrite)", subject_path=region_path)
 
 
 def check_got_plt_hooks():
@@ -1829,6 +1895,45 @@ def check_got_plt_hooks():
             continue          # one pathological process's ELF data must not kill the whole check
 
 
+def check_mwcp_structural_configs():
+    """Run the mwcp_parsers family catalog (mechanical/behavioral indicators intrinsic to how
+    a tool works -- never a naming-convention match) against the LIVE on-disk binary of every
+    process this pass already has independent reason to distrust (_pid_exe_trust: deleted from
+    disk, memfd-backed/fileless, or running from a world-writable path). Scoped to those PIDs
+    only, same reasoning as check_got_plt_hooks: unconditionally reading and parsing every
+    process's exe is unbounded cost for no added signal over processes nothing else flagged.
+
+    This is the live-host static-scan counterpart to memory_enrich.py's carved-region pass --
+    both call the same mwcp_parsers.extract_all()/to_findings(), the latter with
+    source='memory', this one with source='on-disk', so a finding always states which one
+    actually happened."""
+    if _mwcp is None:
+        return
+    seen_exe = set()
+    for pid in proc_pids():
+        reason = _pid_exe_trust(pid)
+        if not reason:
+            continue
+        raw_exe = exe_of(pid) or ""
+        clean_exe = raw_exe[:-10] if raw_exe.endswith(" (deleted)") else raw_exe
+        if clean_exe and clean_exe in seen_exe:
+            continue          # same backing binary already scanned via another PID
+        if clean_exe:
+            seen_exe.add(clean_exe)
+        data = read_file(f"/proc/{pid}/exe", binary=True, limit=_MWCP_SCAN_SIZE_CAP)
+        if not data:
+            continue
+        try:
+            hits = _mwcp.extract_all(data)
+        except Exception:
+            continue          # one pathological binary must not kill the whole check
+        if not hits:
+            continue
+        where = f"PID {pid} ({comm(pid)}) exe={clean_exe or '?'} [{reason}]"
+        for finding in _mwcp.to_findings(hits, where, source="on-disk"):
+            FINDINGS.append(finding)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--report-dir", default=".")
@@ -1848,7 +1953,7 @@ def main():
         check_privileged_task_integrity, check_persistence_extended,
         check_gtfobins_exec, check_cred_access,
         check_process_ancestry, check_masquerade, check_credential_access,
-        check_got_plt_hooks,
+        check_got_plt_hooks, check_mwcp_structural_configs,
     ]
     for ch in checks:
         try:

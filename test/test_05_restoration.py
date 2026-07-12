@@ -1,8 +1,7 @@
-"""Section 5 - restoration: sha256-verified rollback of quarantined files; firewall un-isolation wiring."""
-import os
-
+"""Section 5 - restoration: sha256-verified rollback of quarantined files (platform-agnostic
+simulation logic; see test_05_restoration_windows.py / test_05_restoration_linux.py for the
+per-platform script wiring)."""
 import workflow_sim as sim
-from conftest import RESTORE_PS1, RESTORE_SH, read_text
 
 
 def test_restore_round_trip(tmp_path):
@@ -36,19 +35,3 @@ def test_restore_refuses_tampered_bytes(tmp_path):
     assert restored == []
     assert str(victim) in skipped
     assert not victim.exists()                     # left in quarantine, not restored
-
-
-# -- Restoration scripts wire the same sha256-verified contract -----------------
-def test_windows_restore_script_verifies_hash():
-    src = read_text(RESTORE_PS1)
-    assert "Get-FileHash" in src
-    assert "sha256" in src.lower()
-    assert "advfirewall import" in src             # un-isolate via firewall backup
-    assert "rollback" in src.lower()
-
-
-def test_linux_restore_script_verifies_hash():
-    src = read_text(RESTORE_SH)
-    assert "sha256" in src.lower()
-    assert "iptables-restore" in src               # un-isolate via iptables backup
-    assert "rollback" in src.lower()

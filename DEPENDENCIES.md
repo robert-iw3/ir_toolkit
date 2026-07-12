@@ -28,8 +28,7 @@ target/analyst host - recorded, not bundled).
 
 | Dependency | Role | Satisfied by |
 |---|---|---|
-| `avml` | volatile-memory acquisition (LiME) | **staged** `tools/avml` (arch-aware) |
-| `avml-convert` | decompress `--compress` (snappy) images before Volatility | **staged** `tools/avml-convert` |
+| `avml` | volatile-memory acquisition (LiME); its `convert` subcommand also decompresses `--compress` (snappy) images before Volatility -- no separate avml-convert binary exists in modern avml releases | **staged** `tools/avml` (arch-aware) |
 | `volatility3` (+ `pefile`, `yara-python`) | the analyzer engine | **vendored** `tools/vol3_wheels/` → offline venv via `pip install --no-index` |
 | `dwarf2json` | build the Volatility 3 Linux **ISF** from a debug `vmlinux` | **staged** `tools/dwarf2json` (arch-aware) |
 | kernel **ISF / symbols** | version-EXACT kernel layout (a generic `vmlinux.h`/BTF will not work) | **staged** `tools/symbols/` via `--stage-symbols` (build while connected); else fetched at analysis time |

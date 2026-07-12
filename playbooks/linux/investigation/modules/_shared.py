@@ -3,7 +3,7 @@
 Every module here reads the free-text `Details` string a collector script
 wrote (edr_hunt.py / analyze_memory_linux.py / journal_analysis.py /
 container_hunt.py / remote_access_triage.py / memory_enrich.py /
-c2_config_extract.py) rather than a structured schema -- these helpers
+mwcp_parsers/) rather than a structured schema -- these helpers
 centralise the regexes so 19 modules don't each reinvent "find the exe= path"
 or "is this path writable."
 """

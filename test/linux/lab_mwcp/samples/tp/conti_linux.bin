@@ -1,0 +1,1 @@
+-m all -p /mnt -size 100000 -nomutex -log /tmp/log.txt

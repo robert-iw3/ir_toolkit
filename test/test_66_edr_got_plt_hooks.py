@@ -234,6 +234,9 @@ def _scan(tmp_path, evil_target_live_value, evil_target_readable=True):
             {"start": 0x800000, "end": 0x801000, "perms": "rwxp"},   # anon + exec
             {"start": 0x900000, "end": 0x901000, "perms": "rw-p"},   # anon, not exec
         ],
+        "[vdso]": [
+            {"start": 0xa00000, "end": 0xa01000, "perms": "r-xp"},   # kernel-injected, executable
+        ],
     }
 
     def fake_mem(pid, addr):
@@ -267,6 +270,19 @@ def test_self_plt_stub_is_clean_not_verify(tmp_path):
     assert findings == []
 
 
+def test_large_but_under_cap_definer_library_is_still_recognized(tmp_path):
+    """Real bug caught live: a definer library over the OLD 64MB cap (e.g.
+    libwebkit2gtk-4.1.so, ~90MB, entirely ordinary on a GNOME desktop) was skipped
+    from symbol_definers entirely, so every GOT slot that genuinely, correctly
+    resolved into it (confirmed via `nm -D` against the real host library) had no
+    recorded definer to match against -- false 'verify' findings on every process
+    linking against any sufficiently large, completely legitimate library. A
+    library reporting a size between the old and new cap must still be scanned."""
+    with patch("os.path.getsize", return_value=100 * 1024 * 1024):    # 100MB: over old 64MB cap
+        findings = _scan(tmp_path, evil_target_live_value=_DEFINER_BASE + 5)
+    assert findings == []
+
+
 def test_anon_exec_target_is_critical(tmp_path):
     findings = _scan(tmp_path, evil_target_live_value=0x800500)      # inside the anon+exec range
     assert len(findings) == 1
@@ -282,6 +298,75 @@ def test_anon_non_exec_target_is_skipped(tmp_path):
     assert findings == []
 
 
+def test_vdso_target_produces_no_finding(tmp_path):
+    """Real bug caught live: gettimeofday/time/clock_gettime legitimately resolve into the
+    kernel-injected, executable [vdso] page on EVERY process -- lumping [vdso] into the same
+    'ANON + exec' bucket as genuinely injected shellcode flooded a real host with 700+
+    Critical 'GOT/PLT Overwrite' findings on completely clean processes (systemd, gnome-shell,
+    evolution-*, ...). Must be silent, not Critical."""
+    findings = _scan(tmp_path, evil_target_live_value=0xa00500)      # inside [vdso]
+    assert findings == []
+
+
+def test_read_maps_objects_keeps_vdso_as_its_own_key_not_anon():
+    maps_text = (
+        "aaaa0000-aaaa1000 rw-p 00000000 00:00 0                          [heap]\n"
+        "bbbb0000-bbbb1000 r-xp 00000000 00:00 0                          [vdso]\n"
+        "cccc0000-cccc1000 --xp 00000000 00:00 0                          [vsyscall]\n"
+        "dddd0000-dddd1000 rw-p 00000000 00:00 0                          \n"
+    )
+    with patch.object(h, "read_file", return_value=maps_text):
+        maps = h._read_maps_objects("4242")
+    assert "[vdso]" in maps and "[vsyscall]" in maps
+    assert "ANON" in maps
+    # the truly path-less mapping (last line) is ANON; [heap] stays out of the kernel-pseudo
+    # set (never a legitimate GOT target) and also falls into ANON, same as before this fix
+    assert len(maps["ANON"]) == 2
+
+
+def test_symbol_exported_by_two_libraries_is_clean_via_either(tmp_path):
+    """Real bug caught live: a first-definer-wins map treated the SECOND legitimate
+    exporter of a dual-exported symbol (e.g. ldexp/frexp/modf, exported by both
+    libc.so.6 and libm.so.6 on a real glibc build) as suspicious -- 570 false
+    'GOT Entry Relocation (verify)' findings on one clean live host. Resolving into
+    EITHER exporter must be silent."""
+    target_path = str(tmp_path / "libtarget.so")
+    libc_path = str(tmp_path / "libc.so.6")
+    libm_path = str(tmp_path / "libm.so.6")
+
+    target_data = _build_elf64_with_plt([], "shared_symbol", 0x3000)
+    libc_data = _build_elf64_with_plt(["shared_symbol"], "dummy1", 0x3000)
+    libm_data = _build_elf64_with_plt(["shared_symbol"], "dummy2", 0x3000)   # ALSO exports it
+    open(target_path, "wb").write(target_data)
+    open(libc_path, "wb").write(libc_data)
+    open(libm_path, "wb").write(libm_data)
+
+    target_base, libc_base, libm_base = 0x500000, 0x600000, 0x700000
+    maps = {
+        target_path: [{"start": target_base, "end": target_base + len(target_data) + 0x10000,
+                       "perms": "r-xp"}],
+        libc_path: [{"start": libc_base, "end": libc_base + len(libc_data) + 0x10000,
+                    "perms": "r-xp"}],
+        libm_path: [{"start": libm_base, "end": libm_base + len(libm_data) + 0x10000,
+                    "perms": "r-xp"}],
+        "ANON": [],
+    }
+
+    def fake_mem(pid, addr):
+        if addr == target_base + 0x3000:
+            return libm_base + 5           # resolves into the SECOND definer, not the first
+        if addr in (libc_base + 0x3000, libm_base + 0x3000):
+            return None                     # these libs' own placeholder slots: unreadable/skip
+        return None
+
+    h.FINDINGS.clear()
+    with patch.object(h, "_read_maps_objects", return_value=maps), \
+         patch.object(h, "_read_proc_mem_u64", side_effect=fake_mem):
+        h._got_plt_scan_pid("4242", "target-proc")
+    findings = [f for f in h.FINDINGS if "shared_symbol" in f["Details"]]
+    assert findings == []
+
+
 def test_wrong_library_target_is_medium_verify(tmp_path):
     findings = _scan(tmp_path, evil_target_live_value=_OTHER_BASE + 5)
     assert len(findings) == 1
@@ -290,6 +375,19 @@ def test_wrong_library_target_is_medium_verify(tmp_path):
     assert f["Type"] == "GOT Entry Relocation (verify)"
     assert "evil_target" in f["Details"]
     assert "confirmed definer" in f["Details"] or "libreal.so" in f["Details"]
+
+
+def test_wrong_library_finding_carries_resolved_library_as_subject_path(tmp_path):
+    """The finding's SubjectPath must be the library the GOT slot actually resolved
+    INTO (region_path) -- not the PID's own executable -- so adjudicate.py's package-
+    ownership/hash verification checks the file this finding is actually about. This
+    is what lets a swapped-in malicious library (genuinely exporting the same symbol,
+    so this check's own export-table parsing can't distinguish it) get closed out by
+    package integrity instead of requiring an analyst to go back to the host."""
+    findings = _scan(tmp_path, evil_target_live_value=_OTHER_BASE + 5)
+    assert len(findings) == 1
+    f = findings[0]
+    assert f["SubjectPath"].endswith("libother.so")
 
 
 def test_unreadable_slot_is_skipped_not_flagged(tmp_path):

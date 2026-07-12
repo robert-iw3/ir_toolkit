@@ -39,6 +39,14 @@ with no owning process), then for each group:
      direct edge counts). Requires process-tree data (Adjudication_*.json's
      ParentPid), so it runs from correlator.py rather than investigate()
      itself, which only ever sees the flat findings list.
+
+  5. Hidden-process volume cross-check (_cross_validate_hidden_process_volume)
+     -- a DEFINITIVE claim (module 2) assumes the underlying Volatility 3
+     symbol/struct resolution for THIS image was correct; 3+ unrelated,
+     mundane PIDs flagged "hidden" in one run is itself evidence against that
+     assumption (a rootkit hides what it needs hidden, not an arbitrary
+     handful of utilities), so it downgrades to STRONG_BEHAVIORAL rather than
+     staying an unconditional single-fact TP.
 """
 from __future__ import annotations
 import re
@@ -376,7 +384,24 @@ def _assemble_verdict(pid: int, process: str, all_dims: List[Dimension],
     tier3_only_pos = [d for d in pos_dims if d.tier == Tier.WEAK_STRUCTURAL]
     pos_count = len(countable_pos)
 
-    if pos_count >= TP_DIMENSION_THRESHOLD:
+    # HOST_SCOPE_PID is not one actor: every finding with no owning process (kernel
+    # hygiene, SUID baseline drift, a stray credential-shaped file, a cron job's file
+    # owner, a pinned eBPF object -- typically from several completely unrelated
+    # modules) gets bucketed here purely because none of them have a PID to attach to,
+    # NOT because they're corroborating facts about one thread of activity. The N-
+    # dimension threshold below exists to test "does this SAME actor's behavior
+    # corroborate across independent angles" (the README's own worked example: a
+    # deleted-binary PID ALSO making an external connection ALSO relaunched by cron).
+    # Applying it to a bucket of unrelated host-wide observations instead tests "has
+    # this host accrued at least N routine findings from different checks" -- which is
+    # true of nearly any real, long-running Linux host and manufactures a TRUE POSITIVE
+    # out of coincidence, not correlation. Confirmed live: this promoted host-scope
+    # findings that included this session's OWN leftover test fixtures and the
+    # toolkit's OWN legitimate egress-monitor cron job into "TRUE POSITIVE, weight
+    # 22.0." Only a genuinely unforgeable Tier 1 fact (handled above) can close
+    # HOST_SCOPE_PID as TP; below that it stays UNDETERMINED, same as any other
+    # pid whose evidence doesn't clear the bar.
+    if pid != HOST_SCOPE_PID and pos_count >= TP_DIMENSION_THRESHOLD:
         unique_mods = len({d.source_module for d in countable_pos})
         rationale = (
             f'TRUE POSITIVE: PID {pid} ({process}) -- '
@@ -564,6 +589,47 @@ def _propagate_process_lineage(verdicts: List[Verdict], tree: Dict[int, object])
     return out
 
 
+_HIDDEN_PROCESS_VOLUME_THRESHOLD = 3
+
+
+def _cross_validate_hidden_process_volume(verdicts: List[Verdict]) -> List[Verdict]:
+    """M2's pidhashtable-vs-pslist asymmetry is DEFINITIVE because, for a single frozen
+    memory snapshot, no benign mechanism produces it -- but that claim assumes the
+    comparison itself resolved correctly, which depends on the ISF matching the captured
+    kernel (verdict.py's own documented limitation: this engine doesn't independently
+    re-verify that match). Confirmed live: a run where this fired for 3+ unrelated,
+    mundane, short-lived PIDs at once (a shell invocation, `id`, `ubuntu-report`, an
+    accessibility daemon) is far more consistent with a kernel-symbol/context problem
+    for THIS analysis run than a rootkit selectively hiding processes it has no
+    adversarial reason to touch -- a rootkit hides what it needs hidden, not an
+    arbitrary handful of unrelated utilities. Downgrades M2_HiddenProcess to
+    STRONG_BEHAVIORAL once volume alone is implausible; a single hidden process (the
+    normal, actionable case) is untouched."""
+    flagged_pids = {v.pid for v in verdicts
+                    if any(d.name == 'M2_HiddenProcess' and d.positive for d in v.dimensions)}
+    if len(flagged_pids) < _HIDDEN_PROCESS_VOLUME_THRESHOLD:
+        return verdicts
+    out = []
+    for v in verdicts:
+        if v.pid not in flagged_pids:
+            out.append(v)
+            continue
+        new_dims = []
+        for d in v.dimensions:
+            if d.name == 'M2_HiddenProcess' and d.positive:
+                d = Dimension(
+                    name='M2_HiddenProcess_VolumeDowngraded', positive=True,
+                    tier=Tier.STRONG_BEHAVIORAL, source_module=d.source_module,
+                    rationale=(f'{d.rationale} DOWNGRADED from DEFINITIVE: '
+                              f'{len(flagged_pids)} independent PIDs carried this same '
+                              'single-mechanism signal in this run -- volume argues '
+                              'against "no benign mechanism" holding here specifically; '
+                              'needs corroboration.'))
+            new_dims.append(d)
+        out.append(_assemble_verdict(v.pid, v.process, new_dims, v.findings))
+    return out
+
+
 def investigate(findings: List[dict]) -> List[Verdict]:
     """Accept findings from any Linux collector, return one Verdict per unique
     PID plus one host-scope Verdict (HOST_SCOPE_PID) for findings with no
@@ -571,4 +637,5 @@ def investigate(findings: List[dict]) -> List[Verdict]:
     pid_groups = _group_by_pid(findings)
     verdicts = [_investigate_pid(pid, pid_findings, findings)
                for pid, pid_findings in sorted(pid_groups.items())]
+    verdicts = _cross_validate_hidden_process_volume(verdicts)
     return _propagate_shared_infrastructure(verdicts, findings)

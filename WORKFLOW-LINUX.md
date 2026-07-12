@@ -6,6 +6,24 @@ See [readme.md](./) for the cross-platform overview and adjudication philosophy.
 
 ***
 
+## Quick start
+
+```bash
+sudo ./Invoke-IRCollection-Linux.sh --incident-id <id> --no-egress-monitor --capture-memory
+
+playbooks/linux/threat_hunting/Analyze-Memory-Linux.sh \
+    --image reports/<host>/memory_<host>.raw --fetch-symbols \
+    --host-folder reports/<host> --yara --yara-engine vol --carve --adjudicate
+
+python3 -m playbooks.linux.investigation.live_runner reports/<host>/
+```
+
+Collection (with a live memory capture) → memory analysis (YARA + mwcp against the image,
+merged back into adjudication) → investigation (final TP/FP/UNDETERMINED correlation pass).
+Details, flags, and every intermediate artifact below.
+
+***
+
 ## Pipeline
 
 ```mermaid
@@ -77,6 +95,10 @@ Inspects `/proc`, the loaded-module list, persistence locations and writable pat
 
 **Behavioral correlation (not string matching):** external connection / listener from a deleted/`memfd`/writable-path binary = C2 _regardless of port_ (beats 443-beacon evasion); process ancestry (shell/`nc`/interpreter descended from a network daemon + corroborating factor = service RCE / reverse shell); name masquerade (fake kernel thread = bracketed `comm` with a real exe; `comm`≠exe from an untrusted path); credential access by open handle (`/etc/shadow`, `/proc/kcore`, `/dev/mem`, another task's `/proc/<pid>/mem` from a non-auth process).
 
+**GOT/PLT hooking (root):** reads the live pointer in every sensitive process's GOT slots; a slot resolving into anonymous executable memory is a userland API hook (Symbiote/jynx-class). See [DETAILED-FOLLOW-ON-LINUX.md §16](DETAILED-FOLLOW-ON-LINUX.md).
+
+**mwcp structural configs:** runs `mwcp_parsers/` (below) against on-disk binaries of processes already flagged untrustworthy (deleted/memfd/world-writable path) — same family catalog the memory-carve path uses, tagged `(on-disk)`.
+
 ### Remote-access triage (`playbooks/linux/threat_hunting/remote_access_triage.py`)
 
 Reverse-shell indicators, RMM/tunnelling tooling, and suspicious remote-session artifacts.
@@ -144,7 +166,7 @@ python3 playbooks/linux/threat_hunting/thread_inventory.py --report-dir reports/
 ```bash
 chmod +x ./Build-OfflineToolkit-Linux.sh
 ./Build-OfflineToolkit-Linux.sh                  # core tools + LOLDrivers cache
-./Build-OfflineToolkit-Linux.sh --include-memory # + avml/avml-convert/dwarf2json + volatility3 wheels
+./Build-OfflineToolkit-Linux.sh --include-memory # + avml/dwarf2json + volatility3 wheels
 ./Build-OfflineToolkit-Linux.sh --stage-symbols --symbols-kernel <ver>   # bake kernel ISF for offline analysis
 ./Build-OfflineToolkit-Linux.sh --check-only --include-memory --include-cloud   # inventory only
 ```
@@ -182,6 +204,19 @@ sudo ./Invoke-IRCollection-Linux.sh \
 
 ## Step 2 - Memory capture + analysis
 
+> **🛑 STOP - do not run analysis until the target's exact kernel is identified and matching symbols are staged.** A wrong-version ISF does not error out — it silently produces false rootkit findings (see the warning further down). The analyst machine and the compromised host are normally different systems, so don't assume `uname -r` here means anything — identify the target's actual kernel first with `Analyze-Memory-Linux.sh --image <image> --identify-kernel` (scans for kernel-version banners; works with **zero** symbols), then get matching debug symbols for that exact version before analyzing:
+>
+> | Distro | Get symbols |
+> |---|---|
+> | Any (has network) | `--fetch-symbols` on the command below — tries debuginfod first, then the distro package manager |
+> | Debian / Ubuntu | enable ddebs, `apt-get install linux-image-<ver>-dbgsym` |
+> | RHEL / Fedora / Rocky / Alma | `dnf debuginfo-install kernel-<ver>` |
+> | openSUSE / SLES | `zypper install kernel-default-debuginfo` |
+> | Air-gapped | pre-stage with `Build-OfflineToolkit-Linux.sh --stage-symbols --symbols-kernel <ver>` **while still connected**, matching the target's exact version |
+> | Analyst box is a different distro family than the target | `--distro <family>` only helps if that family's package manager happens to be installed locally; `--build-id <hex>` + debuginfod is the reliable cross-family path |
+>
+> `Analyze-Memory-Linux.sh` validates any staged ISF's kernel version before trusting it and refuses to silently use a mismatch — but that's a safety net, not a substitute for staging the right symbols up front. If the exact point-release genuinely isn't published yet (upstream lag — the tool says so explicitly rather than a bare "failed"), `--allow-closest-symbols` opts in to using the closest available point-release instead, clearly labeled and with a false-positive caveat — not the default, use only when waiting isn't an option.
+
 > **⚠️ Strongly recommended for every investigation - memory analysis is imperative.** RAM holds evidence that never touches disk: fileless/`memfd` malware, injected code, decrypted payloads, live C2 connections, cleartext credentials/keys, deleted-but-running binaries, and kernel rootkit hooks that hide from the live OS (visible only via DKOM cross-referencing of kernel structures). Modern Linux intrusions are increasingly memory-resident and living-off-the-land - a disk-and-journald-only analysis will miss them, and an attacker can tamper on-disk artifacts. Memory is the **most volatile** evidence (RFC 3227): capture it **first**, because a reboot or power-off destroys it permanently. Run with `--capture-memory`, then analyze (below).
 
 **Capture** (during collection) uses staged `tools/avml` (physical RAM only, compact). It pre-flights free space - `RAM × 1.1` - and, when the output drive is too small (e.g. a 32 GB USB for 24 GB RAM), **auto-redirects to a local volume** (`/var/tmp`, `/tmp`, `$HOME`) or an explicit `--memory-output`; a failed/truncated capture is renamed `INVALID_…` and never analyzed.
@@ -193,9 +228,11 @@ sudo ./Invoke-IRCollection-Linux.sh --deep --capture-memory --compress          
 sudo ./Invoke-IRCollection-Linux.sh --deep --capture-memory --memory-output /mnt/bigdisk   # pin a volume
 ```
 
-`--compress` (snappy) roughly halves the image - use it when the output drive is tight. A compressed image is `…​.lime.compressed`; the analyzer decompresses it automatically via `avml-convert` (stage it from the avml release).
+`--compress` (snappy) roughly halves the image - use it when the output drive is tight. A compressed image is `…​.lime.compressed`; the analyzer decompresses it automatically via `avml convert` (the same staged `avml` binary, no separate download needed).
 
 **Analysis** runs **off the target** (analyst machine) - the Volatility-3-Linux counterpart of the Windows `Analyze-Memory.ps1`. Unlike Windows (auto-fetched PDBs), Linux needs a **symbol table (ISF) matching the target kernel**.
+
+> ⚠️ **Critical: a kernel-version mismatch produces false rootkit findings, not an error.** If the target was patched since symbols were last staged/built (e.g. `--stage-symbols` ran for `6.17.0-35-generic`, the host is now on `6.17.0-40-generic`), Volatility does not fail loudly — struct-layout plugins (`pslist`, `malfind`) mostly still work since layouts are often stable across point releases, but symbol-**address**-dependent plugins (`check_syscall`, `check_afinfo`, the hidden-process pidhashtable-vs-pslist compare) produce dozens of false "hook"/"hidden process" findings, because the addresses baked into the wrong-version ISF don't match the running kernel's actual binary. `Analyze-Memory-Linux.sh` validates the exact kernel version before trusting any staged ISF (falls through to fetch/build instead of silently using a mismatch) and writes `_symbols_<stamp>.json` recording which kernel/symbols a run actually used — check it before trusting a run with unexplained kernel-hook findings.
 
 **Single-run (recommended)** - `Analyze-Memory-Linux.sh` stands up an **ephemeral venv** with Volatility 3, builds the kernel ISF (via `Build-LinuxSymbols.sh` → `dwarf2json`), runs the analyzer, optionally folds findings into the verdict ladder, then **tears the whole environment down** - leaving only the findings:
 
@@ -242,7 +279,7 @@ python3 playbooks/linux/threat_hunting/analyze_memory_linux.py --offline-dir vol
 | `linux.ptrace`                                                                                                                                   | active `ptrace` attachment (injection/anti-debug); escalates if the traced thread IP is in anonymous memory                                                                                                                                                                                                                                                                                                                                                                    | T1055.008                             |
 | `linux.ebpf`                                                                                                                                     | loaded eBPF programs (type-tiered; observability vs hiding-hook)                                                                                                                                                                                                                                                                                                                                                                                                               | T1014                                 |
 | `linux.malware.process_spoofing`                                                                                                                 | **behaviorally adjudicated** comm/argv spoof: emits only `Exe_Deleted`, kernel-thread-name masquerade, or implant-dir exe - raw `Comm_Spoofed`/`Cmdline_Spoofed` (benign python/systemd/firefox helpers) suppressed                                                                                                                                                                                                                                                            | T1036.004 / T1070.004                 |
-| YARA (`--yara`)                                                                                                                                  | rule hits in memory (Linux-applicable rules only - PE/dotnet/macho + Windows-API rules dropped by content, \~9,600→\~400; ELF canary proves the engine read memory). **`--yara-engine native`** (default) = yara-python over the whole image, fast + full physical coverage, no per-PID; **`--yara-engine vol`** = per-process worker driving Volatility as a library (init once, loop in-process) for **per-PID attribution + per-process timeout + rolling resumable JSONL** | T1055 / T1027                         |
+| YARA (`--yara`)                                                                                                                                  | rule hits in memory (Linux-applicable rules only - PE/dotnet/macho + Windows-API rules dropped by content, 1,775 staged → 357 compiled by default; abuse.ch/yaraify not staged at all, unstable against memory; ELF canary proves the engine read memory). **`--yara-engine native`** (default) = yara-python over the whole image, fast + full physical coverage, no per-PID; **`--yara-engine vol`** = per-process worker driving Volatility as a library (init once, loop in-process) for **per-PID attribution + per-process timeout + rolling resumable JSONL** | T1055 / T1027                         |
 | **Correlation**                                                                                                                                  | `Correlated Memory Threat` - emitted when a strong signal (injection / hidden-proc / LOTL / YARA hit) and another signal **converge on one PID** → high-confidence compromise                                                                                                                                                                                                                                                                                                  | T1055 / T1059                         |
 
 #### Custom kernel-structure plugins (`linux_ir.*`)
@@ -269,7 +306,7 @@ Output `Memory_Findings_<stamp>.json` (common schema, **priority-ordered** - cor
 
 ### How the memory YARA scan works - and how it _proves_ a false positive
 
-The scan rules are first curated by **content** (not filename): rules importing `pe`/`dotnet`/`macho` or built from Windows-API/registry strings are dropped, leaving the \~400 genuinely Linux-applicable rules out of \~9,600 (`--yara-broad` adds the platform-generic ones). An **ELF canary** rule is compiled in: if it never fires, the engine never read memory, so "0 matches" is reported as **UNTRUSTED**, not clean.
+The scan rules are first curated by **content** (not filename): rules importing `pe`/`dotnet`/`macho` or built from Windows-API/registry strings are dropped, leaving 357 genuinely Linux-applicable rules out of 1,775 staged (`--yara-broad` adds the platform-generic ones). An **ELF canary** rule is compiled in: if it never fires, the engine never read memory, so "0 matches" is reported as **UNTRUSTED**, not clean.
 
 Then a **two-phase** scan runs:
 
@@ -293,6 +330,13 @@ A confirmed hit is rarely the end — you want the implant's IOCs and to know _w
 * **exfil** → Telegram bot tokens, Discord webhooks
 * **crypto** → Monero addresses + miner command lines / wallets
 * **creds** → AWS keys, private-key blocks
+
+Alongside the generic string sweep, `mwcp_parsers/` runs structural/behavioral family
+detection on the same carved bytes (Sliver/Mythic/Merlin/Havoc/AdaptixC2/Pupy, BPFDoor,
+Mirai/Gafgyt-class, Ebury-class, XMRig-class, ransomware, cloud-SaaS C2, delivery stagers) —
+never brand-name string matching, always a protocol-required structural indicator (magic
+sequence, capability mismatch, XOR-table density). See
+[`mwcp_parsers/README.md`](playbooks/linux/threat_hunting/mwcp_parsers/README.md).
 
 These become findings → `Combined_Findings` → adjudication → **`IOCs.json`** **`c2_endpoints` + the incident report** (and `Memory_Enrichment_<stamp>.{json,md}`, defanged). Benign OS/CDN/distro hosts + RFC1918/loopback are dropped (no FP flood).
 
@@ -395,14 +439,11 @@ sudo IR_INCIDENT_ID=<id> ./playbooks/linux/monitor_egress.sh --start \
 ./playbooks/linux/06_restore.sh
 ```
 
-## Run the Linux/cloud test suite (pytest)
+## Run the test suite (pytest)
 
 ```bash
-cd test/
-pip install -r requirements.txt
-pytest -v                    # full suite
-pytest -v -k "journal"       # the journald analyzer
-./run_tests.sh               # full suite with coverage
+test/run_tests.sh linux      # Linux-relevant tests only (temp venv, auto-teardown, logged)
+test/run_tests.sh            # everything (Linux + Windows-python + Cloud)
 ```
 
 * Hunt tools: `playbooks/linux/threat_hunting/` (`edr_hunt.py`, `remote_access_triage.py`, `journal_analysis.py`, `adjudicate.py`)

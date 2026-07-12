@@ -29,13 +29,13 @@ import os
 import re
 import sys
 
-# Family-specific C2/beacon config extraction (Sliver/Mythic/Merlin/Havoc/
-# AdaptixC2/Pupy/BPFDoor/Mirai-Gafgyt/Ebury-class/unnamed-Go-C2/XMRig-class
-# miner/SMTP-exfil) -- the structured counterpart to this file's generic
-# IOC sweep. See c2_config_extract.py's module docstring for why this is a
-# plain stdlib module rather than an mwcp parser (mwcp is Windows-build-only).
+# Family-specific config/indicator extraction (C2 frameworks, Linux/ESXi ransomware,
+# cloud SaaS C2 channels, delivery stagers, specialized techniques, plus BPFDoor/
+# Mirai-Gafgyt/Ebury-class/XMRig-class/SMTP-exfil) -- the structured counterpart to
+# this file's generic IOC sweep. See mwcp_parsers/README.md for the full catalog and
+# why this is a plain stdlib package rather than an mwcp parser.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import c2_config_extract as _c2cfg
+import mwcp_parsers as _c2cfg
 
 # ---- IOC core (mirrors the Windows memory_enrich.py pure helpers; stdlib-only) ----------------
 _IPV4_RE = re.compile(r"\b(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)\b")
@@ -315,7 +315,7 @@ def enrich_region(bin_path):
             iocs[k] = sorted(set(iocs[k]) | set(di[k]))[:50]
         iocs["private_keys"] += di["private_keys"]
     # Family-specific structured config extraction (mechanism-based, not a generic
-    # string sweep) -- see c2_config_extract.py. Runs over the same region bytes.
+    # string sweep) -- see mwcp_parsers/. Runs over the same region bytes.
     c2_hits = _c2cfg.extract_all(data)
     return {"region_file": os.path.basename(bin_path),
             "pid": str(meta.get("pid", "")), "process": meta.get("process", ""),

