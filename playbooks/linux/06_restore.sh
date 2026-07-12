@@ -36,7 +36,13 @@ fi
 # action=quarantine -> move the binary back and restore its original mode;
 # action=chmod       -> reapply the original mode to a file that was chmod 000'd in place.
 if [[ -f "${ROLLBACK_JOURNAL}" ]]; then
-    while IFS=$'\t' read -r action original dest sha256 orig_mode; do
+    # Field separator is \x01, NOT tab: tab is one of bash read's IFS "whitespace-class"
+    # characters, so consecutive tabs (produced whenever `dest` is empty -- always true for
+    # chmod actions, which never populate it) silently collapse, shifting every field after
+    # it -- sha256 would receive orig_mode's value and orig_mode would end up empty, falling
+    # back to the hardcoded default instead of the real captured mode. \x01 is not in any
+    # IFS whitespace class, so an empty field stays a real (empty) field.
+    while IFS=$'\x01' read -r action original dest sha256 orig_mode; do
         if [[ "${action}" == "chmod" ]]; then
             [[ -f "${original}" ]] || { skipped+=("${original}:missing"); continue; }
             actual=$(sha256sum "${original}" 2>/dev/null | awk '{print $1}')
@@ -68,8 +74,8 @@ for ln in open('${ROLLBACK_JOURNAL}'):
     except Exception: continue
     a=e.get('action','')
     if a in ('quarantine','chmod'):
-        print('\t'.join([a, e.get('original') or e.get('path',''), e.get('dest',''),
-                         e.get('sha256',''), str(e.get('orig_mode',''))]))
+        print('\x01'.join([a, e.get('original') or e.get('path',''), e.get('dest',''),
+                           e.get('sha256',''), str(e.get('orig_mode',''))]))
 ")
 else
     log "no rollback journal at ${ROLLBACK_JOURNAL}; nothing to restore"

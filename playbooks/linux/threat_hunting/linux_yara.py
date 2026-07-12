@@ -74,14 +74,29 @@ def classify_rule(path):
     return "generic"                              # no platform-specific signal -> cross-platform
 
 
+# Rule packs that are file-scan oriented and noise/unstable against process/image MEMORY. Mirrors
+# the identical exclusion already proven necessary on the Windows side (memory_yara.py's
+# exclude_memory_noise) - confirmed live here too: abusech/ELF_Mirai.yar's condition
+# (`4 of ($arch*) and uint16(0) == 0x457f`) is satisfied by ordinary GTK/X11 binaries (Xwayland,
+# ibus-x11, mutter-x11-frame) via 4 short architecture-suffix substrings (".arm"/".x86"/...) plus
+# "is this an ELF file" - nothing Mirai-specific required at all.
+_MEM_EXCLUDE_RE = re.compile(r"(?i)(?:^|[\\/])abusech(?:[\\/]|$)")
+
+
+def exclude_memory_noise(rule_files):
+    """Drop file-oriented rule packs (abuse.ch) that are noise/unstable in a memory scan."""
+    return [f for f in rule_files if not _MEM_EXCLUDE_RE.search(f or "")]
+
+
 def select_rules(files, include_generic=False):
     """Curate the scan set. Default (include_generic=False) keeps only rules with an explicit
     Linux/ELF/ProcFS/shell/script signal - targeted + low-noise + fast, like the Windows ~500-rule
     set. include_generic=True also keeps platform-generic rules (broader coverage, but the generic
     bucket holds broad Windows byte-pattern rules that match millions of times in a full-image scan
-    and slow it dramatically). Windows/macOS-bound rules are always dropped."""
+    and slow it dramatically). Windows/macOS-bound rules are always dropped, and file-scan-oriented
+    packs unstable in a memory context (abuse.ch) are always dropped too."""
     keep = ("linux", "generic") if include_generic else ("linux",)
-    return [f for f in files if classify_rule(f) in keep]
+    return exclude_memory_noise([f for f in files if classify_rule(f) in keep])
 
 
 def is_linux_rule(path):

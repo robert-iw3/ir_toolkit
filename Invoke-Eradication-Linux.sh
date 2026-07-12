@@ -123,26 +123,50 @@ RESULTS_JSON="["
 sep=""
 record() { RESULTS_JSON+="${sep}$1"; sep=","; }
 
+# Scan a playbook's captured stdout from the end for the last line that parses as valid JSON
+# -- that's the playbook's own summary print. Robust against trailing/interleaved non-JSON
+# stdout (a stray echo, a warning printed to stdout instead of stderr) that a naive `tail -1`
+# would otherwise hand straight to record(), silently corrupting playbook_results to []
+# in the final report (2026-06-21 eradication review finding #9). "{}" if nothing parses,
+# so RESULTS_JSON always stays valid JSON even when a playbook produced no JSON at all.
+extract_json_line() {
+    "$PY" -c '
+import json, sys
+for line in reversed(sys.stdin.read().splitlines()):
+    line = line.strip()
+    if not line:
+        continue
+    try:
+        json.loads(line)
+    except Exception:
+        continue
+    print(line)
+    break
+else:
+    print("{}")
+'
+}
+
 # ORDER: contain → cut C2 → eradicate. Block the attacker's channel BEFORE killing processes so a
 # kill can't trip a dead-man's-switch and a re-spawn can't phone home mid-eradication.
 if [[ $ISOLATE -eq 1 ]]; then
     out="$(run_pb "Network isolation" 01_contain_host.sh)"
-    echo "$out"; [[ $APPLY -eq 1 ]] && record "$(echo "$out" | tail -1)"
+    echo "$out"; [[ $APPLY -eq 1 ]] && record "$(echo "$out" | extract_json_line)"
 fi
 if [[ -n "$C2_IPS$C2_DOMAINS" ]]; then
     out="$(run_pb "C2 blocking" 04_block_c2.sh \
         IR_C2_IPS="$C2_IPS" IR_C2_DOMAINS="$C2_DOMAINS")"
-    echo "$out"; [[ $APPLY -eq 1 ]] && record "$(echo "$out" | tail -1)"
+    echo "$out"; [[ $APPLY -eq 1 ]] && record "$(echo "$out" | extract_json_line)"
 fi
 if [[ -n "$PIDS$PROCS$HASHES" ]]; then
     out="$(run_pb "Process eradication" 02_eradicate_process.sh \
         IR_MALICIOUS_PIDS="$PIDS" IR_MALICIOUS_PROCESSES="$PROCS" IR_MALICIOUS_HASHES="$HASHES")"
-    echo "$out"; [[ $APPLY -eq 1 ]] && record "$(echo "$out" | tail -1)"
+    echo "$out"; [[ $APPLY -eq 1 ]] && record "$(echo "$out" | extract_json_line)"
 fi
 if [[ -n "$PATHS$HASHES$PROCS" ]]; then
     out="$(run_pb "Persistence removal" 03_eradicate_persistence.sh \
         IR_MALICIOUS_PATHS="$PATHS" IR_MALICIOUS_HASHES="$HASHES" IR_MALICIOUS_PROCESSES="$PROCS")"
-    echo "$out"; [[ $APPLY -eq 1 ]] && record "$(echo "$out" | tail -1)"
+    echo "$out"; [[ $APPLY -eq 1 ]] && record "$(echo "$out" | extract_json_line)"
 fi
 # Credential / session revocation for implicated accounts (Principals.json).
 PRINC="${HOST_FOLDER}/Principals.json"

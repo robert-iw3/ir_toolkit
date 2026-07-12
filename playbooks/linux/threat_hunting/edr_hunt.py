@@ -22,6 +22,7 @@ import math
 import os
 import re
 import shutil
+import struct
 import subprocess
 import sys
 from collections import Counter
@@ -47,6 +48,21 @@ SUID_BASELINE = {
     "ntfs-3g", "dbus-daemon-launch-helper", "polkit-agent-helper-1",
     "snap-confine", "unix_chkpwd", "Xorg.wrap", "vmware-user-suid-wrapper",
 }
+
+# --- GOT/PLT hook detection: minimal ELF64 constants (self-contained, no cross-module
+# import -- this file keeps its own small helper copies, same convention as the rest of it) ---
+_ELF_PT_LOAD = 1
+_ELF_PT_DYNAMIC = 2
+_ELF_DT_NULL = 0
+_ELF_DT_PLTRELSZ = 2
+_ELF_DT_STRTAB = 5
+_ELF_DT_SYMTAB = 6
+_ELF_DT_STRSZ = 10
+_ELF_DT_SYMENT = 11
+_ELF_DT_JMPREL = 23
+_GOT_PLT_MAX_LIBS_PER_PROC = 200     # defensive cap: distinct mapped objects scanned per PID
+_GOT_PLT_MAX_RELOCS_PER_LIB = 500    # defensive cap: PLT relocations walked per library
+_GOT_PLT_MAX_LIB_SIZE = 64 * 1024 * 1024   # matches this toolkit's established carve-size ceiling
 
 
 def now():
@@ -1462,6 +1478,357 @@ def check_credential_access():
                 break
 
 
+# --- GOT/PLT hook detection: ELF parsing (pure, no /proc access) --------------
+def _elf_header(data):
+    if len(data) < 64 or data[:4] != b"\x7fELF":
+        return None
+    ei_class, ei_data = data[4], data[5]
+    if ei_class not in (1, 2) or ei_data not in (1, 2):
+        return None
+    endian = "<" if ei_data == 1 else ">"
+    is64 = ei_class == 2
+    try:
+        if is64:
+            e_phoff, = struct.unpack_from(endian + "Q", data, 32)
+            e_phentsize, e_phnum = struct.unpack_from(endian + "HH", data, 54)
+        else:
+            e_phoff, = struct.unpack_from(endian + "I", data, 28)
+            e_phentsize, e_phnum = struct.unpack_from(endian + "HH", data, 40)
+    except struct.error:
+        return None
+    return {"endian": endian, "is64": is64, "e_phoff": e_phoff,
+            "e_phentsize": e_phentsize, "e_phnum": e_phnum}
+
+
+def _elf_program_headers(data, h):
+    endian, is64 = h["endian"], h["is64"]
+    e_phoff, e_phentsize, e_phnum = h["e_phoff"], h["e_phentsize"], h["e_phnum"]
+    if not e_phoff or not e_phnum or e_phoff + e_phentsize * e_phnum > len(data):
+        return []
+    phdrs = []
+    for i in range(e_phnum):
+        off = e_phoff + i * e_phentsize
+        try:
+            if is64:
+                p_type, = struct.unpack_from(endian + "I", data, off)
+                p_offset, p_vaddr = struct.unpack_from(endian + "QQ", data, off + 8)
+                p_filesz, p_memsz = struct.unpack_from(endian + "QQ", data, off + 32)
+            else:
+                p_type, = struct.unpack_from(endian + "I", data, off)
+                p_offset, p_vaddr = struct.unpack_from(endian + "II", data, off + 4)
+                p_filesz, p_memsz = struct.unpack_from(endian + "II", data, off + 16)
+        except struct.error:
+            continue
+        phdrs.append({"type": p_type, "offset": p_offset, "vaddr": p_vaddr,
+                      "filesz": p_filesz, "memsz": p_memsz})
+    return phdrs
+
+
+def _elf_vaddr_to_offset(phdrs, vaddr):
+    for p in phdrs:
+        if p["type"] == _ELF_PT_LOAD and p["vaddr"] <= vaddr < p["vaddr"] + p["memsz"]:
+            return p["offset"] + (vaddr - p["vaddr"])
+    return None
+
+
+def _elf_read_cstr(data, offset):
+    end = data.find(b"\x00", offset)
+    if end == -1:
+        return ""
+    try:
+        return data[offset:end].decode("utf-8", "ignore")
+    except UnicodeDecodeError:
+        return ""
+
+
+def _elf_dynamic_tags(data, h, phdrs):
+    """Walk the .dynamic table (located via the PT_DYNAMIC program header, never
+    stripped from a working dynamically-linked object) into {tag: value}."""
+    if not h["is64"]:
+        return None
+    dyn_seg = next((p for p in phdrs if p["type"] == _ELF_PT_DYNAMIC), None)
+    if dyn_seg is None:
+        return None
+    endian, entsize = h["endian"], 16
+    tags = {}
+    off, end = dyn_seg["offset"], dyn_seg["offset"] + dyn_seg["filesz"]
+    while off + entsize <= end and off + entsize <= len(data):
+        try:
+            d_tag, d_val = struct.unpack_from(endian + "qQ", data, off)
+        except struct.error:
+            break
+        if d_tag == _ELF_DT_NULL:
+            break
+        tags[d_tag] = d_val
+        off += entsize
+    return tags
+
+
+def _elf_symbol_name_at(data, endian, symtab_off, syment, strtab_off, strsz, index):
+    off = symtab_off + index * syment
+    if off + 8 > len(data):
+        return ""
+    try:
+        st_name, = struct.unpack_from(endian + "I", data, off)
+    except struct.error:
+        return ""
+    if not st_name or (strsz and st_name >= strsz):
+        return ""
+    return _elf_read_cstr(data, strtab_off + st_name)
+
+
+def _elf_defined_symbols(data, h, phdrs):
+    """Every symbol name this library itself defines (st_shndx != 0) -- used to confirm
+    a PLT relocation's live target actually lands in the library that legitimately
+    implements it, rather than assuming by name or position."""
+    if not h["is64"]:
+        return set()
+    tags = _elf_dynamic_tags(data, h, phdrs)
+    if not tags or _ELF_DT_SYMTAB not in tags or _ELF_DT_STRTAB not in tags:
+        return set()
+    symtab_off = _elf_vaddr_to_offset(phdrs, tags[_ELF_DT_SYMTAB])
+    strtab_off = _elf_vaddr_to_offset(phdrs, tags[_ELF_DT_STRTAB])
+    if symtab_off is None or strtab_off is None:
+        return set()
+    strsz = tags.get(_ELF_DT_STRSZ, 0)
+    syment = tags.get(_ELF_DT_SYMENT) or 24
+    endian = h["endian"]
+    # .dynamic carries no explicit symbol count; bound the walk by the string table's
+    # start (symtab always precedes strtab in practice) plus a sane hard cap.
+    approx_count = (strtab_off - symtab_off) // syment if strtab_off > symtab_off else 0
+    approx_count = min(approx_count, 100000)
+    defined = set()
+    for i in range(approx_count):
+        off = symtab_off + i * syment
+        if off + syment > len(data):
+            break
+        try:
+            st_name, = struct.unpack_from(endian + "I", data, off)
+            st_shndx, = struct.unpack_from(endian + "H", data, off + 6)
+        except struct.error:
+            continue
+        if not st_name or (strsz and st_name >= strsz) or st_shndx == 0:
+            continue
+        name = _elf_read_cstr(data, strtab_off + st_name)
+        if name:
+            defined.add(name)
+    return defined
+
+
+def _elf_plt_relocations(data, h, phdrs, cap=_GOT_PLT_MAX_RELOCS_PER_LIB):
+    """The PLT relocation table (.rela.plt, located via DT_JMPREL/DT_PLTRELSZ) as
+    [(symbol_name, got_slot_vaddr), ...] -- each entry is one GOT slot the dynamic
+    linker patches with a function pointer, the standard lazy-binding surface userland
+    hooking rootkits target. Elf64_Rela only (x86-64)."""
+    if not h["is64"]:
+        return []
+    tags = _elf_dynamic_tags(data, h, phdrs)
+    if not tags:
+        return []
+    for need in (_ELF_DT_JMPREL, _ELF_DT_PLTRELSZ, _ELF_DT_SYMTAB, _ELF_DT_STRTAB):
+        if need not in tags:
+            return []
+    jmprel_off = _elf_vaddr_to_offset(phdrs, tags[_ELF_DT_JMPREL])
+    symtab_off = _elf_vaddr_to_offset(phdrs, tags[_ELF_DT_SYMTAB])
+    strtab_off = _elf_vaddr_to_offset(phdrs, tags[_ELF_DT_STRTAB])
+    if jmprel_off is None or symtab_off is None or strtab_off is None:
+        return []
+    strsz = tags.get(_ELF_DT_STRSZ, 0)
+    syment = tags.get(_ELF_DT_SYMENT) or 24
+    endian, entsize = h["endian"], 24  # Elf64_Rela: r_offset, r_info, r_addend
+    n = min(tags[_ELF_DT_PLTRELSZ] // entsize if entsize else 0, cap)
+    out = []
+    for i in range(n):
+        off = jmprel_off + i * entsize
+        if off + entsize > len(data):
+            break
+        try:
+            r_offset, r_info = struct.unpack_from(endian + "QQ", data, off)
+        except struct.error:
+            break
+        name = _elf_symbol_name_at(data, endian, symtab_off, syment, strtab_off,
+                                   strsz, r_info >> 32)
+        if name:
+            out.append((name, r_offset))
+    return out
+
+
+def _elf_load_bias(map_starts, phdrs):
+    """Runtime load bias for a position-independent object: live_addr = file_vaddr +
+    bias. Derived from the lowest PT_LOAD segment vaddr and the lowest live mapping
+    start -- the standard ld.so relationship for both PIE executables and shared
+    libraries."""
+    loads = [p for p in phdrs if p["type"] == _ELF_PT_LOAD]
+    if not loads or not map_starts:
+        return None
+    return min(map_starts) - min(p["vaddr"] for p in loads)
+
+
+# --- GOT/PLT hook detection: live /proc access ---------------------------------
+_MAPS_LINE_RE = re.compile(
+    r"^([0-9a-f]+)-([0-9a-f]+)\s+([-rwxps]{4})\s+[0-9a-f]+\s+[0-9a-f:]+\s+\d+\s*(.*)$")
+
+
+def _read_maps_objects(pid):
+    """/proc/<pid>/maps -> {backing_path: [{'start','end','perms'}, ...]}, with an
+    'ANON' bucket for path-less (anonymous/private) mappings. Gives both a library's
+    load bias and, across the whole table, where any live pointer actually lands."""
+    text = read_file(f"/proc/{pid}/maps")
+    if not text:
+        return {}
+    objs = {}
+    for line in text.splitlines():
+        m = _MAPS_LINE_RE.match(line)
+        if not m:
+            continue
+        start, end, perms, path = m.groups()
+        path = path.strip()
+        key = path if path and not path.startswith("[") else "ANON"
+        objs.setdefault(key, []).append(
+            {"start": int(start, 16), "end": int(end, 16), "perms": perms})
+    return objs
+
+
+def _read_proc_mem_u64(pid, addr):
+    """One live little-endian 8-byte pointer from /proc/<pid>/mem at addr (the current
+    value in a GOT slot). None on ANY failure -- permission denied, a paged-out page, or
+    an out-of-range seek are all treated as 'can't verify', so the caller skips the slot
+    rather than inventing a finding from missing data."""
+    try:
+        with open(f"/proc/{pid}/mem", "rb") as fh:
+            fh.seek(addr)
+            data = fh.read(8)
+        return struct.unpack("<Q", data)[0] if len(data) == 8 else None
+    except Exception:
+        return None
+
+
+def _pid_uid0(pid):
+    status = read_file(f"/proc/{pid}/status")
+    if not status:
+        return False
+    for ln in status.splitlines():
+        if ln.startswith("Uid:"):
+            parts = ln.split()
+            return len(parts) > 1 and parts[1] == "0"
+    return False
+
+
+def _got_plt_scan_pid(pid, cm):
+    maps = _read_maps_objects(pid)
+    lib_paths = [p for p in maps if p != "ANON"][:_GOT_PLT_MAX_LIBS_PER_PROC]
+    if not lib_paths:
+        return
+
+    # Load bias + defined-symbol set for every mapped library, so a PLT relocation's
+    # live target can be checked against whichever library actually exports that
+    # symbol -- not just the library whose own PLT table is being walked (most PLT
+    # entries legitimately resolve into a DIFFERENT library, e.g. libc).
+    lib_data, symbol_definer = {}, {}
+    for path in lib_paths:
+        try:
+            if os.path.getsize(path) > _GOT_PLT_MAX_LIB_SIZE:
+                continue
+        except OSError:
+            continue
+        data = read_file(path, binary=True, limit=_GOT_PLT_MAX_LIB_SIZE)
+        if not data:
+            continue
+        h = _elf_header(data)
+        if h is None or not h["is64"]:
+            continue
+        phdrs = _elf_program_headers(data, h)
+        bias = _elf_load_bias([m["start"] for m in maps[path]], phdrs)
+        if bias is None:
+            continue
+        lib_data[path] = (data, h, phdrs, bias)
+        for name in _elf_defined_symbols(data, h, phdrs):
+            symbol_definer.setdefault(name, path)
+
+    for path, (data, h, phdrs, bias) in lib_data.items():
+        for symbol, got_vaddr in _elf_plt_relocations(data, h, phdrs):
+            target = _read_proc_mem_u64(pid, bias + got_vaddr)
+            if target is None:
+                continue                                   # unreadable slot -> skip, not a finding
+            region_path, region_perms = None, ""
+            for opath, entries in maps.items():
+                hit = next((e for e in entries if e["start"] <= target < e["end"]), None)
+                if hit:
+                    region_path, region_perms = opath, hit["perms"]
+                    break
+            if region_path is None:
+                continue                                   # target resolves nowhere known -> skip
+            if region_path == "ANON":
+                if "x" in region_perms:
+                    add("Critical", "GOT/PLT Overwrite (memory)", f"PID: {pid} ({cm})",
+                        f"GOT entry for {symbol} in {os.path.basename(path)} redirected to "
+                        f"anonymous/unbacked executable memory @ {hex(target)} - userland "
+                        f"API hook (rootkit/credential theft).",
+                        "T1574.001 (GOT/PLT Overwrite), T1014 (Rootkit)")
+                continue                                   # anon + non-exec: not the hook shape
+            definer = symbol_definer.get(symbol)
+            if region_path in (definer, path):
+                # Either resolves into its real definer, or lands back in the SAME object
+                # whose PLT table is being walked -- the universal signature of an
+                # UNRESOLVED lazy-bound slot (still pointing at its own .plt stub, which
+                # then jumps to the dynamic linker) or a legitimate intra-object PLT call.
+                # Confirmed against a real process: every one of a clean python3's ~400
+                # never-yet-called imports showed exactly this shape before this check was
+                # added -- without it, ordinary unresolved lazy binding reads as "verify"
+                # noise on every process, every run.
+                continue
+
+            add("Medium", "GOT Entry Relocation (verify)", f"PID: {pid} ({cm})",
+                f"GOT entry for {symbol} in {os.path.basename(path)} resolves into "
+                f"{os.path.basename(region_path)} @ {hex(target)}, not its "
+                + (f"confirmed definer {os.path.basename(definer)}" if definer
+                   else "any confirmed definer")
+                + " - could be RELRO/lazy-binding, LD_PRELOAD interposition, or a hook; verify.",
+                "T1574.001 (GOT/PLT Overwrite)")
+
+
+def check_got_plt_hooks():
+    """A userland rootkit (Symbiote, jynx/libprocesshider-class, a malicious LD_PRELOAD
+    object) redirects a library function's GOT slot to attacker code so ordinary calls
+    (readdir/getpwnam/open/accept/...) run the hook first. Detection: for every
+    sensitive process's PLT relocation table, read the LIVE pointer currently stored in
+    each GOT slot and check where it actually lands (see _got_plt_scan_pid).
+
+    Live-only by design, not a memory-image check: on a RAM capture, userland pages are
+    frequently paged out, so GOT slots read as unreadable and would hit the "can't
+    verify, skip" path for real true positives, not just clean ones -- a live host keeps
+    the pages resident, so the check stays cheap and its skip path stays a genuine FP
+    guard instead of a blind spot.
+
+    Scoped to sensitive processes only (bounded cost, highest signal): the same
+    already-audited _TRUSTED_CRED_EXES path-prefix set (sshd/sudo/su/passwd/login/
+    cron/PAM-linked daemons/systemd), plus anything running as uid 0 with an
+    untrustworthy backing binary (_pid_exe_trust: deleted/memfd/world-writable path).
+    Not every process, for stability and predictable cost.
+    """
+    try:
+        unprivileged = os.geteuid() != 0
+    except AttributeError:
+        unprivileged = True
+    if unprivileged:
+        add("Info", "GOT/PLT Hook Check Reduced Coverage", "-",
+            "Not running as root: /proc/<pid>/mem is only readable for this hunt "
+            "process's own uid, so sensitive processes owned by other users get no "
+            "GOT/PLT coverage this run. Re-run as root for full coverage.", "-")
+    for pid in proc_pids():
+        raw_exe = exe_of(pid) or ""
+        clean_exe = raw_exe[:-10] if raw_exe.endswith(" (deleted)") else raw_exe
+        sensitive = any(clean_exe.startswith(t) for t in _TRUSTED_CRED_EXES)
+        if not sensitive and _pid_uid0(pid) and _pid_exe_trust(pid):
+            sensitive = True
+        if not sensitive:
+            continue
+        try:
+            _got_plt_scan_pid(pid, comm(pid))
+        except Exception:
+            continue          # one pathological process's ELF data must not kill the whole check
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--report-dir", default=".")
@@ -1481,6 +1848,7 @@ def main():
         check_privileged_task_integrity, check_persistence_extended,
         check_gtfobins_exec, check_cred_access,
         check_process_ancestry, check_masquerade, check_credential_access,
+        check_got_plt_hooks,
     ]
     for ch in checks:
         try:

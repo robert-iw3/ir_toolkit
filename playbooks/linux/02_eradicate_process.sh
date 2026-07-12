@@ -283,8 +283,23 @@ for bad_hash in "${HASH_LIST[@]}"; do
     done < <(find "${SEARCH_PATHS[@]}" -xdev -type f -print0 2>/dev/null)
 done
 
+# Whether this invocation supplied at least one indicator to hunt for. The anon-rwx and
+# fileless sweeps below have no way to distinguish genuine injected/fileless malware from an
+# ordinary JIT runtime's anon+exec memory (gnome-shell/firefox/gjs/node/java all look
+# identical from /proc/*/maps alone) -- their only "suspect" signal is a name/hash match
+# against caller-supplied indicators. With none supplied, a full-host scan just flags every
+# JIT process into errors[] as pure noise for no investigative gain. Tied to indicators per
+# the 2026-06-21 eradication review (finding #6, "unconditional sweeps + JIT noise") -- this
+# gates the SWEEP itself, not just the kill, since flagging benign JIT is itself the noise.
+# The hidden-PID sweep below is deliberately NOT gated the same way: a process visible via
+# /proc/*/maps but absent from directory listing is a structural rootkit-hiding signal, not
+# a "does this look like a JIT" heuristic -- worth surfacing even with zero indicators.
+HAS_INDICATORS=false
+[[ -n "${MALICIOUS_PIDS}" || -n "${MALICIOUS_PROCESSES}" || -n "${MALICIOUS_HASHES}" ]] && HAS_INDICATORS=true
+
 # -- Memory-only process detection (fileless) ----------------------------------
 # Check all running processes for deleted-on-disk executables (common in fileless malware)
+if ${HAS_INDICATORS}; then
 while IFS= read -r pid; do
     exe_path=$(readlink "/proc/${pid}/exe" 2>/dev/null) || continue
     if [[ "${exe_path}" == *"(deleted)"* ]]; then
@@ -298,6 +313,7 @@ while IFS= read -r pid; do
         done
     fi
 done < <(find /proc -maxdepth 1 -name '[0-9]*' -printf '%f\n' 2>/dev/null)
+fi
 
 # -- Hidden PID detection and eradication (rootkit hook evasion) ---------------
 # Rootkits hook getdents64() to hide from readdir while /proc/[pid]/maps still exists.
@@ -335,6 +351,9 @@ done
 # -- Anonymous RWX memory mapping detection (shellcode / process injection) ----
 # r-xp pages with device 00:00 and inode 0 mean no backing file - injected shellcode or reflective DLL.
 # Kill only if the process already matches a known-bad indicator; otherwise log for analyst.
+# Gated on HAS_INDICATORS (see comment above the fileless sweep) -- every JIT runtime on the
+# host has an anon+exec map indistinguishable from injected shellcode by this check alone.
+if ${HAS_INDICATORS}; then
 while IFS= read -r _pid; do
     _maps="/proc/${_pid}/maps"
     [[ -r "${_maps}" ]] || continue
@@ -360,6 +379,7 @@ while IFS= read -r _pid; do
         errors+=("anon_rwx:${_pid}:${_comm}")
     fi
 done < <(find /proc -maxdepth 1 -name '[0-9]*' -printf '%f\n' 2>/dev/null)
+fi
 
 logger -t ir-playbook "ERADICATE-PROC: Complete. Killed PIDs: ${#killed_pids[@]}, procs: ${#killed_procs[@]}, quarantined: ${#quarantined_files[@]}, errors: ${#errors[@]}"
 

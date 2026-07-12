@@ -4,6 +4,7 @@ Covers: command-injection resistance in the orchestrator's indicator extraction 
 attacker-influenceable finding content), the protected-process choke point, the adjudication-gated
 hidden-PID sweep, the module dry-run guard, and the chmod-action reversibility in restore.
 """
+import hashlib
 import json
 import os
 import subprocess
@@ -201,6 +202,123 @@ def test_restore_skips_suspend_thread_when_tracer_already_gone(tmp_path):
     src = read(RESTORE)
     assert '"/proc/${tracer_pid}"' in src
     assert "tracer_gone" in src
+
+
+# ── Remaining 2026-06-21 review items, closed 2026-07-11 (#6, #9, #10) ───────
+# (planning/BACKLOG.md Batch 11)
+
+def test_anon_rwx_and_fileless_sweeps_gated_on_indicators():
+    """Finding #6 ('unconditional sweeps + JIT noise'): both the fileless (deleted-exe)
+    sweep and the anon-rwx sweep used to walk every process on the host and, for
+    anon-rwx, dump every ordinary JIT runtime (gnome-shell/firefox/gjs/...) into
+    errors[] even when zero indicators were supplied. Both are now gated behind
+    HAS_INDICATORS -- tied to indicators per the review, not run unconditionally."""
+    src = read(PROC)
+    assert "HAS_INDICATORS=false" in src
+    assert ('[[ -n "${MALICIOUS_PIDS}" || -n "${MALICIOUS_PROCESSES}" || '
+            '-n "${MALICIOUS_HASHES}" ]] && HAS_INDICATORS=true') in src
+    fileless = src[src.index("Memory-only process detection"):src.index("Hidden PID detection")]
+    assert "if ${HAS_INDICATORS}; then" in fileless
+    anon_rwx = src[src.index("Anonymous RWX memory mapping detection"):]
+    assert "if ${HAS_INDICATORS}; then" in anon_rwx
+
+
+def test_hidden_pid_sweep_not_gated_on_indicators():
+    """The hidden-PID sweep is deliberately NOT gated behind HAS_INDICATORS: a process
+    visible via /proc/*/maps but absent from directory listing is a structural
+    rootkit-hiding signal, not a JIT-noise-prone heuristic -- it stays unconditional
+    (only the KILL decision, not the sweep itself, is indicator-gated for this one)."""
+    src = read(PROC)
+    hidden = src[src.index("Hidden PID detection"):src.index("Anonymous RWX memory mapping detection")]
+    assert "if ${HAS_INDICATORS}; then" not in hidden
+
+
+def test_no_indicators_invocation_still_completes_cleanly():
+    """Regression: with all three indicator env vars empty (a bare/defensive
+    invocation), the script must still run to completion and print valid JSON --
+    gating the sweeps off must not break the script's normal exit path."""
+    env = dict(os.environ, IR_INCIDENT_ID="test-no-indicators-clean", IR_DRY_RUN="1")
+    for v in ("IR_MALICIOUS_PIDS", "IR_MALICIOUS_PROCESSES", "IR_MALICIOUS_HASHES"):
+        env.pop(v, None)
+    r = subprocess.run(["bash", PROC], capture_output=True, text=True, timeout=30, env=env)
+    assert r.returncode == 0, r.stderr
+    summary = json.loads(r.stdout.strip().splitlines()[-1])
+    assert summary["phase"] == "process_eradication"
+
+
+def _extract_json_line_snippet():
+    src = read(ERAD)
+    return src[src.index("extract_json_line() {"):src.index("# ORDER: contain")]
+
+
+def test_extract_json_line_finds_json_amid_trailing_noise():
+    """Finding #9 ('fragile result capture'): a naive `tail -1` silently handed
+    whatever the LAST line of a playbook's stdout was to record(), even when that
+    line wasn't the playbook's JSON summary -- a stray trailing echo/warning would
+    corrupt playbook_results to []. extract_json_line() instead scans backward from
+    the end for the last line that actually parses as JSON, regardless of what
+    follows it. Runs the REAL function body sliced out of the orchestrator, not a
+    reimplementation."""
+    script = _extract_json_line_snippet() + '\nPY="python3"\nextract_json_line\n'
+    stdin_text = 'some log line\n{"phase": "x", "killed_pids": 3}\ntrailing warning after json\n'
+    r = subprocess.run(["bash", "-c", script], input=stdin_text, capture_output=True,
+                       text=True, timeout=10)
+    assert r.returncode == 0, r.stderr
+    assert json.loads(r.stdout.strip()) == {"phase": "x", "killed_pids": 3}
+
+
+def test_extract_json_line_falls_back_to_empty_object_when_nothing_parses():
+    script = _extract_json_line_snippet() + '\nPY="python3"\nextract_json_line\n'
+    r = subprocess.run(["bash", "-c", script], input="no json here\nnor here\n",
+                       capture_output=True, text=True, timeout=10)
+    assert r.returncode == 0, r.stderr
+    assert json.loads(r.stdout.strip()) == {}
+
+
+def test_orchestrator_no_longer_uses_fragile_tail_capture():
+    src = read(ERAD)
+    assert '"$out" | tail -1' not in src                # the old fragile pattern is gone
+    assert src.count("| extract_json_line") == 4       # all four run_pb call sites updated
+
+
+def test_restore_reverses_chmod_action_with_original_mode_not_blanket_rwx(tmp_path):
+    """Finding #10 ('restore permission fidelity'): 06_restore.sh must reapply the
+    ORIGINAL captured mode to a chmod-000'd file, not a blanket chmod u+rwx (which
+    would make an ordinary data file executable). Full round-trip against the REAL
+    script: journal a chmod action with an unusual original mode (640), simulate the
+    post-eradication chmod-000 state, run 06_restore.sh, and confirm the exact
+    original mode -- not a default/blanket one -- comes back."""
+    target = tmp_path / "data_file.txt"
+    target.write_bytes(b"not an executable, just data\n")
+    orig_mode = "640"
+    sha256 = hashlib.sha256(target.read_bytes()).hexdigest()
+    # Simulate a post-eradication mode different from the original -- 0o644 rather than the
+    # real chmod-000 fallback state, since 000 blocks even the file's own owner from reading
+    # it (only root bypasses that), which would make restore's own sha256 re-verification
+    # step fail to read the file when this test doesn't run as root. The mode-fidelity claim
+    # under test (exact orig_mode comes back, not a blanket default) doesn't depend on which
+    # non-original mode the file starts at.
+    os.chmod(target, 0o644)
+
+    rollback_dir = tmp_path / "rollback"
+    rollback_dir.mkdir()
+    (rollback_dir / "test-restore-mode.jsonl").write_text(
+        json.dumps({"action": "chmod", "path": str(target),
+                    "orig_mode": orig_mode, "sha256": sha256}) + "\n"
+    )
+    env = dict(os.environ, IR_INCIDENT_ID="test-restore-mode")
+    patched_src = read(RESTORE).replace(
+        '/var/ir/rollback/${INCIDENT_ID}.jsonl', f'{rollback_dir}/${{INCIDENT_ID}}.jsonl'
+    )
+    patched = tmp_path / "06_restore_patched.sh"
+    patched.write_text(patched_src)
+
+    r = subprocess.run(["bash", str(patched)], capture_output=True, text=True,
+                       timeout=30, env=env)
+    assert r.returncode == 0, r.stderr
+    restored_mode = oct(os.stat(target).st_mode & 0o777)[2:]
+    assert restored_mode == orig_mode           # exact original mode, never a blanket u+rwx
+    assert f"restored mode {orig_mode} on {target}" in r.stdout
 
 
 # ── Cloud eradication revisions (2026-06-21 review) ──────────────────────────

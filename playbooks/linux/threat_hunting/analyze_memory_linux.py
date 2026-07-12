@@ -980,17 +980,45 @@ _YARA_HIGH_SIGNAL = ("cobalt", "beacon", "meterpreter", "mimikatz", "shellcode",
                      "empire", "rootkit", "implant", "webshell", "ransom", "backdoor")
 
 
+def _merge_yara_rows(native_rows, enriched_rows):
+    """Combine the native full-image triage rows with the per-process follow-up's attributed
+    rows: an attributed rule's native row is REPLACED by its richer, context-bearing enriched
+    version (PID/Process/Perms/Region/Path/Strings); a rule that never reproduced against any
+    live process is KEPT from the native pass, not dropped - it could be a genuinely evasive TP
+    the per-process worker simply can't re-walk via /proc (an already-exited process, a
+    rootkit hiding from /proc itself) - analyze_yara()'s attribution gate caps its severity at
+    Medium instead. Previously the native rows were replaced outright whenever ANY rule
+    attributed, which combined with unattributed rows escalating to Critical off rule-name
+    keywords alone meant a single coincidental string match anywhere in a multi-GB image could
+    surface as a false Critical (a RANSOM_*/Backdoor_*/Implant_*-named rule matching nothing
+    more specific than a bare shebang line)."""
+    attributed_rules = {str(_get(r, "Rule", "rule")) for r in (enriched_rows or [])}
+    unattributed = [r for r in (native_rows or [])
+                    if str(_get(r, "Rule", "rule")) not in attributed_rules
+                    and str(_get(r, "Rule", "rule")) not in ("", CANARY_RULE)]
+    return list(enriched_rows or []) + unattributed
+
+
 def analyze_yara(rows):
     """YARA hits (native scan OR per-process vol worker) -> findings. A rule hit in memory is a
     strong signal (malware family / tool signature). The self-test canary + known-noise rules are
     excluded. Native rows carry {Rule, Offset, Value(hex)}; the per-process worker adds PID/Process
     plus ENRICHMENT - {Perms, Region(anon|file), Path, Strings} - the FP/TP disambiguator.
 
-    Context only ESCALATES or ANNOTATES, never downgrades (no blindspots): a hit in anonymous
-    EXECUTABLE memory is injected/unbacked code -> Critical; a file-backed hit keeps its severity but
-    is annotated with the backing path (could still be a trojanised binary) so the adjudicator/analyst
-    decides; a rule that matched many processes is flagged as likely-shared-bytes (could also be a
-    library-injection campaign) - all surfaced, nothing cleared here."""
+    Nothing is ever dropped here - every hit becomes a finding - but base severity is gated on
+    ATTRIBUTION, not just the rule's own name: a hit inside a live process's memory (PID + VMA
+    context from the per-process worker) can reach Critical, either structurally (anonymous
+    EXECUTABLE memory - injected/unbacked code) or via a high-signal rule name once it's actually
+    tied to something running. An UNATTRIBUTED hit (native full-image scan only - no PID, no
+    region/perms, covers kernel memory/freed pages/page cache along with everything else) is real
+    information but caps at Medium regardless of how alarming the rule name is - a rule named
+    RANSOM_*/Backdoor_*/Implant_* matching a single generic string (a bare shebang, a common path
+    fragment) somewhere in gigabytes of undifferentiated memory is not equivalent evidence to the
+    same rule matching inside a live process. Beyond that: a file-backed hit keeps its earned
+    severity but is annotated with the backing path (could still be a trojanised binary) so the
+    adjudicator/analyst decides; a rule that matched many processes is flagged as
+    likely-shared-bytes (could also be a library-injection campaign) - all surfaced, nothing
+    cleared, only the unattributed-name-only escalation path is capped."""
     out = []
     # breadth: how many distinct PIDs each rule hit (a rule across many procs == common/shared bytes,
     # OR an LD_PRELOAD-style injection - annotate, don't clear).
@@ -1014,7 +1042,19 @@ def analyze_yara(rows):
         strings = _get(r, "Strings") or []
         where = f"PID {pid} ({proc})" if pid else (str(proc) if proc else f"offset {offset}")
         anon_exec = region == "anon" and "x" in perms
-        sev = "Critical" if (anon_exec or any(k in rule.lower() for k in _YARA_HIGH_SIGNAL)) else "High"
+        attributed = bool(pid)          # region/perms/PID only ever exist for per-process hits
+        high_signal = any(k in rule.lower() for k in _YARA_HIGH_SIGNAL)
+        if anon_exec:
+            sev = "Critical"
+        elif attributed:
+            sev = "Critical" if high_signal else "High"
+        else:
+            # Unattributed full-image hit: no PID, no region/perms, nothing tying this to an
+            # actual running process - a full-image native scan covers kernel memory, freed
+            # pages, and page cache, so a rule matching once here is real information but not
+            # the same confidence as a hit inside a live process. Never let an alarming rule
+            # NAME (e.g. RANSOM_/Backdoor_/Implant_) push this to Critical on its own.
+            sev = "Medium"
         ftype = "Injected Code (memory YARA)" if anon_exec else "YARA Memory Match"
         # context clause
         if anon_exec:
@@ -1028,6 +1068,9 @@ def analyze_yara(rows):
         else:
             loc = f"({where}, offset={offset})"
         details = f"YARA rule '{rule}' matched {loc}."
+        if not attributed:
+            details += (" UNATTRIBUTED: full-image scan only, not tied to any specific process - "
+                        "verify before treating rule name alone as significant.")
         if strings:
             details += f" Matched strings: {', '.join(str(s) for s in strings[:12])}."
         breadth = len(rule_pids.get(rule, ()))
@@ -1038,6 +1081,33 @@ def analyze_yara(rows):
             details += f" Bytes(hex): {str(snippet)[:96]}"
         out.append(_finding(sev, ftype, f"{rule} :: {where}", details,
                             "T1055 (Process Injection), T1027 (Obfuscated Files)"))
+    return out
+
+
+def _capped_pids_with_names(parsed):
+    """(pid, name) for every PID the per-process YARA worker reports as capped
+    (linux_yara.parse_worker_jsonl()'s "timeouts" list), resolved against "finished" for a
+    human-readable process name."""
+    names = {p: n for p, n, _ in parsed.get("finished", [])}
+    return [(pid, names.get(pid, "?")) for pid in parsed.get("timeouts", [])]
+
+
+def analyze_yara_coverage(capped):
+    """One Medium finding per process whose per-process YARA scan hit its time or byte budget
+    (linux_yara_worker.py's PROC_BYTE_BUDGET / per-process timeout) before finishing all its
+    VMAs. That scan is INCOMPLETE, not confirmed clean - large processes (browsers, desktop
+    shells) are exactly the ones most likely to hit these bounds, so without this, 'ran out of
+    budget, 0 hits in the part checked' is silently indistinguishable from 'fully scanned, 0
+    hits' once it reaches Memory_Findings - a real confidence gap on precisely the processes
+    worth the most scrutiny."""
+    out = []
+    for pid, name in capped or []:
+        out.append(_finding(
+            "Medium", "YARA Scan Coverage Incomplete (memory)", f"PID: {pid} ({name})",
+            "Per-process YARA scan hit its time or byte budget before finishing this "
+            "process's memory - remaining regions were never checked. Absence of a hit here "
+            "is NOT confirmation this process is clean; re-scan with a higher "
+            "--yara-proc-timeout if this PID is otherwise of interest.", "N/A"))
     return out
 
 
@@ -1481,7 +1551,7 @@ def main():
     #   native (default) = yara-python over the whole image (fast, full physical coverage, no PID)
     #   vol              = per-process worker via Volatility vmayarascan (PER-PID ATTRIBUTION,
     #                      per-process timeout, ROLLING RESUMABLE JSONL) - the proven attributed path
-    yara_dur, canary_override = 0, None
+    yara_dur, canary_override, capped_info = 0, None, []
     if yarc and not args.offline_dir:
         import linux_yara
         import time as _t
@@ -1531,11 +1601,15 @@ def main():
                     with open(jl, encoding="utf-8") as fh:
                         parsed = linux_yara.parse_worker_jsonl(fh.readlines())
                     enriched = linux_yara.worker_rows_to_yara_rows(parsed["finished"])
-                    if enriched:                       # prefer attributed+enriched over offset-only
-                        rows["yarascan.YaraScan"] = enriched
-                        canary_override = parsed["canary_hits"]
-                        print(f"[mem]   enrichment attributed {len(enriched)} match(es) across "
-                              f"{len(parsed['finished'])} proc(s).", file=sys.stderr, flush=True)
+                    merged = _merge_yara_rows(yrows, enriched)
+                    rows["yarascan.YaraScan"] = merged
+                    canary_override = parsed["canary_hits"]
+                    capped_info = _capped_pids_with_names(parsed)
+                    print(f"[mem]   enrichment attributed {len(enriched)} match(es) across "
+                          f"{len(parsed['finished'])} proc(s); {len(merged) - len(enriched)} "
+                          f"rule(s) never reproduced per-process (kept, capped at Medium); "
+                          f"{len(capped_info)} proc(s) had an incomplete scan (time/byte budget).",
+                          file=sys.stderr, flush=True)
                 except OSError:
                     pass
         else:                                       # vol: per-process worker (attributed, resumable)
@@ -1551,11 +1625,13 @@ def main():
             yrows = linux_yara.worker_rows_to_yara_rows(parsed["finished"])
             rows["yarascan.YaraScan"] = yrows
             canary_override = parsed["canary_hits"]   # per-process canary (not the native ELF row)
+            capped_info = _capped_pids_with_names(parsed)
             print(f"[mem]   YARA per-process scan finished ({yara_dur}s, "
                   f"{len(parsed['finished'])} proc(s), {len(yrows)} attributed match(es), "
                   f"{len(parsed['timeouts'])} per-proc timeout(s)).", file=sys.stderr, flush=True)
 
     findings = analyze(rows)
+    findings.extend(analyze_yara_coverage(capped_info))
 
     # YARA trust self-test + dedicated results file (parity with the Windows _yara_results JSON).
     if yarc and not args.offline_dir:

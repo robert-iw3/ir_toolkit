@@ -85,6 +85,43 @@ def test_select_rules_strict_vs_broad(tmp_path):
     assert str(tmp_path / "win.yar") not in broad                                          # windows dropped
 
 
+# ── abuse.ch exclusion: file-scan-oriented rules that are noise/unstable against memory ──
+# (mirrors the identical exclusion on the Windows side; ELF_Mirai.yar's `4 of ($arch*) and
+# uint16(0) == 0x457f` condition was confirmed live to match ordinary GTK/X11 binaries via
+# short arch-suffix substrings + "is this an ELF file" -- nothing Mirai-specific)
+def test_exclude_memory_noise_drops_abusech_paths():
+    paths = ["/rules/abusech/ELF_Mirai.yar", "/rules/abusech/sub/dir/x.yar"]
+    assert ly.exclude_memory_noise(paths) == []
+
+
+def test_exclude_memory_noise_case_insensitive_and_either_separator():
+    assert ly.exclude_memory_noise(["/rules/AbuseCH/x.yar"]) == []
+    assert ly.exclude_memory_noise(["rules\\abusech\\x.yar"]) == []
+
+
+def test_exclude_memory_noise_keeps_non_abusech_paths():
+    paths = ["/rules/elastic/Linux_Backdoor.yar", "/rules/signature-base/x.yar",
+             "/rules/not_abusech_lookalike/y.yar"]
+    assert ly.exclude_memory_noise(paths) == paths
+
+
+def test_select_rules_drops_abusech_rule_even_when_linux_classified(tmp_path):
+    """Regression: an abuse.ch rule with real Linux/ELF content (exactly ELF_Mirai.yar's shape
+    -- imports elf-adjacent signal, targets ELF) previously survived classify_rule()'s Linux
+    check and reached the compiled scan set. It must be dropped by directory, independent of
+    its content classification."""
+    abusech_dir = tmp_path / "abusech"
+    abusech_dir.mkdir()
+    noisy = abusech_dir / "ELF_Mirai.yar"
+    noisy.write_text('rule ELF_Mirai { strings: $a = "/proc/" condition: $a }')  # Linux-signal content
+    elastic_dir = tmp_path / "elastic"
+    elastic_dir.mkdir()
+    real = elastic_dir / "Linux_Backdoor.yar"
+    real.write_text('rule Linux_Backdoor { strings: $a = "/proc/" condition: $a }')
+    files = [str(noisy), str(real)]
+    assert ly.select_rules(files, include_generic=False) == [str(real)]
+
+
 @pytest.mark.skipif(not HAVE_YARA, reason="yara-python not installed")
 def test_native_scan_finds_match_and_canary(tmp_path):
     d = tmp_path / "rules"

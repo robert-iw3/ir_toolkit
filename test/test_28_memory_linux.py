@@ -321,6 +321,182 @@ def test_yara_canary_suppressed_and_trusted():
     assert m._canary_hits(rows) == 1
 
 
+# ── YARA severity attribution gate (a full-image scan has no PID/region context; an
+# alarming rule NAME alone must never reach Critical without it) ────────────────────
+def test_unattributed_high_signal_rule_capped_at_medium():
+    """The actual bug: RANSOM_/Backdoor_/Implant_-named rules matching nothing more
+    specific than a generic string (a bare shebang, a common path) anywhere in a
+    multi-GB raw image were reaching Critical purely from the rule name. No PID, no
+    region/perms -> capped at Medium regardless of the name."""
+    f = m.analyze_yara([{"Rule": "RANSOM_ESXiArgs_Ransomware_Bash_Feb23", "Offset": "0x1"}])
+    assert len(f) == 1
+    assert f[0]["Severity"] == "Medium"
+    assert "UNATTRIBUTED" in f[0]["Details"]
+
+
+def test_attributed_high_signal_rule_reaches_critical():
+    """The same rule name, but attributed to a live process (PID present, even
+    without anon-exec region context) -- real evidence, allowed to reach Critical."""
+    f = m.analyze_yara([{"Rule": "RANSOM_ESXiArgs_Ransomware_Bash_Feb23", "PID": 4242,
+                         "Process": "x", "Offset": "0x1"}])
+    assert len(f) == 1
+    assert f[0]["Severity"] == "Critical"
+    assert "UNATTRIBUTED" not in f[0]["Details"]
+
+
+def test_attributed_non_high_signal_rule_is_high():
+    f = m.analyze_yara([{"Rule": "Linux_Trojan_Gafgyt", "PID": 1337, "Process": "x",
+                         "Offset": "0x1"}])
+    assert f[0]["Severity"] == "High"
+
+
+def test_unattributed_non_high_signal_rule_is_medium_not_high():
+    """Previously EVERY non-anon-exec, non-high-signal hit defaulted to High regardless
+    of attribution -- an unattributed offset-only hit with an unremarkable rule name is
+    the weakest possible evidence class and must not outrank a properly-attributed one."""
+    f = m.analyze_yara([{"Rule": "Linux_Trojan_Gafgyt", "Offset": "0x1"}])
+    assert f[0]["Severity"] == "Medium"
+
+
+def test_anon_exec_always_critical_regardless_of_attribution_or_name():
+    f = m.analyze_yara([{"Rule": "some_boring_rule", "PID": 1, "Process": "x",
+                         "Region": "anon", "Perms": "rwx", "Offset": "0x1"}])
+    assert f[0]["Severity"] == "Critical"
+    assert f[0]["Type"] == "Injected Code (memory YARA)"
+
+
+def test_file_backed_attributed_hit_keeps_context_note():
+    f = m.analyze_yara([{"Rule": "Linux_Trojan_Gafgyt", "PID": 1, "Process": "x",
+                         "Region": "file", "Perms": "r-x", "Path": "/usr/lib/libfoo.so",
+                         "Offset": "0x1"}])
+    assert f[0]["Severity"] == "High"
+    assert "libfoo.so" in f[0]["Details"]
+    assert "UNATTRIBUTED" not in f[0]["Details"]
+
+
+# ── _merge_yara_rows: native full-image rows + per-process follow-up attribution ────
+def test_merge_replaces_attributed_rule_with_enriched_version():
+    native = [{"Rule": "Cobalt_Strike_Beacon", "Offset": "0x1", "Value": "aabb"}]
+    enriched = [{"Rule": "Cobalt_Strike_Beacon", "PID": 99, "Process": "x",
+                "Region": "anon", "Perms": "rwx", "Offset": "0x1"}]
+    merged = m._merge_yara_rows(native, enriched)
+    assert len(merged) == 1                      # not duplicated
+    assert merged[0].get("PID") == 99             # the richer, attributed version won
+
+
+def test_merge_keeps_unattributed_rule_not_dropped():
+    """The core regression this fix targets: a rule that never reproduced against any
+    live process must still surface (analyze_yara() caps its severity), not vanish."""
+    native = [{"Rule": "Cobalt_Strike_Beacon", "Offset": "0x1"},
+             {"Rule": "RANSOM_ESXiArgs_Ransomware_Bash_Feb23", "Offset": "0x2"}]
+    enriched = [{"Rule": "Cobalt_Strike_Beacon", "PID": 99, "Process": "x",
+                "Region": "anon", "Perms": "rwx", "Offset": "0x1"}]
+    merged = m._merge_yara_rows(native, enriched)
+    rules = {r.get("Rule") for r in merged}
+    assert rules == {"Cobalt_Strike_Beacon", "RANSOM_ESXiArgs_Ransomware_Bash_Feb23"}
+
+
+def test_merge_with_zero_attributed_hits_keeps_every_native_row():
+    """The exact real-world scenario that motivated this fix: the per-process
+    follow-up ran and attributed NOTHING (every native hit was full-image noise).
+    Previously this left `rows["yarascan.YaraScan"]` as the raw, unfiltered native
+    set with no attribution gate applied anywhere downstream."""
+    native = [{"Rule": f"rule_{i}", "Offset": hex(i)} for i in range(50)]
+    merged = m._merge_yara_rows(native, [])
+    assert len(merged) == 50
+
+
+def test_merge_excludes_canary_and_blank_rule_names_from_carryover():
+    native = [{"Rule": "IRToolkit_Canary_ELF", "Offset": "0x1"},
+             {"Rule": "", "Offset": "0x2"},
+             {"Rule": "real_rule", "Offset": "0x3"}]
+    merged = m._merge_yara_rows(native, [])
+    assert {r.get("Rule") for r in merged} == {"real_rule"}
+
+
+def test_merge_handles_empty_native_and_empty_enriched():
+    assert m._merge_yara_rows([], []) == []
+    assert m._merge_yara_rows(None, None) == []
+
+
+# ── End-to-end: merge -> analyze_yara, the real pipeline shape ──────────────────────
+def test_zero_attribution_run_surfaces_findings_capped_at_medium_not_critical():
+    """Full flow for a clean host where nothing reproduces per-process: every hit
+    still becomes a finding (nothing silently dropped), but a RANSOM_/Backdoor_/
+    Implant_-named rule can no longer reach Critical purely from its own name."""
+    native = [
+        {"Rule": "RANSOM_ESXiArgs_Ransomware_Bash_Feb23", "Offset": "0x1", "Value": "23212f"},
+        {"Rule": "ELF_Implant_COATHANGER_Feb2024", "Offset": "0x2", "Value": "2f657463"},
+        {"Rule": "IRToolkit_Canary_ELF", "Offset": "0x3"},
+    ]
+    merged = m._merge_yara_rows(native, [])
+    findings = m.analyze_yara(merged)
+    assert len(findings) == 2                     # canary excluded, nothing else dropped
+    assert all(f["Severity"] == "Medium" for f in findings)
+    assert not any(f["Severity"] == "Critical" for f in findings)
+
+
+def test_partial_attribution_run_mixes_severities_correctly():
+    native = [
+        {"Rule": "RANSOM_ESXiArgs_Ransomware_Bash_Feb23", "Offset": "0x1"},   # noise, never attributes
+        {"Rule": "Cobalt_Strike_Beacon", "Offset": "0x2"},                    # DOES attribute below
+    ]
+    enriched = [{"Rule": "Cobalt_Strike_Beacon", "PID": 4242, "Process": "evil",
+                "Region": "anon", "Perms": "rwx", "Offset": "0x2"}]
+    findings = m.analyze_yara(m._merge_yara_rows(native, enriched))
+    sev = {f["Severity"] for f in findings}
+    assert sev == {"Medium", "Critical"}
+    critical = next(f for f in findings if f["Severity"] == "Critical")
+    assert "4242" in critical["Target"]
+
+
+# ── YARA scan coverage gap: a per-process scan that hit its time/byte budget stopped
+# early -- "0 hits in the part checked" must not look identical to "fully scanned, clean" ──
+def test_capped_pids_with_names_resolves_from_finished():
+    parsed = {
+        "finished": [("100", "gnome-shell", []), ("200", "firefox-bin", [{"rule": "x"}])],
+        "timeouts": ["100", "200"],
+    }
+    assert m._capped_pids_with_names(parsed) == [("100", "gnome-shell"), ("200", "firefox-bin")]
+
+
+def test_capped_pids_with_names_unknown_pid_falls_back_to_placeholder():
+    parsed = {"finished": [], "timeouts": ["999"]}
+    assert m._capped_pids_with_names(parsed) == [("999", "?")]
+
+
+def test_capped_pids_with_names_empty_when_nothing_timed_out():
+    parsed = {"finished": [("100", "sshd", [])], "timeouts": []}
+    assert m._capped_pids_with_names(parsed) == []
+
+
+def test_analyze_yara_coverage_emits_medium_finding_per_capped_pid():
+    findings = m.analyze_yara_coverage([("100", "gnome-shell"), ("200", "firefox-bin")])
+    assert len(findings) == 2
+    assert all(f["Type"] == "YARA Scan Coverage Incomplete (memory)" for f in findings)
+    assert all(f["Severity"] == "Medium" for f in findings)
+    assert "PID: 100 (gnome-shell)" == findings[0]["Target"]
+    assert "incomplete" in findings[0]["Details"].lower() or "budget" in findings[0]["Details"].lower()
+
+
+def test_analyze_yara_coverage_empty_or_none_input_yields_no_findings():
+    assert m.analyze_yara_coverage([]) == []
+    assert m.analyze_yara_coverage(None) == []
+
+
+def test_capped_process_with_zero_hits_still_surfaces_a_finding():
+    """The actual bug: a process that timed out with 0 rule hits in the portion checked must
+    NOT be indistinguishable from a fully-scanned clean process -- it needs its own finding.
+    This process contributes no rows to analyze_yara() at all (no rule ever matched it), so
+    analyze_yara_coverage() is the ONLY thing that can surface the "incomplete" fact."""
+    parsed = {"finished": [("3775", "gnome-shell", [])], "timeouts": ["3775"]}
+    yara_findings = m.analyze_yara([])                 # no rule matched -> nothing to report here
+    coverage_findings = m.analyze_yara_coverage(m._capped_pids_with_names(parsed))
+    assert yara_findings == []
+    assert len(coverage_findings) == 1                 # but the incomplete-coverage fact IS surfaced
+    assert "3775" in coverage_findings[0]["Target"]
+
+
 def test_decompress_passthrough_for_plain_image():
     assert m.decompress_if_needed("mem.raw") == "mem.raw"
     assert m.decompress_if_needed("mem.lime") == "mem.lime"
